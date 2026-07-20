@@ -1,0 +1,44 @@
+Packsheet — a free, open gear tracker and pack builder for hikers
+Copyright (C) 2026 Queensway Studios Limited
+
+Queensway Studios Limited is a société à responsabilité limitée (SARL) registered
+in France. "Limited" is part of the registered company name — it does not indicate
+an England and Wales company, and the name should not be shortened or "corrected"
+to a different legal form.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. The full text is in LICENSE.
+
+Contributions from people outside Queensway Studios Limited remain the copyright
+of their authors, licensed to the project under the same AGPL-3.0 terms. There is
+no copyright assignment and no CLA.
+
+AGPL was chosen deliberately over a permissive licence. Packsheet is a hosted
+web application, and section 13 means anyone who runs a modified copy as a
+network service must offer its source to their users. In a category where a
+competitor was reskinned into an affiliate funnel, that is the point.
+
+
+================================================================================
+FONTS ARE NOT COVERED BY THE AGPL
+================================================================================
+
+The four .woff2 files in src/assets/fonts/ are licensed under the SIL Open Font
+License 1.1, NOT the AGPL. This is not a courtesy — OFL 1.1 condition 5 requires
+that the Font Software "must be distributed entirely under this license, and
+must not be distributed under any other license", so relicensing them under the
+AGPL is not permitted.
+
+  Bricolage Grotesque   Copyright 2022 The Bricolage Grotesque Project Authors
+                        https://github.com/ateliertriay/bricolage
+  Hanken Grotesk        Copyright 2021 The Hanken Grotesk Project Authors
+                        https://github.com/marcologous/hanken-grotesk
+  IBM Plex Mono         Copyright 2017 IBM Corp.
+
+Full licence texts: src/assets/fonts/licenses/
+Provenance and subsetting notes: src/assets/fonts/README.md
+
+None of the three declares a Reserved Font Name, so the latin-subset versions
+shipped here may keep their original family names.

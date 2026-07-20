@@ -1,0 +1,52 @@
+---
+import '../styles/global.css';
+// Imported rather than hardcoded: Vite fingerprints the filename at build time,
+// so a literal /_astro/... path would 404 in production.
+import hankenGroteskUrl from '../assets/fonts/hanken-grotesk-latin-var.woff2?url';
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!--
+      Preload the body face only. Preloading all four would have them compete for
+      bandwidth with the HTML on first paint; Hanken is the one that renders the
+      most pixels above the fold.
+    -->
+    <link rel="preload" href={hankenGroteskUrl} as="font" type="font/woff2" crossorigin />
+
+    <!--
+      Set the theme before first paint so a dark-mode user never sees a flash of
+      warm paper. Inline and synchronous by necessity — a deferred script runs too
+      late to prevent the flash.
+    -->
+    <script is:inline>
+      (function () {
+        try {
+          const stored = localStorage.getItem('packsheet-theme');
+          if (stored === 'light' || stored === 'dark') {
+            document.documentElement.setAttribute('data-theme', stored);
+          }
+        } catch {
+          /* Private mode blocks localStorage; the CSS media query still applies. */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

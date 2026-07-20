@@ -1,0 +1,153 @@
+/*
+ * Treeline design tokens.
+ *
+ * Ported verbatim from the Treeline palette page. Do not invent values here —
+ * if a colour is needed that does not exist below, it belongs on the palette
+ * page first.
+ *
+ * Two standing rules the rest of the codebase depends on:
+ *   1. Blue only ever marks something interactive, or a base weight. It is never
+ *      decorative. If it is blue, it can be clicked or it is base weight.
+ *   2. Nothing casts a shadow at rest. Elevation is expressed with --surface,
+ *      --sunk and --hairline. Shadows are reserved for transient overlays.
+ *
+ * Light is the default. Dark is opt-in via :root[data-theme="dark"] and also
+ * tracks the OS preference, with the explicit attribute always winning so the
+ * in-app toggle can override the system in both directions.
+ */
+
+:root {
+  /* Typefaces */
+  --font-display: 'Bricolage Grotesque', sans-serif;
+  --font-body: 'Hanken Grotesk', -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* Radius scale */
+  --r-sm: 8px;
+  --r: 12px;
+  --r-lg: 18px;
+
+  /* Ground and structure */
+  --paper: #f7f4ee;
+  --surface: #ffffff;
+  --sunk: #efeae1;
+  --hairline: #e3dcd0;
+  --rule: #d2c8b8;
+
+  /* Text */
+  --ink: #1c1917;
+  --ink-2: #6b6259;
+  --ink-3: #766c60;
+
+  /* Blue — interactive and base weight only */
+  --blue: #0070d4;
+  --blue-deep: #005aab;
+  --blue-ink: #003d73;
+  --blue-tint: #e4f0fc;
+
+  /* Earth tones */
+  --bark: #4a3728;
+  --trail: #8a6a4b;
+  --clay: #a97155;
+  --clay-ink: #8e5b42;
+  --wheat: #c9a87c;
+  --moss: #3d7a52;
+  --ochre: #b5822e;
+  --ochre-ink: #8a6118;
+  --rust: #b24a3c;
+  --worn-ink: #6e5c90;
+
+  /*
+   * Weight classes — base / worn / consumable.
+   *
+   * --w-base and --w-cons are expressed as references rather than literals. In the
+   * palette they are byte-identical to --blue (#0070D4) and --ochre (#B5822E), so
+   * this changes nothing in light mode, but it means they follow the theme instead
+   * of staying stuck on their light values in dark mode. Without this, a base-weight
+   * figure renders light-mode blue on a dark ground at 3.12:1 and fails WCAG AA.
+   *
+   * --w-worn has no equivalent in the palette (#7A6A9B matches neither --worn-ink
+   * #6E5C90 nor anything else), so it stays literal and is still wrong in dark mode.
+   * Picking its dark value is a design decision for the Treeline page, not this file.
+   */
+  --w-base: var(--blue);
+  --w-worn: #7a6a9b;
+  --w-cons: var(--ochre);
+
+  /* Gear categories */
+  --c-shelter: #4a6fa5;
+  --c-sleep: #7a6a9b;
+  --c-pack: #8a6a4b;
+  --c-cooking: #b5822e;
+  --c-clothing: #5c8a72;
+  --c-water: #3e8a9b;
+  --c-electronics: #4f5d6b;
+  --c-food: #a9694f;
+  --c-safety: #b24a3c;
+  --c-misc: #8c8578;
+}
+
+/*
+ * Dark theme. Deliberately duplicated across the two selectors below rather than
+ * combined: :root:not([data-theme='light']) inside the media query lets an explicit
+ * light choice override a dark OS preference, and :root[data-theme='dark'] lets an
+ * explicit dark choice win on a light OS. A single combined selector cannot do both.
+ */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --paper: #17130f;
+    --surface: #211c17;
+    --sunk: #2a241d;
+    --hairline: #372f27;
+    --rule: #453b31;
+
+    --ink: #f2ede4;
+    --ink-2: #b3a899;
+    --ink-3: #8e8376;
+
+    --blue: #4da3f0;
+    --blue-deep: #7fbef7;
+    --blue-ink: #bedcfa;
+    --blue-tint: #12304c;
+
+    --bark: #2a2119;
+    --trail: #b08a66;
+    --clay: #c78e6e;
+    --clay-ink: #dbab90;
+    --wheat: #d9be97;
+    --moss: #5fa277;
+    --ochre: #d4a353;
+    --ochre-ink: #e0bc7e;
+    --rust: #d97463;
+    --worn-ink: #a794c6;
+  }
+}
+
+:root[data-theme='dark'] {
+  --paper: #17130f;
+  --surface: #211c17;
+  --sunk: #2a241d;
+  --hairline: #372f27;
+  --rule: #453b31;
+
+  --ink: #f2ede4;
+  --ink-2: #b3a899;
+  --ink-3: #8e8376;
+
+  --blue: #4da3f0;
+  --blue-deep: #7fbef7;
+  --blue-ink: #bedcfa;
+  --blue-tint: #12304c;
+
+  --bark: #2a2119;
+  --trail: #b08a66;
+  --clay: #c78e6e;
+  --clay-ink: #dbab90;
+  --wheat: #d9be97;
+  --moss: #5fa277;
+  --ochre: #d4a353;
+  --ochre-ink: #e0bc7e;
+  --rust: #d97463;
+  --worn-ink: #a794c6;
+}
