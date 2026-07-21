@@ -12,9 +12,13 @@ interface Props {
 const { title, description } = Astro.props;
 
 // Astro.site is the configured production origin (astro.config.mjs); Astro.url is
-// this request's path. Composing them here, rather than hardcoding a domain, means
-// this keeps working unchanged once PS-39 binds packsheet.io and once any page
-// beyond index.astro exists.
+// this page's full URL, of which only the pathname is wanted here. Composing the two,
+// rather than hardcoding a domain, means this keeps working unchanged once PS-39
+// binds packsheet.io and once any page beyond index.astro exists.
+//
+// Comments below the fence are braced rather than HTML comments: an HTML comment is
+// emitted to every visitor, a braced one is build-time only. Internal reasoning does
+// not belong in the shipped page.
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 ---
 
@@ -34,27 +38,33 @@ const canonicalURL = new URL(Astro.url.pathname, Astro.site);
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonicalURL} />
 
-    <!--
+    {
+      /*
       summary, not summary_large_image: there is deliberately no og:image yet (a
       follow-up ticket adds one). summary_large_image with no image renders as a
       broken card in link previews; summary degrades to a text-only card instead.
-    -->
+    */
+    }
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
 
-    <!--
+    {
+      /*
       Preload the body face only. Preloading all four would have them compete for
       bandwidth with the HTML on first paint; Hanken is the one that renders the
       most pixels above the fold.
-    -->
+    */
+    }
     <link rel="preload" href={hankenGroteskUrl} as="font" type="font/woff2" crossorigin />
 
-    <!--
+    {
+      /*
       Set the theme before first paint so a dark-mode user never sees a flash of
       warm paper. Inline and synchronous by necessity — a deferred script runs too
       late to prevent the flash.
-    -->
+    */
+    }
     <script is:inline>
       (function () {
         try {

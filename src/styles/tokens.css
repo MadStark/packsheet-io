@@ -66,7 +66,8 @@
    * of staying stuck on their light values in dark mode. Without this, a base-weight
    * figure renders light-mode blue on a dark ground at 3.12:1 and fails WCAG AA.
    *
-   * --w-worn cannot use the same trick. Its #7A6A9B is not --worn-ink (#6E5C90); the
+   * --w-worn can only use the same trick in dark mode. Its #7A6A9B is not the light
+   * --worn-ink (#6E5C90); the
    * only exact match in the palette is --c-sleep, and the categories are fill-only
    * with no dark cuts of their own, so referencing one would inherit the same gap
    * this is meant to close. The light value therefore stays the literal PS-4 left it
