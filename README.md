@@ -49,13 +49,21 @@ free of an auth check is both a performance and a hosting-cost decision.
 
 ## Development
 
-Requires Node 22.12 or newer.
+Requires **Node 22** — the version is pinned in `.nvmrc`, and CI and both deploy
+workflows read that same file, so there is one place to change it and nothing can drift
+out of step. If you use `nvm`, `fnm`, `mise` or `asdf`, it is picked up automatically:
 
 ```bash
+nvm use          # or: fnm use / mise install
 npm install
 cp .env.example .env
 npm run dev      # http://localhost:4321
 ```
+
+Node 22 is the current LTS line and is what builds every artifact that reaches staging
+and production. Running a different major will still work for most things, and npm will
+warn rather than stop you — but a build that only fails on 22 is a build that only fails
+in CI, which is the slowest place to find out.
 
 Other scripts:
 

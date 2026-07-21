@@ -15,11 +15,13 @@ a deliberate constraint, not an oversight.
 
 ## Getting set up
 
-Requires Node 22.12 or newer.
+Requires **Node 22**, pinned in `.nvmrc`. CI and both deploy workflows read that same
+file, so local, staging and production all build on one version.
 
 ```bash
 git clone git@github.com:MadStark/packsheet-io.git
 cd packsheet-io
+nvm use          # or: fnm use / mise install
 npm install
 cp .env.example .env
 npm run dev
