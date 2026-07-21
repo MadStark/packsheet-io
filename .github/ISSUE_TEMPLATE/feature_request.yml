@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest something Packsheet should do
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Packsheet is deliberately small. The most useful requests describe a problem you
+        actually hit while packing, rather than a feature in the abstract — that leaves
+        room to solve it in a way that fits the rest of the tool.
+
+        Worth knowing up front: some things are permanently off the table. No ads, no paid
+        tiers, and no affiliate link rewriting. Requests that depend on any of those will
+        be closed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not the solution.
+      placeholder: >
+        When I swap my quilt between two trips I have to update the weight in both lists
+        separately, and they drift out of sync.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: If you have a specific idea, describe it here. It is fine to leave blank.
+    validations:
+      required: false
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you handle this today?
+      description: >
+        Including a spreadsheet, another tool, or simply doing without. This is genuinely
+        useful for judging how much the problem costs you.
+    validations:
+      required: false

@@ -1,0 +1,64 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        If this is a **security** problem, please close this and use GitHub's private
+        vulnerability reporting instead, or email `admin@queenswaystudios.com`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect to happen, and what happened instead?
+      placeholder: I expected my base weight to exclude worn items, but it included them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The more precise, the faster this gets fixed.
+      placeholder: |
+        1. Open a pack list
+        2. Mark an item as worn
+        3. Look at the base weight total
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Link to the affected pack or page
+      description: Only if it is a public share link and you are happy to include it.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser
+      options:
+        - Chrome
+        - Firefox
+        - Safari
+        - Edge
+        - Mobile Safari (iOS)
+        - Chrome (Android)
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console errors
+      description: Any red errors in the browser console. Paste as text, not a screenshot.
+      render: text
+    validations:
+      required: false
