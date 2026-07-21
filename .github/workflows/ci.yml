@@ -1,0 +1,38 @@
+name: CI
+
+# Runs on every pull request, and on direct pushes to the two long-lived branches.
+# The `check` job is registered as a required status check on both branches, so its
+# name is load-bearing — renaming the job breaks branch protection silently, and PRs
+# will sit waiting for a check that can never report.
+
+on:
+  pull_request:
+  push:
+    branches: [main, staging]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` not `npm install` — it installs exactly the lockfile and fails if
+      # package.json and the lockfile have drifted, which is the behaviour we want here.
+      - run: npm ci
+
+      # astro check + tsc --noEmit + eslint + prettier --check.
+      # There is no test runner yet; when one lands it goes in this job.
+      - run: npm run check

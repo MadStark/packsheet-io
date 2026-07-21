@@ -36,12 +36,16 @@ only thing failing.
 
 ## Branches
 
-- `main` is production. It is protected — changes arrive by pull request, never by direct
-  push.
-- `staging` is a long-lived pre-production branch.
+- **`staging` is the integration branch.** It holds the latest in-progress work, and it is
+  where your pull request should go.
+- **`main` is production.** It is protected, and is only ever fast-forwarded from `staging`
+  by pull request. A push to `main` deploys to the live site.
 
-Branch from `main` for your work and target `main` in the pull request unless the issue
-says otherwise.
+So: branch from `staging`, and target `staging` in your pull request. Opening a PR builds
+an ephemeral preview environment and comments the URL on the PR; closing or merging the PR
+tears it down.
+
+Both branches require their CI check to pass before merging.
 
 ## Design constraints worth knowing
 

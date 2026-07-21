@@ -1,0 +1,48 @@
+name: Deploy staging
+
+# staging is the integration branch and always holds the latest in-progress work.
+# Staging is the Free-tier Static Web App.
+
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.packsheet.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        # Deliberately not "production", so robots.txt emits Disallow: / and staging
+        # never competes with production in search results.
+        env:
+          PUBLIC_SITE_ENV: staging
+        run: npm run build
+
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_DEPLOYMENT_TOKEN_STAGING }}
+          action: upload
+          app_location: dist
+          skip_app_build: true
+          skip_api_build: true

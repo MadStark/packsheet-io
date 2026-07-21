@@ -1,0 +1,53 @@
+name: Deploy production
+
+# main is only ever fast-forwarded from staging via pull request, so a push here
+# means a release. Production is the Standard-tier Static Web App.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    # Scopes the deployment token to this environment rather than the whole repo,
+    # so a workflow running from a fork or a feature branch cannot reach it.
+    environment:
+      name: production
+      url: https://packsheet.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        # PUBLIC_SITE_ENV drives robots.txt. Only the literal string "production"
+        # produces an indexable site — see src/pages/robots.txt.ts.
+        env:
+          PUBLIC_SITE_ENV: production
+        run: npm run build
+
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_DEPLOYMENT_TOKEN_PROD }}
+          action: upload
+          app_location: dist
+          # We build above with a pinned Node version rather than letting Oryx do it,
+          # so the deploy step only uploads. Oryx would otherwise re-run its own build
+          # on an unpinned toolchain, which can differ from what CI just verified.
+          skip_app_build: true
+          skip_api_build: true
