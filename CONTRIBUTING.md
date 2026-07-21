@@ -21,8 +21,12 @@ Requires Node 22.12 or newer.
 git clone git@github.com:MadStark/packsheet-io.git
 cd packsheet-io
 npm install
+cp .env.example .env
 npm run dev
 ```
+
+`.env.example` documents the only environment variable the app reads,
+`PUBLIC_SITE_ENV`. You do not need to change it for normal work.
 
 ## Before you open a pull request
 
@@ -36,10 +40,18 @@ only thing failing.
 
 ## Branches
 
+Work travels in one direction: **local → staging → live.**
+
 - **`staging` is the integration branch.** It holds the latest in-progress work, and it is
   where your pull request should go.
 - **`main` is production.** It is protected, and is only ever fast-forwarded from `staging`
   by pull request. A push to `main` deploys to the live site.
+
+Feature branches may be squashed when they merge into `staging`. The `staging` → `main`
+promotion must **not** rewrite commits — a rebase or squash there re-creates the same
+change under a new SHA, the branches diverge, and every subsequent release fails with a
+spurious `add/add` conflict that looks like a content problem but is a history one. This
+has happened once already; see the notes on PS-6.
 
 So: branch from `staging`, and target `staging` in your pull request. Opening a PR builds
 an ephemeral preview environment and comments the URL on the PR; closing or merging the PR

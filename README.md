@@ -53,6 +53,7 @@ Requires Node 22.12 or newer.
 
 ```bash
 npm install
+cp .env.example .env
 npm run dev      # http://localhost:4321
 ```
 
@@ -66,6 +67,27 @@ npm run format   # apply prettier
 ```
 
 `npm run check` is what CI enforces. Run it before opening a pull request.
+
+### Reproducing staging and production locally
+
+Changes travel **local → staging → live**, and the local stage can impersonate either of
+the other two. There is exactly one environment-dependent behaviour in the codebase —
+`PUBLIC_SITE_ENV`, which decides whether the site is indexable:
+
+```bash
+npm run build             # local: robots.txt disallows everything
+npm run build:staging     # what staging serves (also disallowed)
+npm run build:production  # what production serves: Allow + Sitemap
+npm run preview:production # build as production, then serve it
+```
+
+Anything other than the literal string `production` yields `Disallow: /`, so staging,
+previews, local builds, and any environment nobody has invented yet are all non-indexable
+by default rather than by remembering to add a rule. See `src/pages/robots.txt.ts`.
+
+If you change anything touching `robots.txt`, the sitemap, or canonical URLs, build both
+ways and diff the output before opening a pull request — this is the one difference between
+the deployed environments, and CI does not yet assert it.
 
 ## Design system
 
