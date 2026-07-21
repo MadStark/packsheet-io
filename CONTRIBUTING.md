@@ -46,14 +46,22 @@ Work travels in one direction: **local → staging → live.**
 
 - **`staging` is the integration branch.** It holds the latest in-progress work, and it is
   where your pull request should go.
-- **`main` is production.** It is protected, and is only ever fast-forwarded from `staging`
-  by pull request. A push to `main` deploys to the live site.
+- **`main` is production.** It is protected, and is only ever updated by merging `staging`
+  through a pull request. A push to `main` deploys to the live site.
 
-Feature branches may be squashed when they merge into `staging`. The `staging` → `main`
-promotion must **not** rewrite commits — a rebase or squash there re-creates the same
-change under a new SHA, the branches diverge, and every subsequent release fails with a
-spurious `add/add` conflict that looks like a content problem but is a history one. This
-has happened once already; see the notes on PS-6.
+Feature branches are squashed when they merge into `staging` — that is where the readable,
+one-commit-per-change history lives.
+
+The `staging` → `main` promotion is different: it uses a **merge commit**, and must never
+be squashed or rebased. Both of those rewrite commits, re-creating a change that already
+exists on `staging` under a new SHA. The branches then diverge, and every subsequent
+release fails with a spurious `add/add` conflict that looks like a content problem but is
+a history one. This happened once, during the PS-7 release, and cost a force-push to
+unpick.
+
+This is also why linear history is deliberately **not** required on `main`: requiring it
+would leave only the two rewriting strategies and guarantee the fault comes back. To read
+`main` as a release log, use `git log main --first-parent` — one entry per release.
 
 So: branch from `staging`, and target `staging` in your pull request. Opening a PR builds
 an ephemeral preview environment and comments the URL on the PR; closing or merging the PR
