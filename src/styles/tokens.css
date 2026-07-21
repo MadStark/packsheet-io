@@ -66,15 +66,27 @@
    * of staying stuck on their light values in dark mode. Without this, a base-weight
    * figure renders light-mode blue on a dark ground at 3.12:1 and fails WCAG AA.
    *
-   * --w-worn has no equivalent in the palette (#7A6A9B matches neither --worn-ink
-   * #6E5C90 nor anything else), so it stays literal and is still wrong in dark mode.
-   * Picking its dark value is a design decision for the Treeline page, not this file.
+   * --w-worn cannot use the same trick. Its #7A6A9B is not --worn-ink (#6E5C90); the
+   * only exact match in the palette is --c-sleep, and the categories are fill-only
+   * with no dark cuts of their own, so referencing one would inherit the same gap
+   * this is meant to close. The light value therefore stays the literal PS-4 left it
+   * as, and dark mode alone follows --worn-ink: #A794C6 is 5.62:1 on dark --sunk
+   * #2A241D and 6.19:1 on dark --surface #211C17, both AA passes, against the old
+   * literal's 3.19:1 fail. Light is untouched, which was the whole objection to
+   * mapping --w-worn to --worn-ink outright.
    */
   --w-base: var(--blue);
   --w-worn: #7a6a9b;
   --w-cons: var(--ochre);
 
-  /* Gear categories */
+  /*
+   * Gear categories are fill-only: dots, bars and swatches, where WCAG imposes no
+   * contrast requirement, and none of them has a dark cut. As text on dark --surface
+   * #211c17, only --c-misc (4.62:1) and --c-cooking (4.99:1) clear AA; the other
+   * eight range from 2.50:1 (--c-electronics) to 4.29:1 (--c-clothing). Do not render
+   * a category name in its own colour on a dark ground until dark cuts exist here —
+   * PS-16's public share page is expected to be the first design that wants to.
+   */
   --c-shelter: #4a6fa5;
   --c-sleep: #7a6a9b;
   --c-pack: #8a6a4b;
@@ -121,6 +133,8 @@
     --ochre-ink: #e0bc7e;
     --rust: #d97463;
     --worn-ink: #a794c6;
+
+    --w-worn: var(--worn-ink);
   }
 }
 
@@ -150,4 +164,6 @@
   --ochre-ink: #e0bc7e;
   --rust: #d97463;
   --worn-ink: #a794c6;
+
+  --w-worn: var(--worn-ink);
 }

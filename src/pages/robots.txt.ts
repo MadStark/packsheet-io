@@ -13,18 +13,22 @@ import type { APIRoute } from 'astro';
 
 const isProduction = import.meta.env.PUBLIC_SITE_ENV === 'production';
 
-// No Sitemap: line yet — there is no sitemap to point at, and advertising a URL that
-// 404s is worse than omitting it. Add it alongside @astrojs/sitemap.
-const productionRobots = `User-agent: *
-Allow: /
-`;
-
+// The Sitemap: line only belongs in the production output — advertising a sitemap
+// from a page that also says Disallow: / is incoherent, so it must never appear in
+// nonProductionRobots below.
 const nonProductionRobots = `# Not the production site — do not index.
 User-agent: *
 Disallow: /
 `;
 
-export const GET: APIRoute = () =>
-  new Response(isProduction ? productionRobots : nonProductionRobots, {
+export const GET: APIRoute = ({ site }) => {
+  const productionRobots = `User-agent: *
+Allow: /
+
+Sitemap: ${new URL('sitemap-index.xml', site)}
+`;
+
+  return new Response(isProduction ? productionRobots : nonProductionRobots, {
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
   });
+};
