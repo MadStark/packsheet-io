@@ -1,0 +1,67 @@
+name: PR preview
+
+# Ephemeral preview environments, created against the STAGING Static Web App so a
+# pull request can never touch production infrastructure.
+#
+# Capacity note: staging is on the Free plan, which allows 3 preview environments
+# per app (Standard allows 10). A fourth concurrent PR will fail to get a preview.
+# If that becomes a real constraint, move staging to Standard in the Azure portal.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  group: pr-preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # so the action can comment the preview URL on the PR
+
+jobs:
+  build_and_deploy:
+    name: build and deploy preview
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        # Previews are never indexable. Anything that is not literally "production"
+        # yields Disallow: / — so previews are covered by the default, not by a rule
+        # that has to be remembered here.
+        env:
+          PUBLIC_SITE_ENV: preview
+        run: npm run build
+
+      - name: Deploy preview
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_DEPLOYMENT_TOKEN_STAGING }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: upload
+          app_location: dist
+          skip_app_build: true
+          skip_api_build: true
+
+  close_preview:
+    name: tear down preview
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout or build: closing only needs the token and the PR number.
+      # Runs whether the PR was merged or abandoned, so previews cannot leak and
+      # quietly consume the Free plan's 3 slots.
+      - name: Close preview environment
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_DEPLOYMENT_TOKEN_STAGING }}
+          action: close
