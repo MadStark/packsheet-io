@@ -15,14 +15,20 @@ a deliberate constraint, not an oversight.
 
 ## Getting set up
 
-Requires Node 22.12 or newer.
+Requires **Node 22**, pinned in `.nvmrc`. CI and both deploy workflows read that same
+file, so local, staging and production all build on one version.
 
 ```bash
 git clone git@github.com:MadStark/packsheet-io.git
 cd packsheet-io
+nvm use          # or: fnm use / mise install
 npm install
+cp .env.example .env
 npm run dev
 ```
+
+`.env.example` documents the only environment variable the app reads,
+`PUBLIC_SITE_ENV`. You do not need to change it for normal work.
 
 ## Before you open a pull request
 
@@ -36,10 +42,26 @@ only thing failing.
 
 ## Branches
 
+Work travels in one direction: **local → staging → live.**
+
 - **`staging` is the integration branch.** It holds the latest in-progress work, and it is
   where your pull request should go.
-- **`main` is production.** It is protected, and is only ever fast-forwarded from `staging`
-  by pull request. A push to `main` deploys to the live site.
+- **`main` is production.** It is protected, and is only ever updated by merging `staging`
+  through a pull request. A push to `main` deploys to the live site.
+
+Feature branches are squashed when they merge into `staging` — that is where the readable,
+one-commit-per-change history lives.
+
+The `staging` → `main` promotion is different: it uses a **merge commit**, and must never
+be squashed or rebased. Both of those rewrite commits, re-creating a change that already
+exists on `staging` under a new SHA. The branches then diverge, and every subsequent
+release fails with a spurious `add/add` conflict that looks like a content problem but is
+a history one. This happened once, during the PS-7 release, and cost a force-push to
+unpick.
+
+This is also why linear history is deliberately **not** required on `main`: requiring it
+would leave only the two rewriting strategies and guarantee the fault comes back. To read
+`main` as a release log, use `git log main --first-parent` — one entry per release.
 
 So: branch from `staging`, and target `staging` in your pull request. Opening a PR builds
 an ephemeral preview environment and comments the URL on the PR; closing or merging the PR

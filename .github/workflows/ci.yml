@@ -24,9 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Read from .nvmrc rather than pinned inline, so CI and a contributor's local
+      # runtime cannot drift apart silently — there is one place to change the Node
+      # version, and every workflow follows it. The same applies to the three deploy
+      # workflows, which build the artifacts that actually ship.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       # `npm ci` not `npm install` — it installs exactly the lockfile and fails if

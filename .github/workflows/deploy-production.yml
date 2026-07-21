@@ -1,7 +1,14 @@
 name: Deploy production
 
-# main is only ever fast-forwarded from staging via pull request, so a push here
+# main is only ever updated by merging staging through a pull request, so a push here
 # means a release. Production is the Standard-tier Static Web App.
+#
+# That promotion uses a merge commit, deliberately. GitHub's other two strategies both
+# rewrite commits, which re-creates the change under a new SHA; the branches then
+# diverge and the next release fails with an add/add conflict that looks like a content
+# problem but is a history one. This happened once, during the PS-7 release. Linear
+# history is therefore NOT required on main — it would leave only the two rewriting
+# strategies and guarantee the fault returns.
 
 on:
   push:
@@ -28,7 +35,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - run: npm ci

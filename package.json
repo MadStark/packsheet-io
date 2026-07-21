@@ -9,12 +9,15 @@
     "url": "git+https://github.com/MadStark/packsheet-io.git"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.12.0 <23"
   },
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
+    "build:production": "cross-env PUBLIC_SITE_ENV=production astro build",
+    "build:staging": "cross-env PUBLIC_SITE_ENV=staging astro build",
     "preview": "astro preview",
+    "preview:production": "npm run build:production && astro preview",
     "astro": "astro",
     "check": "astro check && tsc --noEmit && eslint . && prettier --check .",
     "lint": "eslint .",
@@ -34,6 +37,7 @@
     "@astrojs/check": "^0.9.9",
     "@eslint/js": "^10.0.1",
     "astro-eslint-parser": "^1.4.0",
+    "cross-env": "^10.1.0",
     "eslint": "^10.7.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-astro": "^1.7.0",
