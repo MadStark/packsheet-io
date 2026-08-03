@@ -40,6 +40,15 @@ jobs:
 
       - run: npm ci
 
+      # Runs here as well as in ci.yml, on purpose. This workflow and CI are both
+      # triggered by the same push and neither depends on the other, so a red CI does
+      # not stop a deploy — it is not a race that usually resolves safely, it is no
+      # gate at all. The required status check protects the merge button; this step is
+      # what protects the artifact. Costs ~25s and must stay ahead of the build.
+      #
+      # This is the last gate before production. Nothing downstream re-checks.
+      - run: npm test
+
       - name: Build
         # PUBLIC_SITE_ENV drives robots.txt. Only the literal string "production"
         # produces an indexable site — see src/pages/robots.txt.ts.
