@@ -31,6 +31,13 @@ jobs:
 
       - run: npm ci
 
+      # Runs here as well as in ci.yml, on purpose. This workflow and CI are both
+      # triggered by the same push and neither depends on the other, so a red CI does
+      # not stop a deploy — it is not a race that usually resolves safely, it is no
+      # gate at all. The required status check protects the merge button; this step is
+      # what protects the artifact. Costs ~25s and must stay ahead of the build.
+      - run: npm test
+
       - name: Build
         # Deliberately not "production", so robots.txt emits Disallow: / and staging
         # never competes with production in search results.
