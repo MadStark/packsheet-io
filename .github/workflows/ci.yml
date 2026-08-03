@@ -38,5 +38,10 @@ jobs:
       - run: npm ci
 
       # astro check + tsc --noEmit + eslint + prettier --check.
-      # There is no test runner yet; when one lands it goes in this job.
       - run: npm run check
+
+      # Vitest, kept as its own step rather than folded into `npm run check` so the
+      # static checks and the tests fail distinguishably in the log. Both run in this
+      # one job on purpose — `check` is the required status check on main and staging,
+      # so anything that must block a merge has to report through it.
+      - run: npm test
