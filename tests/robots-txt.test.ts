@@ -13,8 +13,9 @@ import type { APIContext } from 'astro';
  * change passes `npm run check`, passes the build, and produces no symptom until
  * someone notices staging outranking production in search results.
  *
- * The eight values below are the ones the PR #4 review checked by hand. This test
- * exists so that verification is repeated on every commit rather than remembered.
+ * The eight values covered here — "production", plus the seven in `nonProduction`
+ * below — are the ones the PR #4 review checked by hand. This test exists so that
+ * verification is repeated on every commit rather than remembered.
  *
  * Note on fidelity: the real build has Vite statically inline `import.meta.env.
  * PUBLIC_SITE_ENV`, whereas here it is stubbed at runtime. This pins the branching
@@ -23,7 +24,14 @@ import type { APIContext } from 'astro';
 
 const SITE = new URL('https://packsheet.io');
 
-async function robotsFor(value: string | undefined): Promise<string> {
+/**
+ * `site` is a required parameter rather than one defaulting to SITE, because a
+ * default would make the `site: undefined` case untestable: passing undefined
+ * explicitly is exactly what triggers a default parameter, so the unset test would
+ * silently receive SITE and assert nothing. robotsFor() below supplies the default
+ * for the cases that don't care.
+ */
+async function robotsWith(value: string | undefined, site: URL | undefined): Promise<string> {
   // The module captures the env at import time (`const isProduction = ...` at top
   // level), so the module registry has to be reset between values or every case
   // after the first would read the first one's answer and pass for the wrong reason.
@@ -31,9 +39,11 @@ async function robotsFor(value: string | undefined): Promise<string> {
   vi.stubEnv('PUBLIC_SITE_ENV', value);
 
   const { GET } = await import('../src/pages/robots.txt.ts');
-  const response = await GET({ site: SITE } as unknown as APIContext);
+  const response = await GET({ site } as unknown as APIContext);
   return await response.text();
 }
+
+const robotsFor = (value: string | undefined): Promise<string> => robotsWith(value, SITE);
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -47,6 +57,25 @@ describe('robots.txt fail-safe', () => {
     expect(body).toContain('Allow: /');
     expect(body).not.toContain('Disallow: /');
     expect(body).toContain('Sitemap: https://packsheet.io/sitemap-index.xml');
+  });
+
+  // siteRelative() in robots.txt.ts normalises the base to end in a slash before
+  // resolving. Without that, new URL('sitemap-index.xml', 'https://packsheet.io/app')
+  // resolves to https://packsheet.io/sitemap-index.xml — the last path segment is
+  // treated as a filename and replaced. `site` is a bare origin today, so nothing
+  // above would notice if the normalisation were deleted; this is the case that does.
+  it('keeps a path segment on `site` when resolving the sitemap URL', async () => {
+    const body = await robotsWith('production', new URL('https://packsheet.io/app'));
+
+    expect(body).toContain('Sitemap: https://packsheet.io/app/sitemap-index.xml');
+  });
+
+  // Advertising a sitemap at the wrong origin is worse than a build that stops and
+  // says why, so the route throws rather than defaulting. Unreachable while
+  // astro.config.mjs sets `site` — which @astrojs/sitemap also requires — but the
+  // throw is the guarantee that keeps it unreachable.
+  it('throws rather than emitting a wrong-origin sitemap when `site` is unset', async () => {
+    await expect(robotsWith('production', undefined)).rejects.toThrow(/`site` is not configured/);
   });
 
   // Every value that is not the exact literal. Casing variants and the leading-space

@@ -20,6 +20,12 @@ import postcss, { type Rule } from 'postcss';
  * not its twin. The OS-preference path and the in-app toggle then render different
  * colours, and which one a user sees depends on settings they may never have
  * touched. Nothing else in the toolchain notices.
+ *
+ * Scope: the two dark blocks are compared against each other, deliberately NOT
+ * against :root. Most light-mode tokens are meant to have no dark cut — the fonts,
+ * the radii and the ten fill-only --c-* category colours all live only in :root. A
+ * new token that genuinely needs a dark override but gets none is therefore out of
+ * range here, and no automated check currently covers it.
  */
 
 const TOKENS_PATH = fileURLToPath(new URL('../src/styles/tokens.css', import.meta.url));

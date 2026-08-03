@@ -40,6 +40,18 @@ jobs:
       # astro check + tsc --noEmit + eslint + prettier --check.
       - run: npm run check
 
+      # Every file under src/pages becomes a route, so a test file there would ship as
+      # a page. Vitest also excludes that directory, so such a test would never run —
+      # a green CI for a test that cannot fail. Caught here rather than left to a
+      # comment, because the failure is silent in both directions.
+      - name: Reject test files under src/pages
+        run: |
+          if find src/pages -type f \( -name '*.test.*' -o -name '*.spec.*' \) | grep -q .; then
+            echo "::error::Test files must not live under src/pages/ — they become routes. Move them to tests/."
+            find src/pages -type f \( -name '*.test.*' -o -name '*.spec.*' \)
+            exit 1
+          fi
+
       # Vitest, kept as its own step rather than folded into `npm run check` so the
       # static checks and the tests fail distinguishably in the log. Both run in this
       # one job on purpose — `check` is the required status check on main and staging,
