@@ -6,6 +6,13 @@ name: PR preview
 # Capacity note: staging is on the Free plan, which allows 3 preview environments
 # per app (Standard allows 10). A fourth concurrent PR will fail to get a preview.
 # If that becomes a real constraint, move staging to Standard in the Azure portal.
+#
+# No `npm test` step here, deliberately — the two deploy workflows have one and this
+# is not an oversight. Those run on `push` with nothing gating them, so the tests are
+# their only protection. This runs on `pull_request`, where `check` is a required
+# status check that blocks the merge, and a preview is ephemeral, unindexed and
+# reachable only by URL. Adding a duplicate run would slow every push for a build
+# nobody ships. If previews ever become shareable artifacts, revisit this.
 
 on:
   pull_request:
