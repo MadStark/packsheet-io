@@ -56,31 +56,22 @@ jobs:
           PUBLIC_SITE_ENV: production
         run: npm run build
 
-      # Azure gives every Static Web App a permanent, public *.azurestaticapps.net
-      # hostname. It cannot be disabled, it serves this exact build, and it bypasses
-      # Cloudflare completely — no edge cache, no WAF, no rate limiting, and a second
-      # crawlable copy of every page we publish.
+      # Makes the origin refuse anything that did not arrive through Cloudflare, so the
+      # permanent public *.azurestaticapps.net hostname stops serving the site. The why
+      # is in scripts/write-origin-lock.sh and the README; the constraints that bind
+      # THIS file are:
       #
-      # staticwebapp.config.json cannot fix that on its own: route rules match on
-      # `route` and `methods` only, never on hostname, and globalHeaders apply to every
-      # response. So there is no way to serve a noindex header on the Azure hostname
-      # without also serving it on packsheet.io and deindexing the real site.
+      #   - it must run after Build (dist/ has to exist) and before Deploy (the file has
+      #     to be inside the artifact to be uploaded)
+      #   - its argument must equal app_location below, or the config is written
+      #     somewhere that never ships and the lock silently never applies
+      #   - the value reaches the script through the environment, never the script body
       #
-      # Instead the origin refuses anything that did not arrive through Cloudflare. A
-      # Cloudflare request-header transform sets X-Origin-Verify on every request to the
-      # origin; forwardingGateway.requiredHeaders makes Azure demand it and answer 403
-      # otherwise. The Cloudflare rule must exist BEFORE this ships — it does.
-      #
-      # Written here rather than committed because this repository is public and the
-      # value must not be. Production-only on purpose: forwardingGateway requires the
-      # Standard plan and staging is deliberately Free, so staging gets no such file.
-      # That is the second environment-dependent behaviour in the project, and unlike
-      # PUBLIC_SITE_ENV it cannot be reproduced on staging. See the README.
-      # The logic lives in a script so the tests can execute it. Asserting on this YAML
-      # instead let both outage-causing mutations pass a green suite: a wrong output
-      # directory (config never uploaded, lock never applied) and a misspelt header name
-      # (production refuses every request). The script's argument must stay in step with
-      # app_location below — tests/deploy-origin-lock.test.ts pins that they agree.
+      # Production-only on purpose: forwardingGateway requires the Standard plan and
+      # staging is deliberately Free, so staging gets no such file. That is the second
+      # environment-dependent behaviour in the project, and unlike PUBLIC_SITE_ENV it
+      # cannot be reproduced on staging. tests/deploy-origin-lock.test.ts pins all three
+      # constraints above.
       - name: Write the production-only origin lock
         env:
           ORIGIN_VERIFY: ${{ secrets.SWA_ORIGIN_VERIFY }}

@@ -24,3 +24,8 @@ pnpm-debug.log*
 
 # jetbrains setting folder
 .idea/
+
+# Written into the build output at deploy time and never committed — it carries the
+# origin-verify secret. See scripts/write-origin-lock.sh. Ignored so a stray local run
+# cannot be added by accident on a public repo.
+staticwebapp.config.json
