@@ -97,7 +97,12 @@ fi
 # the fast path, too — a definite answer breaks out of the retry loop immediately.
 # ---------------------------------------------------------------------------
 if [ -n "$expected_sha" ]; then
-  http_get "$site/_deploy.txt"
+  # 404 is retried. This file is created BY this release, so between the upload and the
+  # edge picking it up its absence is expected, not a fault. Failing on the first 404
+  # turns normal propagation into a red release — which is exactly what happened on the
+  # first production run of this check, and is the same lag the origin check below
+  # already waits out.
+  http_get "$site/_deploy.txt" "404"
   served_sha="$(printf '%s' "$BODY" | tr -d '[:space:]')"
   if [ "$STATUS" != "200" ]; then
     note "$site/_deploy.txt returned $STATUS — cannot confirm which release is live, so nothing below is evidence about THIS one.${CURL_ERR:+ curl said: $CURL_ERR}"
@@ -109,7 +114,11 @@ fi
 # ---------------------------------------------------------------------------
 # 3. The origin must refuse a direct request.
 #
-# Only 401 and 403 are accepted. 404 is what Azure's front door returns for any
+# Pinned to 403. Observed on the first production release (2026-08-08): that is what
+# Azure returns when forwardingGateway's required header is absent. Until then this
+# accepted 401 as well, because the docs never state the code — a guess worth removing
+# now there is evidence, since every status this accepts is one that could mask a
+# different fault. 404 is what Azure's front door returns for any
 # *.azurestaticapps.net name that is not a live app, so accepting it would report
 # "verified" when AZURE_HOSTNAME is simply wrong — or when the Static Web App has been
 # recreated, the one thing that changes this hostname. The same reasoning rules out 410,
@@ -121,7 +130,7 @@ fi
 http_get "$origin/" "200"
 origin_status="$STATUS"
 case "$origin_status" in
-  401 | 403) ;;
+  403) ;;
   200)
     note "$origin/ still returns 200 after $ATTEMPTS attempts — the origin lock is NOT in effect. The config did not reach the artifact, or forwardingGateway was not applied. The Azure hostname is serving the site directly, bypassing Cloudflare."
     ;;
@@ -129,7 +138,7 @@ case "$origin_status" in
     note "$origin/ returned 404. That is what Azure returns for a hostname that is not a live Static Web App, so it does NOT prove the lock is working. Check AZURE_HOSTNAME is the current default hostname of the production app. If the hostname is right, Azure is using 404 for the missing required header — pin that here rather than accepting 404 in general."
     ;;
   *)
-    note "$origin/ returned $origin_status; expected 401 or 403. This is not evidence that the lock is working, and a false pass here is silent and permanent.${CURL_ERR:+ curl said: $CURL_ERR}"
+    note "$origin/ returned $origin_status; expected 403, which is what Azure was observed to return for the missing required header on 2026-08-08. This is not evidence that the lock is working, and a false pass here is silent and permanent. If Azure has genuinely changed its refusal code, confirm that by hand and update this script rather than widening it back out.${CURL_ERR:+ curl said: $CURL_ERR}"
     ;;
 esac
 

@@ -57,7 +57,6 @@ jobs:
           action: upload
           app_location: dist
           skip_app_build: true
-          skip_api_build: true
 
   close_preview:
     name: tear down preview
