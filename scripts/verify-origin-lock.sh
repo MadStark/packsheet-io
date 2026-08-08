@@ -87,7 +87,7 @@ esac
 #
 # Asserts on the BODY, not the status: with a navigationFallback the URL would return 200
 # with index.html, and a status check would then cry "the secret is public" falsely.
-config_body="$(curl -sS --max-time 20 "$site/staticwebapp.config.json" || true)"
+config_body="$(curl -sS --max-time "$TIMEOUT" "$site/staticwebapp.config.json" || true)"
 case "$config_body" in
   *forwardingGateway*) fail "staticwebapp.config.json is being SERVED at $site — the origin-verify secret is public. Rotate it immediately (see the README's rotation procedure)." ;;
 esac
