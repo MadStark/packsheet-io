@@ -94,8 +94,31 @@ previews, local builds, and any environment nobody has invented yet are all non-
 by default rather than by remembering to add a rule. See `src/pages/robots.txt.ts`.
 
 If you change anything touching `robots.txt`, the sitemap, or canonical URLs, build both
-ways and diff the output before opening a pull request — this is the one difference between
-the deployed environments, and CI does not yet assert it.
+ways and diff the output before opening a pull request — this is the one difference the
+build produces, and CI does not yet assert it.
+
+### The one thing staging cannot reproduce
+
+`PUBLIC_SITE_ENV` is the only environment-dependent behaviour in the **codebase**, and the
+local stage can reproduce all of it. There is one divergence that lives in the **deploy
+pipeline** instead, and it is deliberate:
+
+Azure gives every Static Web App a permanent, public `*.azurestaticapps.net` hostname. It
+cannot be turned off, it serves the same build, and it bypasses Cloudflare entirely — no
+edge cache, no WAF, no rate limiting, and a second crawlable copy of every page. Since
+`staticwebapp.config.json` route rules match on path and method but never on hostname,
+there is no way to noindex that hostname without also noindexing `packsheet.io`.
+
+So production refuses any request that did not come through Cloudflare: a Cloudflare
+transform sets `X-Origin-Verify`, and `forwardingGateway.requiredHeaders` makes Azure
+demand it. `deploy-production.yml` writes that config at deploy time from a secret, rather
+than committing it, because this repository is public.
+
+**Staging does not have it, and cannot.** `forwardingGateway` requires the Standard plan
+and staging is deliberately on Free to halve the hosting cost. This is the one change in
+the project that production receives untested — `tests/deploy-origin-lock.test.ts` pins the
+parts that can be checked without deploying, and the rest is verified against the running
+site after release.
 
 ## Design system
 

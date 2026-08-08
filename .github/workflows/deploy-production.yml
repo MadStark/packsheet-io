@@ -56,6 +56,44 @@ jobs:
           PUBLIC_SITE_ENV: production
         run: npm run build
 
+      # Azure gives every Static Web App a permanent, public *.azurestaticapps.net
+      # hostname. It cannot be disabled, it serves this exact build, and it bypasses
+      # Cloudflare completely — no edge cache, no WAF, no rate limiting, and a second
+      # crawlable copy of every page we publish.
+      #
+      # staticwebapp.config.json cannot fix that on its own: route rules match on
+      # `route` and `methods` only, never on hostname, and globalHeaders apply to every
+      # response. So there is no way to serve a noindex header on the Azure hostname
+      # without also serving it on packsheet.io and deindexing the real site.
+      #
+      # Instead the origin refuses anything that did not arrive through Cloudflare. A
+      # Cloudflare request-header transform sets X-Origin-Verify on every request to the
+      # origin; forwardingGateway.requiredHeaders makes Azure demand it and answer 403
+      # otherwise. The Cloudflare rule must exist BEFORE this ships — it does.
+      #
+      # Written here rather than committed because this repository is public and the
+      # value must not be. Production-only on purpose: forwardingGateway requires the
+      # Standard plan and staging is deliberately Free, so staging gets no such file.
+      # That is the second environment-dependent behaviour in the project, and unlike
+      # PUBLIC_SITE_ENV it cannot be reproduced on staging. See the README.
+      - name: Write the production-only origin lock
+        env:
+          ORIGIN_VERIFY: ${{ secrets.SWA_ORIGIN_VERIFY }}
+        run: |
+          # An absent secret would otherwise emit a config demanding X-Origin-Verify: ""
+          # — a value Cloudflare never sends — and take production down on this deploy.
+          # Failing here costs a red build; failing later costs an outage.
+          if [ -z "$ORIGIN_VERIFY" ]; then
+            echo "::error::SWA_ORIGIN_VERIFY is empty. Refusing to deploy a config that would reject every request."
+            exit 1
+          fi
+          jq -n --arg v "$ORIGIN_VERIFY" \
+            '{forwardingGateway: {requiredHeaders: {"X-Origin-Verify": $v}}}' \
+            > dist/staticwebapp.config.json
+          # Assert the shape without ever echoing the value.
+          jq -e 'has("forwardingGateway")' dist/staticwebapp.config.json > /dev/null
+          echo "Wrote dist/staticwebapp.config.json ($(wc -c < dist/staticwebapp.config.json) bytes)"
+
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
         with:
