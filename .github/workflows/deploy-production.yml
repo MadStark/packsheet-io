@@ -16,7 +16,11 @@ on:
 
 concurrency:
   group: deploy-production
-  cancel-in-progress: true
+  # NOT cancel-in-progress. You cannot cancel an upload that has already happened: a run
+  # cancelled between the upload and the verify step leaves a live, unverified release,
+  # shown as a grey "cancelled" rather than a failure, with no notification. Queueing
+  # costs a few minutes; cancelling costs the only check that the release works.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -56,6 +60,31 @@ jobs:
           PUBLIC_SITE_ENV: production
         run: npm run build
 
+      # Makes the origin refuse anything that did not arrive through Cloudflare, so the
+      # permanent public *.azurestaticapps.net hostname stops serving the site. The why
+      # is in scripts/write-origin-lock.sh and the README; the constraints that bind
+      # THIS file are:
+      #
+      #   - it must run after Build (dist/ has to exist) and before Deploy (the file has
+      #     to be inside the artifact to be uploaded)
+      #   - its argument must equal app_location below, or the config is written
+      #     somewhere that never ships and the lock silently never applies
+      #   - the value reaches the script through the environment, never the script body
+      #
+      # Production-only on purpose: forwardingGateway requires the Standard plan and
+      # staging is deliberately Free, so staging gets no such file. That is the second
+      # environment-dependent behaviour in the project, and unlike PUBLIC_SITE_ENV it
+      # cannot be reproduced on staging. tests/deploy-origin-lock.test.ts pins all three
+      # constraints above.
+      - name: Write the production-only origin lock
+        env:
+          ORIGIN_VERIFY: ${{ secrets.SWA_ORIGIN_VERIFY }}
+          # Stamped into the artifact so the verify step can tell THIS release from the
+          # one before it. Without it, an edge still serving the previous (locked)
+          # deployment answers exactly like a correctly locked new one.
+          DEPLOY_SHA: ${{ github.sha }}
+        run: scripts/write-origin-lock.sh dist
+
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
         with:
@@ -67,3 +96,25 @@ jobs:
           # on an unpinned toolchain, which can differ from what CI just verified.
           skip_app_build: true
           skip_api_build: true
+
+      # Without this the workflow ends at "upload succeeded" and nothing ever checks the
+      # site answers. The why, and the exit conditions, are in the script — which is a
+      # script precisely so the tests can drive it against a stub instead of asserting
+      # that this YAML mentions the right URLs. A review showed that inline, all three
+      # of its failure branches could be replaced with an echo and the suite stayed
+      # green: the detection mechanism itself was undetectably removable.
+      #
+      # This step runs AFTER the upload, so a failure here does not prevent the release —
+      # the artifact is already live and this job cannot roll it back. That is deliberate:
+      # the lock can only be tested against the real Standard-tier origin, which no
+      # earlier stage has. Its job is to make a broken lock loud within a minute rather
+      # than silent forever, and to hand whoever reads the log the fast recovery path.
+      - name: Verify the lock from both sides
+        env:
+          # Azure's permanent default hostname for swa-packsheet-prod. Public already, so
+          # not a secret. It only changes if the Static Web App itself is recreated.
+          AZURE_HOSTNAME: wonderful-island-05575f303.7.azurestaticapps.net
+        # Bounded: the retry policy can otherwise spend ~20 minutes going red, all of it
+        # after the release is already live.
+        timeout-minutes: 8
+        run: scripts/verify-origin-lock.sh https://packsheet.io "https://$AZURE_HOSTNAME" "$GITHUB_SHA"

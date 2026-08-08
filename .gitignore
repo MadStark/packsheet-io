@@ -24,3 +24,10 @@ pnpm-debug.log*
 
 # jetbrains setting folder
 .idea/
+
+# A stray hand-run of scripts/write-origin-lock.sh leaves one of these at the repo root
+# carrying the origin-verify secret, and this repository is public. Anchored to the root
+# on purpose: dist/ is already ignored above, and an unanchored pattern would also make a
+# future *legitimate* staticwebapp.config.json — route rules, security headers — silently
+# un-addable and silently never deployed.
+/staticwebapp.config.json
