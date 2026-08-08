@@ -436,6 +436,22 @@ describe('verify-origin-lock.sh', () => {
     expect(status).toBe(0);
   });
 
+  // The other half of the same condition, and the one that turned the SECOND production
+  // release red: the marker is present but still names the previous deployment. That is
+  // the edge not having caught up, exactly like a 404, and needs the same wait.
+  it('rides out a stale marker while the edge catches up', async () => {
+    const site = await stub({
+      ...OK_SITE,
+      '/_deploy.txt': [
+        [200, 'sha-previous\n'],
+        [200, 'sha-previous\n'],
+        [200, 'sha-current\n'],
+      ],
+    });
+    const { status } = await verify(site, await stub(REFUSING_ORIGIN), 'sha-current', '5');
+    expect(status).toBe(0);
+  });
+
   it('fails when the release marker is missing entirely', async () => {
     const site = await stub({ ...OK_SITE, '/_deploy.txt': [404, 'nope'] });
     const { status, output } = await verify(site, await stub(REFUSING_ORIGIN), 'sha-current');

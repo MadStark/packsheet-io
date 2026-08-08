@@ -96,18 +96,28 @@ fi
 # below passes on the strength of the deployment this one was meant to replace. That is
 # the fast path, too — a definite answer breaks out of the retry loop immediately.
 # ---------------------------------------------------------------------------
+# Both "not there yet" (404) and "there, but still the old one" (a stale SHA) are the
+# same condition — the edge has not caught up — and both are expected in the seconds
+# after an upload. Two production releases went red here in a row, once for each,
+# because only the absent case was waited out and a stale-but-present marker was taken
+# as a definite answer. Waiting for the marker to MATCH, rather than merely to exist, is
+# the whole condition, so it gets one loop.
+served_sha=''
 if [ -n "$expected_sha" ]; then
-  # 404 is retried. This file is created BY this release, so between the upload and the
-  # edge picking it up its absence is expected, not a fault. Failing on the first 404
-  # turns normal propagation into a red release — which is exactly what happened on the
-  # first production run of this check, and is the same lag the origin check below
-  # already waits out.
-  http_get "$site/_deploy.txt" "404"
-  served_sha="$(printf '%s' "$BODY" | tr -d '[:space:]')"
+  i=0
+  while :; do
+    http_get "$site/_deploy.txt" "404"
+    served_sha="$(printf '%s' "$BODY" | tr -d '[:space:]')"
+    [ "$STATUS" = "200" ] && [ "$served_sha" = "$expected_sha" ] && break
+    i=$((i + 1))
+    [ "$i" -ge "$ATTEMPTS" ] && break
+    sleep "$DELAY"
+  done
+
   if [ "$STATUS" != "200" ]; then
-    note "$site/_deploy.txt returned $STATUS — cannot confirm which release is live, so nothing below is evidence about THIS one.${CURL_ERR:+ curl said: $CURL_ERR}"
+    note "$site/_deploy.txt returned $STATUS after $ATTEMPTS attempts — cannot confirm which release is live, so nothing below is evidence about THIS one.${CURL_ERR:+ curl said: $CURL_ERR}"
   elif [ "$served_sha" != "$expected_sha" ]; then
-    note "$site/ is still serving release $served_sha, not $expected_sha. The checks below would describe the PREVIOUS deployment. Re-run once propagation completes."
+    note "$site/ is still serving release $served_sha, not $expected_sha, after $ATTEMPTS attempts. The checks below would describe the PREVIOUS deployment. If the deploy itself succeeded this is propagation taking longer than the wait allows — re-run the job rather than reverting."
   fi
 fi
 
