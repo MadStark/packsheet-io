@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync, existsSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { spawnSync, spawn, execFileSync } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,31 +13,37 @@ import { parse } from 'yaml';
  *
  * Azure gives every Static Web App a permanent, public *.azurestaticapps.net hostname.
  * It cannot be disabled, it serves the same build as the custom domain, and it bypasses
- * Cloudflare entirely — no edge cache, no WAF, no rate limiting, and a second crawlable
- * copy of every page. `staticwebapp.config.json` cannot fix that alone: route rules match
- * on `route` and `methods` only, never on hostname, so any noindex header would land on
- * packsheet.io too.
+ * Cloudflare entirely. `staticwebapp.config.json` route rules match on `route` and
+ * `methods` only, never on hostname, so any noindex header would land on packsheet.io
+ * too. Production therefore refuses requests without `X-Origin-Verify`, which a
+ * Cloudflare transform sets on the way to the origin.
  *
- * Production therefore refuses requests that did not arrive through Cloudflare. A
- * Cloudflare transform sets `X-Origin-Verify`; `forwardingGateway.requiredHeaders` makes
- * Azure demand it.
- *
- * An earlier version of this file asserted only on the workflow YAML, and a review proved
- * it green through both mutations that cause an outage: writing the config outside the
- * artifact directory (lock silently never applied) and misspelling the header name
- * (production refuses every request). Those two strings are the only things here that must
- * agree with state outside this repository, so the logic now lives in a script this suite
- * actually runs, and both strings are pinned by behaviour rather than by regex.
+ * Both shell scripts are executed here rather than pattern-matched, and the history is
+ * the argument for it. Two rounds of review each showed the same failure: whatever was
+ * asserted by substring could be broken while the suite stayed green — first the writer
+ * (wrong output directory, misspelt header name), then the verifier itself (all three
+ * failure branches replaced with an echo). Anything load-bearing in this feature is now
+ * driven by running it.
  */
 
 const repoPath = (p: string) => fileURLToPath(new URL(`../${p}`, import.meta.url));
 
-/** Duplicated in exactly one other place on earth: the Cloudflare transform rule. */
+/** Duplicated in exactly two other places: the Cloudflare transform rule, and
+ *  scripts/write-origin-lock.sh. The duplication is the point — importing the constant
+ *  would pin nothing. The README's rotation procedure names all three. */
 const HEADER_NAME = 'X-Origin-Verify';
-const SCRIPT = repoPath('scripts/write-origin-lock.sh');
+const WRITE_SCRIPT = repoPath('scripts/write-origin-lock.sh');
+const VERIFY_SCRIPT = repoPath('scripts/verify-origin-lock.sh');
+
+/** Both streams. Actions writes stderr into the same publicly-readable log, so a leak
+ *  guard that only inspects stdout is enforcing the invariant on half the output. */
+function runScript(script: string, args: string[], env: NodeJS.ProcessEnv) {
+  const r = spawnSync(script, args, { env, encoding: 'utf8' });
+  return { status: r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
 
 // ---------------------------------------------------------------------------
-// Behaviour — the script is executed, not read
+// write-origin-lock.sh — behaviour
 // ---------------------------------------------------------------------------
 
 describe('write-origin-lock.sh', () => {
@@ -49,26 +57,25 @@ describe('write-origin-lock.sh', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  const run = (originVerify: string | undefined, outDir = out) =>
-    execFileSync(SCRIPT, [outDir], {
-      env: {
-        ...process.env,
-        ...(originVerify === undefined ? {} : { ORIGIN_VERIFY: originVerify }),
-      },
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
+  /** Built explicitly rather than spreading process.env: an exported ORIGIN_VERIFY in
+   *  the parent shell otherwise leaks into the "unset" case and fails it spuriously. */
+  const run = (originVerify: string | undefined, outDir = out) => {
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
+    if (originVerify !== undefined) env.ORIGIN_VERIFY = originVerify;
+    return runScript(WRITE_SCRIPT, [outDir], env);
+  };
 
   const configAt = (outDir = out) => join(outDir, 'staticwebapp.config.json');
+  const readConfig = () => JSON.parse(readFileSync(configAt(), 'utf8'));
 
   it('writes the config into the directory it is given', () => {
-    run('a-real-value');
+    expect(run('a-real-value').status).toBe(0);
     expect(existsSync(configAt())).toBe(true);
   });
 
-  // The mutation that silently disables the lock: write outside the artifact directory
-  // and the file is never uploaded, forwardingGateway is never applied, and the Azure
-  // hostname stays wide open. Nothing about the deploy looks wrong.
+  // The mutation that silently disables the lock: written outside the artifact directory
+  // it is never uploaded, forwardingGateway never applies, and the Azure hostname stays
+  // open. Nothing about the deploy looks wrong.
   it('writes nowhere else', () => {
     run('a-real-value');
     expect(existsSync(join(dir, 'staticwebapp.config.json'))).toBe(false);
@@ -77,8 +84,7 @@ describe('write-origin-lock.sh', () => {
   // The mutation that takes production down: a header name Cloudflare does not send.
   it('uses exactly the header name Cloudflare sets', () => {
     run('a-real-value');
-    const config = JSON.parse(readFileSync(configAt(), 'utf8'));
-    expect(config).toEqual({
+    expect(readConfig()).toEqual({
       forwardingGateway: { requiredHeaders: { [HEADER_NAME]: 'a-real-value' } },
     });
   });
@@ -86,46 +92,194 @@ describe('write-origin-lock.sh', () => {
   it('preserves the value byte for byte', () => {
     const awkward = 'aB3/+=_-.~value';
     run(awkward);
-    const config = JSON.parse(readFileSync(configAt(), 'utf8'));
-    expect(config.forwardingGateway.requiredHeaders[HEADER_NAME]).toBe(awkward);
+    expect(readConfig().forwardingGateway.requiredHeaders[HEADER_NAME]).toBe(awkward);
   });
 
-  // Each of these produces a config demanding a header Cloudflare never sends, which is
-  // a total outage on the next deploy. `-z` alone catches only the first.
+  // Entirely-empty values. None of these is a plausible secret; they are the easy half.
   it.each([
     ['unset', undefined],
     ['empty', ''],
     ['a single space', ' '],
     ['whitespace', '   \t  '],
-    ['a trailing newline only', '\n'],
-  ])('refuses to write when the secret is %s', (_label, value) => {
-    expect(() => run(value)).toThrow();
+    ['a newline alone', '\n'],
+  ])('refuses when the secret is %s', (_label, value) => {
+    const { status, output } = run(value);
+    expect(status).toBe(1);
+    expect(output).toMatch(/empty or entirely whitespace/);
+    expect(existsSync(configAt())).toBe(false);
+  });
+
+  // The realistic failure, and the one an earlier version of this script got wrong: it
+  // tested a trimmed copy and then wrote the untrimmed value, so content-plus-whitespace
+  // passed the guard and wrote a header value Cloudflare can never match — a total
+  // outage with a green build. A secret pasted into the GitHub UI with a trailing
+  // newline is the single most likely way this happens.
+  it.each([
+    ['a trailing newline', 'abc123\n'],
+    ['a leading space', ' abc123'],
+    ['a trailing carriage return', 'abc123\r'],
+    ['internal whitespace', 'abc 123'],
+    ['a trailing tab', 'abc123\t'],
+  ])('refuses a value with %s', (_label, value) => {
+    const { status, output } = run(value);
+    expect(status).toBe(1);
+    expect(output).toMatch(/contains whitespace/);
     expect(existsSync(configAt())).toBe(false);
   });
 
   it('refuses when the output directory does not exist', () => {
-    expect(() => run('a-real-value', join(dir, 'no-such-dir'))).toThrow();
+    const { status, output } = run('a-real-value', join(dir, 'no-such-dir'));
+    expect(status).toBe(1);
+    expect(output).toMatch(/does not exist/);
   });
 
-  // Two secrets of wildly different lengths must produce byte-identical output. That is
-  // the property an earlier version broke by printing `wc -c` of the config: the file is
-  // a fixed prefix plus the secret, so its size discloses the secret's length to logs
-  // that are public on this repository. Masking replaces the value; it cannot redact a
-  // number derived from it. Comparing two runs catches any such leak, not just this one.
-  it('prints nothing that varies with the value', () => {
-    const short = run('a');
-    const long = run('a'.repeat(512));
-    expect(short).toBe(long);
+  // Two secrets of very different lengths must produce byte-identical output across
+  // BOTH streams. An earlier version printed `wc -c` of the config — a fixed prefix plus
+  // the secret — publishing the secret's length to logs that are public on this repo.
+  // Masking replaces a verbatim value; it cannot redact a number derived from one.
+  it('prints nothing that varies with the value, on either stream', () => {
+    expect(run('a').output).toBe(run('a'.repeat(512)).output);
   });
 
-  it('never prints the value itself', () => {
+  it('never prints the value itself, on either stream', () => {
     const secret = 'correct-horse-battery-staple';
-    expect(run(secret)).not.toContain(secret);
+    expect(run(secret).output).not.toContain(secret);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Wiring — that the workflows call it, in the right place, with the right argument
+// verify-origin-lock.sh — behaviour, against stub origins
+// ---------------------------------------------------------------------------
+
+describe('verify-origin-lock.sh', () => {
+  const servers: Server[] = [];
+
+  /** A stub HTTP origin. `routes` maps a path to [status, body]. */
+  async function stub(routes: Record<string, [number, string]>): Promise<string> {
+    const server = createServer((req, res) => {
+      const [status, body] = routes[req.url ?? '/'] ?? [404, 'not found'];
+      // Close each connection: a keep-alive socket left open by curl keeps the server
+      // from ever firing its close callback, which hangs the teardown rather than
+      // failing it.
+      res.writeHead(status, { 'content-type': 'text/plain', connection: 'close' });
+      res.end(body);
+    });
+    server.keepAliveTimeout = 0;
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    servers.push(server);
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+
+  afterEach(async () => {
+    await Promise.all(
+      servers.splice(0).map(
+        (s) =>
+          new Promise<void>((resolve) => {
+            s.closeAllConnections();
+            s.close(() => resolve());
+          }),
+      ),
+    );
+  });
+
+  // Asynchronous on purpose. The stub servers run on this process's event loop, so a
+  // synchronous spawn would block it for the lifetime of the child and the server could
+  // never answer the very request the child is waiting on — a deadlock that presents as
+  // curl timing out against a server that is definitely listening.
+  function verify(
+    site: string,
+    origin: string,
+  ): Promise<{ status: number | null; output: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(VERIFY_SCRIPT, [site, origin], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          VERIFY_ATTEMPTS: '1',
+          VERIFY_DELAY: '0',
+          VERIFY_TIMEOUT: '5',
+        },
+      });
+      let output = '';
+      child.stdout.on('data', (d) => (output += d));
+      child.stderr.on('data', (d) => (output += d));
+      child.on('close', (status) => resolve({ status, output }));
+    });
+  }
+
+  const OK_SITE: Record<string, [number, string]> = {
+    '/': [200, '<html>packsheet</html>'],
+    '/staticwebapp.config.json': [404, 'not found'],
+  };
+
+  it('passes when the site serves and the origin refuses', async () => {
+    const { status, output } = await verify(await stub(OK_SITE), await stub({ '/': [403, 'no'] }));
+    expect(status).toBe(0);
+    expect(output).toContain('config=not-served');
+  });
+
+  // The outage this exists to catch: Cloudflare stopped sending the header.
+  it('fails when the site itself is refused', async () => {
+    const site = await stub({ ...OK_SITE, '/': [403, 'no'] });
+    const { status, output } = await verify(site, await stub({ '/': [403, 'no'] }));
+    expect(status).toBe(1);
+    expect(output).toMatch(/RESTORE THE CLOUDFLARE TRANSFORM RULE/);
+  });
+
+  // The lock silently not applied — the config never reached the artifact.
+  it('fails when the origin still answers directly', async () => {
+    const { status, output } = await verify(
+      await stub(OK_SITE),
+      await stub({ '/': [200, '<html>packsheet</html>'] }),
+    );
+    expect(status).toBe(1);
+    expect(output).toMatch(/origin lock is NOT in effect/);
+  });
+
+  // A transient 5xx from the origin is not proof the lock works. Accepting any non-200
+  // would report success on a 404 or 503 while the deployment settles — a false pass on
+  // the only check that the lock functions at all, whose failure is silent and permanent.
+  it.each([
+    ['503', 503],
+    ['500', 500],
+    ['302', 302],
+  ])('fails when the origin returns %s rather than a 4xx refusal', async (_l, code) => {
+    const { status, output } = await verify(await stub(OK_SITE), await stub({ '/': [code, 'x'] }));
+    expect(status).toBe(1);
+    expect(output).toMatch(/expected a 4xx refusal/);
+  });
+
+  it('fails when the config file is served', async () => {
+    const site = await stub({
+      ...OK_SITE,
+      '/staticwebapp.config.json': [200, '{"forwardingGateway":{"requiredHeaders":{}}}'],
+    });
+    const { status, output } = await verify(site, await stub({ '/': [403, 'no'] }));
+    expect(status).toBe(1);
+    expect(output).toMatch(/secret is public/);
+  });
+
+  // Asserting on the body rather than the status matters: with a navigationFallback that
+  // URL returns 200 with index.html, and a status check would cry "the secret is public"
+  // falsely on every deploy.
+  it('passes when the config URL returns a SPA fallback rather than the config', async () => {
+    const site = await stub({
+      ...OK_SITE,
+      '/staticwebapp.config.json': [200, '<html>packsheet</html>'],
+    });
+    const { status } = await verify(site, await stub({ '/': [403, 'no'] }));
+    expect(status).toBe(0);
+  });
+
+  it('reports the observed statuses so the refusal code can be pinned later', async () => {
+    const { output } = await verify(await stub(OK_SITE), await stub({ '/': [403, 'no'] }));
+    expect(output).toMatch(/site=200/);
+    expect(output).toMatch(/origin=403/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wiring
 // ---------------------------------------------------------------------------
 
 interface Step {
@@ -136,8 +290,8 @@ interface Step {
   with?: Record<string, string>;
 }
 
-/** Select the job by name: `Object.values(jobs)[0]` silently relocates every assertion
- *  to the wrong job the moment a workflow gains one ahead of the deploy job. */
+/** By name: `Object.values(jobs)[0]` silently relocates every assertion to the wrong job
+ *  the moment a workflow gains one ahead of the deploy job. */
 function stepsOf(workflow: string, jobName = 'deploy'): Step[] {
   const doc = parse(readFileSync(repoPath(`.github/workflows/${workflow}`), 'utf8'));
   const job = doc?.jobs?.[jobName] as { steps?: Step[] } | undefined;
@@ -146,67 +300,72 @@ function stepsOf(workflow: string, jobName = 'deploy'): Step[] {
 }
 
 /** Comment lines are stripped before matching, so a step that *documents* the lock is
- *  not mistaken for one that runs it — and a decoy comment cannot satisfy an assertion. */
+ *  not mistaken for one that runs it, and a decoy comment satisfies nothing. */
 const executable = (run: string | undefined) =>
   (run ?? '')
     .split('\n')
     .filter((l) => !l.trim().startsWith('#'))
     .join('\n');
 
-const callsScript = (s: Step) => executable(s.run).includes('write-origin-lock.sh');
+const callsWriter = (s: Step) => executable(s.run).includes('write-origin-lock.sh');
+const callsVerifier = (s: Step) => executable(s.run).includes('verify-origin-lock.sh');
 const isBuild = (s: Step) => s.name === 'Build';
 const isDeploy = (s: Step) => (s.uses ?? '').startsWith('Azure/static-web-apps-deploy');
-const isSmokeTest = (s: Step) => executable(s.run).includes('packsheet.io/');
 
 describe('production workflow wiring', () => {
   const steps = stepsOf('deploy-production.yml');
 
-  // dist/ must exist to be written into, and must be written before it is uploaded.
   it('writes the lock after the build and before the upload', () => {
     const build = steps.findIndex(isBuild);
-    const lock = steps.findIndex(callsScript);
+    const lock = steps.findIndex(callsWriter);
     const deploy = steps.findIndex(isDeploy);
     expect(build).toBeGreaterThanOrEqual(0);
     expect(lock).toBeGreaterThan(build);
     expect(lock).toBeLessThan(deploy);
   });
 
-  // The directory passed to the script and the directory uploaded are two independent
-  // strings that must agree. If they drift the config is written somewhere that never
-  // ships, which is invisible at deploy time and only shows up as an unlocked origin.
+  // The directory passed to the writer and the directory uploaded are independent
+  // strings that must agree, or the config is written somewhere that never ships.
   it('writes into exactly the directory that gets uploaded', () => {
-    const lockStep = steps.find(callsScript);
+    const lockStep = steps.find(callsWriter);
     const deployStep = steps.find(isDeploy);
-    const argument = executable(lockStep?.run).trim().split(/\s+/).pop();
-    expect(argument).toBe(deployStep?.with?.app_location);
+    const args = executable(lockStep?.run).trim().split('\n')[0].trim().split(/\s+/);
+    expect(args.length).toBe(2); // script + one argument, no trailing comment or extras
+    expect(args[1]).toBe(deployStep?.with?.app_location);
+  });
+
+  // A third string can move where SWA looks for the config: the docs require it at the
+  // root of output_location when that is set. Pinned rather than reasoned about.
+  it('does not set output_location, which would move where the config must live', () => {
+    expect(steps.find(isDeploy)?.with?.output_location).toBeUndefined();
+  });
+
+  // Oryx re-running its own build would regenerate the artifact and discard the config.
+  it('keeps the platform build disabled so the artifact is the one we wrote into', () => {
+    expect(steps.find(isDeploy)?.with?.skip_app_build).toBe(true);
   });
 
   it('takes the value from the environment, never the script body', () => {
-    const step = steps.find(callsScript);
+    const step = steps.find(callsWriter);
     expect(step?.env?.ORIGIN_VERIFY).toBe('${{ secrets.SWA_ORIGIN_VERIFY }}');
     expect(step?.run).not.toContain('secrets.SWA_ORIGIN_VERIFY');
   });
 
-  // The compensating control for a change that cannot be rehearsed on staging. Without
-  // it the workflow ends at "upload succeeded" and a broken Cloudflare rule produces a
-  // fully green deploy over a site returning 403 to everyone.
   it('verifies the running site after deploying', () => {
-    const deploy = steps.findIndex(isDeploy);
-    const smoke = steps.findIndex(isSmokeTest);
-    expect(smoke).toBeGreaterThan(deploy);
+    expect(steps.findIndex(callsVerifier)).toBeGreaterThan(steps.findIndex(isDeploy));
   });
 
-  it('checks both hostnames and that the config is not served', () => {
-    const smoke = executable(steps.find(isSmokeTest)?.run);
-    expect(smoke).toContain('https://packsheet.io/');
-    expect(smoke).toContain('AZURE_HOSTNAME');
-    expect(smoke).toContain('staticwebapp.config.json');
+  it('points the verifier at the real site and the Azure hostname', () => {
+    const step = steps.find(callsVerifier);
+    expect(executable(step?.run)).toContain('https://packsheet.io');
+    expect(executable(step?.run)).toContain('AZURE_HOSTNAME');
+    expect(step?.env?.AZURE_HOSTNAME).toMatch(/\.azurestaticapps\.net$/);
   });
 });
 
 describe('the secret stays out of a public repository', () => {
   // existsSync would fail on an untracked local file — anyone who runs the script by
-  // hand in the repo root — and would miss a file committed at some other path. Ask git.
+  // hand — and would miss a file committed at some other path. Ask git.
   it('has no committed staticwebapp.config.json anywhere', () => {
     const tracked = execFileSync('git', ['ls-files', '*staticwebapp.config.json'], {
       cwd: repoPath('.'),
@@ -217,12 +376,12 @@ describe('the secret stays out of a public repository', () => {
 });
 
 describe('staging deliberately has no origin lock', () => {
-  // forwardingGateway requires the Standard plan; staging is on Free on purpose, to halve
-  // hosting cost. A config demanding a header on a plan that ignores the setting is worse
-  // than none — it reads as protection that is not there.
-  it.each(['deploy-staging.yml', 'pr-preview.yml'])('does not run the script in %s', (wf) => {
+  // forwardingGateway requires the Standard plan; staging is Free on purpose, to halve
+  // hosting cost. A config demanding a header on a plan that ignores the setting is
+  // worse than none — it reads as protection that is not there.
+  it.each(['deploy-staging.yml', 'pr-preview.yml'])('does not run the scripts in %s', (wf) => {
     const jobs = parse(readFileSync(repoPath(`.github/workflows/${wf}`), 'utf8')).jobs;
     const everyStep = Object.values(jobs).flatMap((j) => (j as { steps?: Step[] }).steps ?? []);
-    expect(everyStep.filter(callsScript)).toHaveLength(0);
+    expect(everyStep.filter((s) => callsWriter(s) || callsVerifier(s))).toHaveLength(0);
   });
 });

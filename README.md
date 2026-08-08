@@ -148,12 +148,29 @@ The safe sequence:
 
 1. Add a **second** Cloudflare header, e.g. `X-Origin-Verify-Next`, carrying the new value,
    leaving the existing one in place.
-2. Update `SWA_ORIGIN_VERIFY` and change `HEADER_NAME` in `scripts/write-origin-lock.sh` to
-   the new header. Deploy. Production now demands only the new header, which Cloudflare is
-   already sending.
+2. Update `SWA_ORIGIN_VERIFY`, and change `HEADER_NAME` in **both**
+   `scripts/write-origin-lock.sh` **and** `tests/deploy-origin-lock.test.ts` to the new
+   header. Both, or the suite goes red — and since `deploy-production.yml` runs the tests
+   before building, the rotation deploy is then blocked halfway through, with Cloudflare
+   sending two headers and production demanding neither. The duplication is deliberate:
+   a test that imported the constant from the script would pin nothing.
+   Deploy. Production now demands only the new header, which Cloudflare already sends.
 3. Delete the old Cloudflare header.
 
 Never skip to step 3.
+
+The value itself must contain no whitespace — not even a trailing newline, which is easy
+to introduce by pasting into the GitHub secrets UI. `write-origin-lock.sh` refuses rather
+than trimming, so that mistake fails the build instead of silently deploying a header
+value Cloudflare can never match.
+
+### What still is not covered
+
+`Verify the lock from both sides` runs on every production deploy, so a lock that is
+already broken is caught within a minute of a release. Nothing checks **between**
+releases: if the Cloudflare rule is changed on a quiet Tuesday, the site starts refusing
+everyone and no deploy runs to notice. An external uptime monitor on `packsheet.io` is
+the missing third leg, and is not yet set up.
 
 ## Design system
 

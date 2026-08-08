@@ -16,9 +16,10 @@
 # Usage:  ORIGIN_VERIFY=<value> scripts/write-origin-lock.sh <output-dir>
 set -euo pipefail
 
-# The header name is duplicated in exactly one other place on earth: the Cloudflare
-# transform rule. Changing it here without changing it there takes production down
-# completely, so the tests pin this exact string.
+# Duplicated in exactly two other places: the Cloudflare transform rule, and
+# tests/deploy-origin-lock.test.ts. The test's copy is deliberate — importing this
+# constant would pin nothing — so rotating the header name means editing all three.
+# The README's rotation procedure lists them.
 readonly HEADER_NAME='X-Origin-Verify'
 
 readonly out_dir="${1:?usage: write-origin-lock.sh <output-dir>}"
@@ -28,13 +29,31 @@ if [ ! -d "$out_dir" ]; then
   exit 1
 fi
 
-# `-z` alone only catches an unset or empty secret. A value that is whitespace, or has
-# picked up a trailing newline, produces a config demanding a header Cloudflare never
-# sends — the same total outage the guard exists to prevent, but passing the guard.
-# Stripping first means those cases fail here, where it costs a red build.
-readonly trimmed="$(printf '%s' "${ORIGIN_VERIFY-}" | tr -d '[:space:]')"
-if [ -z "$trimmed" ]; then
-  echo "::error::ORIGIN_VERIFY is empty or whitespace. Refusing to write a config that would reject every request." >&2
+# Reject any whitespace rather than stripping it. Two reasons:
+#
+#  1. `-z` alone only catches a value that is entirely empty or entirely whitespace. The
+#     realistic failure is a secret pasted into the GitHub UI with a trailing newline —
+#     content PLUS whitespace — which passes an emptiness test and then writes a header
+#     value Cloudflare can never match. Total production outage, green build.
+#  2. Writing a trimmed value would be worse than refusing: `tr -d '[:space:]'` removes
+#     *internal* whitespace too, so a legitimate value would be silently rewritten into
+#     something that no longer matches what Cloudflare sends.
+#
+# Refusing keeps the value Azure demands byte-identical to the one pasted into
+# Cloudflare, which is the only property that matters here.
+#
+# Assigned in two statements: `readonly x="$(cmd)"` masks the command's exit status from
+# `set -e`. Harmless for printf|tr, but not a pattern to leave lying around.
+stripped="$(printf '%s' "${ORIGIN_VERIFY-}" | tr -d '[:space:]')"
+readonly stripped
+
+if [ -z "$stripped" ]; then
+  echo "::error::ORIGIN_VERIFY is empty or entirely whitespace. Refusing to write a config that would reject every request." >&2
+  exit 1
+fi
+
+if [ "${ORIGIN_VERIFY-}" != "$stripped" ]; then
+  echo "::error::ORIGIN_VERIFY contains whitespace. Cloudflare cannot send a header value with whitespace, so this would reject every request. Re-set the secret with no leading, trailing or internal whitespace." >&2
   exit 1
 fi
 
