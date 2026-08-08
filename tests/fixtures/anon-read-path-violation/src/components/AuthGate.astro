@@ -1,0 +1,8 @@
+---
+// A component with no auth-sounding name of its own, importing the choke point.
+// Standing in for the realistic case: some shared component quietly pulls in auth
+// two or three hops away from the page that renders it.
+import '../lib/auth/index';
+---
+
+<p>auth gate</p>

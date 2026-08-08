@@ -86,7 +86,11 @@ Two more that are less obvious:
 
 - **The public share page must not require authentication.** It is the most-visited surface
   and most of its visitors never sign in. Adding an auth check to that path is a
-  correctness _and_ a hosting-cost problem.
+  correctness _and_ a hosting-cost problem — auth providers price by monthly active user, and
+  every anonymous read counted as one would turn a compute bill of single-digit dollars into
+  one of several thousand. All auth is required to go through `src/lib/auth/`, and
+  `tests/anonymous-read-path.test.ts` builds the site and fails the required `check` job if
+  any anonymous route can reach it.
 - **No third-party CDN for fonts or assets on reader-facing pages.** Someone reading a
   shared pack list should not have their IP disclosed to a third party to do it.
 

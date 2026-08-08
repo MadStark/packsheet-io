@@ -45,7 +45,12 @@ Packsheet should require you to abandon a list you already have.
 
 The public share page is served without authentication by design. It is the most-visited
 surface by a wide margin — most visitors are strangers who never sign in — and keeping it
-free of an auth check is both a performance and a hosting-cost decision.
+free of an auth check is both a performance and a hosting-cost decision: auth providers price
+by monthly active user, and 250k of these anonymous reads counted as MAUs would cost
+thousands of dollars a month against a compute bill in the single digits. All Clerk usage is
+required to go through one choke point, `src/lib/auth/`, and `tests/anonymous-read-path.test.ts`
+— part of the required `check` job — builds the site and fails if any anonymous route can
+reach it.
 
 ## Development
 
