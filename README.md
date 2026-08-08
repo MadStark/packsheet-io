@@ -116,9 +116,44 @@ than committing it, because this repository is public.
 
 **Staging does not have it, and cannot.** `forwardingGateway` requires the Standard plan
 and staging is deliberately on Free to halve the hosting cost. This is the one change in
-the project that production receives untested — `tests/deploy-origin-lock.test.ts` pins the
-parts that can be checked without deploying, and the rest is verified against the running
-site after release.
+the project that production receives untested — `tests/deploy-origin-lock.test.ts` runs
+`scripts/write-origin-lock.sh` and pins what can be checked without deploying, and the
+`Verify the lock from both sides` step checks the rest against the running site
+immediately after each release.
+
+#### If production returns 403, check Cloudflare first
+
+The lock depends on a Cloudflare transform rule that lives outside this repository. If it
+is edited, disabled, narrowed, or a DNS record is switched to grey-cloud, Azure starts
+refusing every request and **nothing in this repo can tell you that** — the deploy was
+green, the code is fine.
+
+Restoring the Cloudflare rule is the fast path: seconds, no build, no merge. Reverting the
+deploy is the slow one — a full `npm ci`, test, build and upload with the site down
+throughout, and it rests on the assumption that a deployment omitting the file clears a
+previously-applied `forwardingGateway`. **Reach for Cloudflare first.**
+
+The rule must set `X-Origin-Verify` to exactly the value in the `SWA_ORIGIN_VERIFY` secret
+(production environment), and is scoped to `http.host eq "packsheet.io"` so the value is
+not broadcast to every other host on the zone.
+
+#### Rotating the secret takes two deploys
+
+`requiredHeaders` is conjunctive — Azure demands _all_ listed headers — so "old value OR
+new value" cannot be expressed on one header name. Changing either side alone is an
+outage: update the secret first and Cloudflare still sends the old value; update Cloudflare
+first and the deployed config still demands the old one.
+
+The safe sequence:
+
+1. Add a **second** Cloudflare header, e.g. `X-Origin-Verify-Next`, carrying the new value,
+   leaving the existing one in place.
+2. Update `SWA_ORIGIN_VERIFY` and change `HEADER_NAME` in `scripts/write-origin-lock.sh` to
+   the new header. Deploy. Production now demands only the new header, which Cloudflare is
+   already sending.
+3. Delete the old Cloudflare header.
+
+Never skip to step 3.
 
 ## Design system
 
