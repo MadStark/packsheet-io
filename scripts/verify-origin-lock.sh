@@ -65,17 +65,33 @@ fi
 
 # 2. The origin must refuse a direct request.
 #
-# Requires a 4xx rather than merely "not 200". Seconds after an upload the origin can
-# emit a transient 404 or 503 while the deployment settles, and accepting any non-200
-# would report "the lock is in effect" when it may not be — a false pass on the only
-# check that the lock works at all, whose failure mode is silent and permanent.
-#
-# Not pinned to exactly 403: the Azure docs never state which status a missing required
-# header produces. The observed value is printed below so it can be pinned once seen.
+# A 200 is retried before failing. The first request after an upload can land on an edge
+# still serving the previous deployment, which has no forwardingGateway — failing
+# immediately would send an operator down the slow, site-down revert path over what a few
+# seconds of patience resolves. `http_status` does not retry a 200 (a definite answer is
+# normally what it is looking for), so the wait is done here.
 origin_status="$(http_status "$origin/")"
+i=0
+while [ "$origin_status" = "200" ] && [ "$i" -lt "$ATTEMPTS" ]; do
+  sleep "$DELAY"
+  origin_status="$(http_status "$origin/")"
+  i=$((i + 1))
+done
+
+# 404 is REJECTED, not accepted as a refusal. Azure's front door answers 404 for any
+# *.azurestaticapps.net name that is not a live app, so a typo in AZURE_HOSTNAME — or the
+# Static Web App being recreated, the one thing that changes this hostname — produces a
+# 404 that is indistinguishable from a lock working. Accepting it would report "verified"
+# while the real origin serves the site unprotected, which is the exact silent, permanent
+# failure this script exists to prevent.
+#
+# If it turns out Azure uses 404 for a missing required header, this fails on the first
+# release with the site already up and serving. That is the safe direction: a red step
+# telling us the real code, rather than a green one telling us nothing.
 case "$origin_status" in
+  404) fail "$origin/ returned 404. That is what Azure returns for a hostname that is not a live Static Web App, so it does NOT prove the lock is working. Check AZURE_HOSTNAME is the current default hostname of the production app. If the hostname is right, Azure is using 404 for the missing required header — pin that here rather than accepting 404 in general." ;;
   4*) ;;
-  200) fail "$origin/ still returns 200 — the origin lock is NOT in effect. The config did not reach the artifact, or forwardingGateway was not applied. The Azure hostname is serving the site directly, bypassing Cloudflare." ;;
+  200) fail "$origin/ still returns 200 after $ATTEMPTS retries — the origin lock is NOT in effect. The config did not reach the artifact, or forwardingGateway was not applied. The Azure hostname is serving the site directly, bypassing Cloudflare." ;;
   *) fail "$origin/ returned $origin_status; expected a 4xx refusal. This does not prove the lock is working, and a false pass here is silent and permanent." ;;
 esac
 
