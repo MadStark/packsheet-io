@@ -137,27 +137,36 @@ The rule must set `X-Origin-Verify` to exactly the value in the `SWA_ORIGIN_VERI
 (production environment), and is scoped to `http.host eq "packsheet.io"` so the value is
 not broadcast to every other host on the zone.
 
-#### Rotating the secret takes two deploys
+#### Rotating the secret: one deploy, and the header name alternates
 
 `requiredHeaders` is conjunctive — Azure demands _all_ listed headers — so "old value OR
-new value" cannot be expressed on one header name. Changing either side alone is an
+new value" cannot be expressed on **one** header name. Changing either side alone is an
 outage: update the secret first and Cloudflare still sends the old value; update Cloudflare
 first and the deployed config still demands the old one.
 
-The safe sequence:
+The way through is to rotate the **name** as well as the value, alternating between two
+names forever: `X-Origin-Verify` → `X-Origin-Verify-Alt` → `X-Origin-Verify` → … Each
+rotation is a single deploy, and the name you end on is simply the other one.
 
-1. Add a **second** Cloudflare header, e.g. `X-Origin-Verify-Next`, carrying the new value,
-   leaving the existing one in place.
-2. Update `SWA_ORIGIN_VERIFY`, and change `HEADER_NAME` in **both**
-   `scripts/write-origin-lock.sh` **and** `tests/deploy-origin-lock.test.ts` to the new
-   header. Both, or the suite goes red — and since `deploy-production.yml` runs the tests
-   before building, the rotation deploy is then blocked halfway through, with Cloudflare
-   sending two headers and production demanding neither. The duplication is deliberate:
-   a test that imported the constant from the script would pin nothing.
-   Deploy. Production now demands only the new header, which Cloudflare already sends.
-3. Delete the old Cloudflare header.
+1. **Cloudflare only.** Add a second header — the _other_ name — carrying the new value,
+   leaving the current one in place. Production ignores it; it demands only the current
+   name, which is unchanged. Nothing has moved yet.
+2. **One deploy.** Update `SWA_ORIGIN_VERIFY` to the new value, and change `HEADER_NAME`
+   to the other name in **both** `scripts/write-origin-lock.sh` **and**
+   `tests/deploy-origin-lock.test.ts`. Both, or the suite goes red. The duplication is
+   deliberate: a test importing the constant from the script would pin nothing.
+   Deploy. Production now demands only the new header, which Cloudflare is already sending.
+3. **Cloudflare only.** Delete the old header.
 
 Never skip to step 3.
+
+**If you change `HEADER_NAME` in only one of the two files, nothing breaks in
+production.** `deploy-production.yml` runs `npm test` before the build and before the
+config is written, so the job fails at the test step: nothing is built, nothing is
+written, nothing is uploaded. The live deployment keeps the config it already had, which
+demands the old header — and step 1 left Cloudflare still sending it. **The site stays
+up.** Fix the second file and deploy again; there is no incident here, and no reason to
+reach for a revert.
 
 The value itself must contain no whitespace — not even a trailing newline, which is easy
 to introduce by pasting into the GitHub secrets UI. `write-origin-lock.sh` refuses rather

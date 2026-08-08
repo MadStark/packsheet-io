@@ -249,6 +249,16 @@ describe('verify-origin-lock.sh', () => {
     expect(output).toMatch(/expected a 4xx refusal/);
   });
 
+  // Azure answers 404 for any *.azurestaticapps.net name that is not a live app, so a
+  // typo in AZURE_HOSTNAME looks identical to a working lock. Accepting it would report
+  // "verified" while the real origin serves the site unprotected — the precise silent,
+  // permanent failure this script exists to prevent.
+  it('rejects 404, which is indistinguishable from a wrong hostname', async () => {
+    const { status, output } = await verify(await stub(OK_SITE), await stub({ '/': [404, 'x'] }));
+    expect(status).toBe(1);
+    expect(output).toMatch(/Check AZURE_HOSTNAME/);
+  });
+
   it('fails when the config file is served', async () => {
     const site = await stub({
       ...OK_SITE,
