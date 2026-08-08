@@ -16,7 +16,11 @@ on:
 
 concurrency:
   group: deploy-production
-  cancel-in-progress: true
+  # NOT cancel-in-progress. You cannot cancel an upload that has already happened: a run
+  # cancelled between the upload and the verify step leaves a live, unverified release,
+  # shown as a grey "cancelled" rather than a failure, with no notification. Queueing
+  # costs a few minutes; cancelling costs the only check that the release works.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -75,6 +79,10 @@ jobs:
       - name: Write the production-only origin lock
         env:
           ORIGIN_VERIFY: ${{ secrets.SWA_ORIGIN_VERIFY }}
+          # Stamped into the artifact so the verify step can tell THIS release from the
+          # one before it. Without it, an edge still serving the previous (locked)
+          # deployment answers exactly like a correctly locked new one.
+          DEPLOY_SHA: ${{ github.sha }}
         run: scripts/write-origin-lock.sh dist
 
       - name: Deploy to Azure Static Web Apps
@@ -106,4 +114,7 @@ jobs:
           # Azure's permanent default hostname for swa-packsheet-prod. Public already, so
           # not a secret. It only changes if the Static Web App itself is recreated.
           AZURE_HOSTNAME: wonderful-island-05575f303.7.azurestaticapps.net
-        run: scripts/verify-origin-lock.sh https://packsheet.io "https://$AZURE_HOSTNAME"
+        # Bounded: the retry policy can otherwise spend ~20 minutes going red, all of it
+        # after the release is already live.
+        timeout-minutes: 8
+        run: scripts/verify-origin-lock.sh https://packsheet.io "https://$AZURE_HOSTNAME" "$GITHUB_SHA"
