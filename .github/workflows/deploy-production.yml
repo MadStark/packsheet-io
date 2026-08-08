@@ -95,7 +95,6 @@ jobs:
           # so the deploy step only uploads. Oryx would otherwise re-run its own build
           # on an unpinned toolchain, which can differ from what CI just verified.
           skip_app_build: true
-          skip_api_build: true
 
       # Without this the workflow ends at "upload succeeded" and nothing ever checks the
       # site answers. The why, and the exit conditions, are in the script — which is a

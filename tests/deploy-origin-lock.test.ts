@@ -327,7 +327,7 @@ describe('verify-origin-lock.sh', () => {
   ])('fails when the origin returns %s rather than a refusal', async (_l, code) => {
     const { status, output } = await verify(await stub(OK_SITE), await stub({ '/': [code, 'x'] }));
     expect(status).toBe(1);
-    expect(output).toMatch(/expected 401 or 403/);
+    expect(output).toMatch(/expected 403/);
   });
 
   // Azure answers 404 for any *.azurestaticapps.net name that is not a live app, so a
@@ -368,9 +368,14 @@ describe('verify-origin-lock.sh', () => {
     expect(output).toMatch(/origin=403/);
   });
 
-  it('accepts 401 as a refusal', async () => {
-    const { status } = await verify(await stub(OK_SITE), await stub({ '/': [401, 'no'] }));
-    expect(status).toBe(0);
+  // Pinned to 403, the code Azure was observed to return on the first production
+  // release. 401 was previously accepted only because the docs never said which code
+  // forwardingGateway uses; every extra status accepted is one that could mask a
+  // different fault.
+  it('rejects 401 now that the real refusal code is known', async () => {
+    const { status, output } = await verify(await stub(OK_SITE), await stub({ '/': [401, 'no'] }));
+    expect(status).toBe(1);
+    expect(output).toMatch(/expected 403/);
   });
 
   // None of these is evidence that forwardingGateway is doing anything. 404 already had
@@ -382,7 +387,7 @@ describe('verify-origin-lock.sh', () => {
   ])('rejects %s, which is not evidence the lock works', async (_l, code) => {
     const { status, output } = await verify(await stub(OK_SITE), await stub({ '/': [code, 'x'] }));
     expect(status).toBe(1);
-    expect(output).toMatch(/expected 401 or 403/);
+    expect(output).toMatch(/expected 403/);
   });
 
   // A request that never completed is its own outcome. Reporting `not-served` off the
@@ -414,6 +419,21 @@ describe('verify-origin-lock.sh', () => {
     );
     expect(status).toBe(0);
     expect(output).toMatch(/release=sha-current/);
+  });
+
+  // The file is created BY this release, so a 404 in the seconds after upload is normal
+  // propagation, not a fault. Failing on the first one turned a correct release red on
+  // the very first production run of this check.
+  it('rides out a 404 on the marker while the edge catches up', async () => {
+    const site = await stub({
+      ...OK_SITE,
+      '/_deploy.txt': [
+        [404, 'not yet'],
+        [200, 'sha-current\n'],
+      ],
+    });
+    const { status } = await verify(site, await stub(REFUSING_ORIGIN), 'sha-current', '4');
+    expect(status).toBe(0);
   });
 
   it('fails when the release marker is missing entirely', async () => {
