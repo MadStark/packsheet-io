@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Writes the production-only origin lock into a build output directory.
+# Writes the production-only origin lock, and a release marker, into a build output
+# directory.
 #
 # Azure gives every Static Web App a permanent, public *.azurestaticapps.net hostname.
 # It cannot be disabled, it serves the production build, and it bypasses Cloudflare
@@ -9,11 +10,16 @@
 # Instead the origin refuses anything without X-Origin-Verify, which a Cloudflare
 # request-header transform sets on requests it forwards to the origin.
 #
-# This lives in a script rather than inline in the workflow so the tests can run it.
-# Asserting on the YAML instead lets both of the mutations that cause an outage — a
-# wrong output directory and a misspelt header name — pass a green suite.
+# The release marker is a separate job done here rather than as an inline workflow step,
+# so that it is covered by the same tests: without it the verifier cannot tell THIS
+# release from the one before it, and an edge still serving the previous (locked)
+# deployment makes a broken release look verified.
 #
-# Usage:  ORIGIN_VERIFY=<value> scripts/write-origin-lock.sh <output-dir>
+# This lives in a script rather than inline in the workflow so the tests can run it.
+# Asserting on the YAML instead lets the mutations that cause an outage — a wrong output
+# directory, a misspelt header name — pass a green suite.
+#
+# Usage:  ORIGIN_VERIFY=<value> [DEPLOY_SHA=<sha>] scripts/write-origin-lock.sh <output-dir>
 set -euo pipefail
 
 # Duplicated in exactly two other places: the Cloudflare transform rule, and
@@ -59,9 +65,26 @@ fi
 
 readonly config_path="$out_dir/staticwebapp.config.json"
 
+# Refuse rather than overwrite. Astro copies public/ verbatim into the build output, so
+# the moment anyone adds a staticwebapp.config.json for route rules, security headers or
+# a navigationFallback, it lands here — and this script runs after Build, so a blind
+# `>` would win every time and silently drop their CSP in production. Merging the two
+# would be the friendlier fix, but it guesses at intent; failing names the collision and
+# costs a red build rather than a security regression nobody sees.
+if [ -e "$config_path" ]; then
+  echo "::error::$config_path already exists. This script writes the origin lock and will not overwrite a config it did not create — merging the two is a deliberate decision, not something to do silently. Merge the forwardingGateway block into that file instead, and extend this script to expect it." >&2
+  exit 1
+fi
+
+# Written to a temporary file and moved into place, so a failure part-way through cannot
+# leave a truncated or empty config where the deploy step will happily upload it.
+tmp_config="$(mktemp "$out_dir/.origin-lock.XXXXXX")"
+readonly tmp_config
+trap 'rm -f "$tmp_config"' EXIT
+
 jq -n --arg name "$HEADER_NAME" --arg value "$ORIGIN_VERIFY" \
   '{forwardingGateway: {requiredHeaders: {($name): $value}}}' \
-  > "$config_path"
+  > "$tmp_config"
 
 # Assert the leaf that actually matters. `has("forwardingGateway")` would be a
 # tautology — it reads back a key the literal above always contains — and would pass
@@ -69,9 +92,20 @@ jq -n --arg name "$HEADER_NAME" --arg value "$ORIGIN_VERIFY" \
 jq -e --arg name "$HEADER_NAME" \
   '(.forwardingGateway.requiredHeaders[$name] | type) == "string"
    and (.forwardingGateway.requiredHeaders[$name] | length) > 0' \
-  "$config_path" > /dev/null
+  "$tmp_config" > /dev/null
 
-# Deliberately no byte count and no length: this file is a fixed prefix plus the
-# secret, so printing its size publishes the secret's length to logs that are public
-# on this repository, and GitHub's masking cannot redact a derived number.
-echo "Wrote $config_path"
+mv "$tmp_config" "$config_path"
+
+# The release marker. Without it the verifier cannot distinguish this release from the
+# previous one: an edge still serving the older, locked deployment answers exactly like a
+# correctly locked new one, and the check passes on the strength of the deployment it was
+# meant to replace. Optional so the script stays runnable outside CI.
+if [ -n "${DEPLOY_SHA-}" ]; then
+  printf '%s\n' "$DEPLOY_SHA" > "$out_dir/_deploy.txt"
+fi
+
+# Deliberately nothing derived from the value on stdout OR stderr: this file is a fixed
+# prefix plus the secret, so printing its size publishes the secret's length to logs
+# that are public on this repository, and GitHub's masking cannot redact a derived
+# number. The tests compare both streams across two very different secrets.
+echo "Wrote the origin lock"
