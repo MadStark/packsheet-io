@@ -1,0 +1,10 @@
+---
+// Reaches auth through a module that only `import()`s it. Awaited here so the
+// export is genuinely used and Rollup cannot tree-shake the dynamic edge away —
+// a fixture case that got optimised out of the graph would prove nothing.
+import { loadAuth } from '../lib/lazy-auth';
+
+await loadAuth();
+---
+
+<p>dynamic</p>

@@ -1,8 +1,15 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 
-// Deliberately minimal: this fixture exists only so
-// tests/anonymous-read-path.test.ts has a real Astro project to build and walk
-// where the invariant is actually violated, proving the walker can fail. It needs
-// no integrations, no site URL, nothing beyond a src/pages directory.
-export default defineConfig({});
+import vue from '@astrojs/vue';
+
+// The Vue integration is here for one reason: without a client-side framework this
+// fixture's build has nothing in its client Rollup pass, and the two mechanisms the
+// checker most depends on — the three-pass union, and detection of an island whose
+// import the compiler strips from the server module (`client:only`) — would be
+// justified in prose and exercised by nothing. `@astrojs/vue` and `vue` are already
+// dependencies of the repo, so this adds no install; the fixture has no
+// package.json of its own and resolves both from the repo root's node_modules.
+export default defineConfig({
+  integrations: [vue()],
+});

@@ -3,8 +3,9 @@
  *
  * This module is the ONLY place in the codebase that is allowed to import or
  * re-export anything from Clerk. Every other module — every page, every layout,
- * every component, `src/middleware.ts` if one is ever added — must reach Clerk (if
- * it needs to at all) by going through here, never by importing `@clerk/*` directly.
+ * every component, middleware in either spelling Astro accepts (`src/middleware.ts`
+ * or `src/middleware/index.ts`) if one is ever added — must reach Clerk (if it needs
+ * to at all) by going through here, never by importing `@clerk/*` directly.
  *
  * Why this matters more than the usual "keep your SDK usage in one place" advice:
  * Clerk, like every mainstream auth provider, prices by monthly active user, not by
@@ -18,11 +19,22 @@
  * two numbers.
  *
  * `tests/anonymous-read-path.test.ts` enforces this at build time: it builds the
- * real site, walks the resulting module graph, and fails if any anonymous route (or
- * `src/middleware.ts`, which would poison every route at once) transitively imports
- * this module, and separately fails if `@clerk/*` is imported from anywhere other
- * than this directory. Don't delete that test to make a build go green — read the
- * comment at the top of it first.
+ * real site, walks the resulting module graph, and fails if ANY module outside this
+ * directory imports anything inside it — an edge rule, not a "can an anonymous route
+ * reach it" rule, because a `client:only` island's import is dropped from the server
+ * module and no route-rooted walk can see it. It separately fails if `@clerk/*` is
+ * imported from anywhere other than this directory. Don't delete that test to make a
+ * build go green — read the comment at the top of it first.
+ *
+ * The corollary of an edge rule, and the thing to get right when adding files here:
+ * this directory must contain NOTHING that an anonymous route could legitimately
+ * want. A pure-types `types.ts`, or a shared `SIGN_IN_PATH` constant that a nav
+ * component imports to render a link, would ship zero auth code and still fail CI
+ * with a $6,000 message — the kind of false positive that gets a guardrail weakened
+ * or deleted rather than obeyed. Shared auth-adjacent *types* and *constants* belong
+ * somewhere an anonymous route may import from (src/lib/, or the consuming module
+ * itself). What lives here is only what must never be reachable: the SDK and the
+ * code that calls it.
  *
  * Clerk is not installed yet (there are no consumers of this module today), so this
  * file currently exports nothing. It exists so the choke point — and the test that
