@@ -22,9 +22,18 @@
  * real site, walks the resulting module graph, and fails if ANY module outside this
  * directory imports anything inside it — an edge rule, not a "can an anonymous route
  * reach it" rule, because a `client:only` island's import is dropped from the server
- * module and no route-rooted walk can see it. It separately fails if `@clerk/*` is
- * imported from anywhere other than this directory. Don't delete that test to make a
- * build go green — read the comment at the top of it first.
+ * module and no route-rooted walk can see it.
+ *
+ * It separately fails if `@clerk/*` is imported by ANY module in that graph other than
+ * one in this directory — not merely by a first-party module under src/. That scoping
+ * is deliberate and was a real hole: `npx astro add @clerk/astro` wires the SDK in
+ * through astro.config.mjs and integration-injected middleware, touching no file under
+ * src/ at all, so a first-party-scoped rule waves the documented installation straight
+ * through. The one exemption is Clerk's own packages importing each other. What the
+ * module graph cannot see, and what no rule there will ever catch, is an SDK loaded
+ * over a `<script src="https://...">` tag or vendored into public/ — that has its own,
+ * separate assertion in the same file. Don't delete any of it to make a build go
+ * green; read the comment at the top of the test first.
  *
  * The corollary of an edge rule, and the thing to get right when adding files here:
  * this directory must contain NOTHING that an anonymous route could legitimately

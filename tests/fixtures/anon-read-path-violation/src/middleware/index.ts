@@ -2,10 +2,10 @@ import type { MiddlewareHandler } from 'astro';
 
 // Violation #6: middleware importing the choke point. Deliberately in the DIRECTORY
 // form (`src/middleware/index.ts`) rather than the single-file `src/middleware.ts`:
-// Astro resolves either, and the earlier version of the checker special-cased only
-// the single-file `.ts` spelling — so a middleware written this way was unchecked,
-// and no test ever executed that branch in either spelling. The edge-based rule needs
-// no path knowledge at all, and this fixture case is what proves it.
+// Astro resolves either spelling, so any rule that hardcodes a middleware path is
+// blind to the other one, and the blindness is silent — the unchecked spelling is
+// still built and still ships. The edge-based rule needs no path knowledge at all,
+// and this fixture case is what keeps it that way.
 //
 // Middleware is the worst place for an auth import: it runs ahead of every route's
 // own page module, so one import here puts the auth SDK on every anonymous read at

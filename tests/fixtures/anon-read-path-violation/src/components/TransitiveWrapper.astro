@@ -1,0 +1,12 @@
+---
+// One extra hop to AuthGate.astro, giving the fixture a LONGER path to a violating
+// module than the two pages that render AuthGate directly. That is what makes
+// findPageChain's "keep the shortest" comparison load-bearing: the page that renders
+// this wrapper sorts ahead of both of those, so a checker that simply reported the
+// first route it walked would print this four-hop chain instead of the three-hop one.
+//
+// This component imports AuthGate, not auth, so it is not itself a violation.
+import AuthGate from './AuthGate.astro';
+---
+
+<AuthGate />

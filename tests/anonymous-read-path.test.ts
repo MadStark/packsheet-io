@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep, relative } from 'node:path';
+import { join, sep, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import type { build as AstroBuild } from 'astro';
@@ -32,21 +32,40 @@ import type { build as AstroBuild } from 'astro';
  * checkAnonymousReadPath below for why reachability is unsafe here, and for what has
  * to be solved before anyone relaxes this back to reachability.
  *
- * Invariant B: nothing under src/ outside src/lib/auth/ may import `@clerk/*`
- * directly, once Clerk is a dependency. This is what makes "single choke point" a
- * fact about the codebase rather than a naming convention: Invariant A only ever
- * proves that nothing imports *this particular* module, so without Invariant B a
- * second, unguarded path to Clerk could open up right next to it and Invariant A
- * would have nothing to say about it.
+ * Invariant B: NO module in the build graph outside src/lib/auth/ may import
+ * `@clerk/*`, with one exemption — Clerk's own packages importing each other. This is
+ * what makes "single choke point" a fact about the codebase rather than a naming
+ * convention: Invariant A only ever proves that nothing imports *this particular*
+ * module, so without Invariant B a second, unguarded path to Clerk could open up right
+ * next to it and Invariant A would have nothing to say about it. Note "no module",
+ * not "no module under src/": the documented way to install Clerk adds no first-party
+ * file at all, and scoping this to first-party importers exempts precisely it. See
+ * checkClerkChokePoint.
+ *
+ * What neither invariant can see, stated plainly because the rest of this file invites
+ * the assumption that it is airtight: a module graph contains only what the bundler
+ * resolved. `<script is:inline src="https://js.clerk.com/...">` in a .astro file, or a
+ * vendored SDK dropped into public/, produce ZERO graph edges — and Clerk ships a
+ * browser bundle meant to be used exactly that way. That is a real boundary of any
+ * build-graph check, not a defect in this one. It is covered here by a separate,
+ * independent assertion that scans the HTML the build actually emitted for known auth
+ * CDN hosts (checkEmittedHtmlForAuthCdn), and the fixture's cdn-script.astro pins both
+ * halves of the boundary: invisible to the graph, caught by the HTML scan. Still
+ * uncovered, deliberately: an SDK vendored into public/ and loaded by a same-origin
+ * script tag, and any URL assembled at runtime. Closing those needs a different tool —
+ * a script-src/connect-src CSP enforced at the edge — not a longer regex here.
  *
  * A build-graph-based check that never finds anything is indistinguishable from a
  * broken one — this repo already has a documented case of that failure mode (see
  * the header comment on deploy-origin-lock.test.ts). Today nothing in the real site
  * imports auth, so Invariant A's real-repo assertion passes trivially and proves
- * nothing about the checker on its own. The self-test lower down in this file runs
- * the exact same functions against a fixture project that DOES violate the
- * invariant, in six different ways, and asserts each is caught with the right chain
- * and the right message.
+ * nothing about the checker on its own. Two things answer that. The self-test lower
+ * down in this file runs the exact same functions against a fixture project that DOES
+ * violate the invariant, in eight different ways, and asserts each is caught with the
+ * right chain and the right message. And the real-site block opens with a tripwire
+ * asserting its graph is genuinely populated, because every other assertion there is
+ * "this derived list is empty" — which an empty graph satisfies just as well as a
+ * clean one.
  *
  * Mechanism notes, from spiking this before writing it:
  *
@@ -63,8 +82,8 @@ import type { build as AstroBuild } from 'astro';
  *   first pass would miss anything reachable only from client-hydrated code. The
  *   fixture has a Vue integration and two islands specifically so this union is
  *   exercised rather than merely asserted here in prose: against the fixture the
- *   three passes contain 0, 205 and 12 modules, and the `client:only` island's own
- *   import of auth is visible only in that third, 12-module pass.
+ *   three passes contain 0, 218 and 13 modules, and the `client:only` island's own
+ *   import of auth is visible only in that third, 13-module pass.
  * - Page entry points are read off the build's own `virtual:astro:page:<route>@_@
  *   <ext>` modules rather than globbed from the filesystem, so the route list used
  *   here cannot drift from the routes the build actually produces. Under the
@@ -111,6 +130,10 @@ interface BuildGraph {
   /** route name (e.g. "src/pages/index") -> absolute path of the real page file it
    *  resolves to, read directly off the build's virtual:astro:page:* entries. */
   pageEntries: Map<string, string>;
+  /** outDir-relative path -> contents, for every .html the build emitted. Captured
+   *  because the module graph cannot see a `<script src="https://...">`; see
+   *  checkEmittedHtmlForAuthCdn and the header comment. */
+  emittedHtml: Map<string, string>;
 }
 
 /** Module ids sometimes carry a query suffix (e.g. a font imported as `...woff2?
@@ -181,6 +204,7 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
     };
   }
 
+  let emittedHtml: Map<string, string>;
   try {
     await build({
       root,
@@ -188,9 +212,17 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
       logLevel: 'error',
       vite: { plugins: [graphRecorderPlugin()] },
     });
+    // Read the emitted HTML into memory while it still exists — the `finally` below
+    // deletes it, and the CDN-script check downstream has no other way to see it.
+    emittedHtml = readEmittedHtml(outDir);
   } finally {
-    // Point every build at a throwaway directory and remove it unconditionally, so
-    // a failed build still leaves no artifact behind in the repo or the fixture.
+    // Point every build at a throwaway directory and remove it unconditionally, so a
+    // failed build still leaves no BUILD OUTPUT behind in the repo or the fixture.
+    // It is not the only artifact a build produces, and the comment used to claim it
+    // was: astro also writes its generated-types cache into the project it builds,
+    // .astro/ in the repo root and one in the fixture. Both are gitignored (and the
+    // fixture's is why eslint.config.mjs ignores `**/.astro/**` rather than
+    // `.astro/**`), but neither is removed here.
     rmSync(outDir, { recursive: true, force: true });
   }
 
@@ -212,13 +244,36 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
     }
   }
 
-  return { graph, pageEntries };
+  return { graph, pageEntries, emittedHtml };
 }
 
-/** Breadth-first, so the reported chain is the shortest path to the target — the
- *  clearest one to hand to whoever has to go fix the import, not just the first one
+/** Every .html file under `outDir`, keyed by its path relative to it. Astro's default
+ *  `format: 'directory'` means a route lands at `<route>/index.html`, and anything
+ *  copied verbatim out of public/ lands wherever it was placed — both are picked up by
+ *  the recursive walk, which is the point: this is deliberately looking at shipped
+ *  bytes rather than at anything the bundler modelled. */
+function readEmittedHtml(outDir: string): Map<string, string> {
+  const html = new Map<string, string>();
+  for (const entry of readdirSync(outDir, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.html')) continue;
+    const file = join(entry.parentPath, entry.name);
+    html.set(relative(outDir, file), readFileSync(file, 'utf8'));
+  }
+  return html;
+}
+
+/** Breadth-first, so the reported chain is A shortest path to the target — the
+ *  clearest kind to hand to whoever has to go fix the import, not just the first one
  *  Map iteration order happened to produce. Returns the full chain, starting at
  *  `from`, or null if nothing reachable from `from` satisfies `isTarget`.
+ *
+ *  What BFS guarantees is the LENGTH, not the identity. Neighbours come out of a Set
+ *  in Rollup's module-discovery order, so where two paths of equal length exist the
+ *  one rendered is whichever Rollup happened to find first, and that is not something
+ *  this file pins. Every chain asserted on below is a case where the shortest path
+ *  from the chosen route is unique, which is what makes those assertions stable; a
+ *  future fixture case with two shortest paths from one page should assert on the
+ *  chain's length or endpoints rather than on the whole chain.
  *
  *  This is presentation only. Nothing about whether a violation is REPORTED depends
  *  on it — see checkAnonymousReadPath — because a walk rooted at a page entry
@@ -244,9 +299,21 @@ function findChain(
 }
 
 /** The shortest chain from any page entry to `module`, or null if no page entry
- *  reaches it. Routes are visited in sorted order and ties are broken by that
- *  order, so the chain in a failure message is the same on every run rather than a
- *  function of Map insertion order. */
+ *  reaches it. Routes are visited in sorted order and a tie never displaces the
+ *  incumbent, so which ROUTE a failure message blames is the same on every run rather
+ *  than a function of Map insertion order. (Which path *within* that route gets
+ *  rendered carries findChain's weaker guarantee — see there.) Three fixture pages
+ *  reach AuthGate.astro, one of them through an extra hop, so both halves of this —
+ *  preferring the shorter chain, and breaking a tie by sorted route — run against a
+ *  real build rather than being merely intended.
+ *
+ *  The sort itself needs a synthetic graph to pin, and has one below. Rollup's
+ *  page-discovery order for the fixture is not alphabetical, but it does happen to
+ *  visit the two tied pages in the same relative order the sort does, so deleting
+ *  `.sort()` leaves the fixture's result unchanged today — and leaves it at the mercy
+ *  of a discovery order nothing here controls tomorrow, which is the whole reason the
+ *  sort exists. Only a graph whose insertion order deliberately disagrees with its
+ *  sorted order can show that, so that is what the unit test hands it. */
 function findPageChain(build: BuildGraph, module: string): string[] | null {
   let best: string[] | null = null;
   for (const route of [...build.pageEntries.keys()].sort()) {
@@ -257,8 +324,37 @@ function findPageChain(build: BuildGraph, module: string): string[] | null {
   return best;
 }
 
+/** Not every id in the graph is a filesystem path. `\0virtual:astro:middleware` and
+ *  bare specifiers like `@clerk/astro/integration-middleware` are modules with no file
+ *  on disk, and `relative()` would resolve them against the process CWD and render them
+ *  as a `../../..` path pointing at nothing — in exactly the failure message where the
+ *  reader most needs to recognise the id for what it is. Those are printed as-is, and
+ *  only real absolute paths are relativised.
+ *
+ *  The leading `\0` is Rollup's marker for a module with no file (the same convention
+ *  PAGE_ENTRY_RE strips); it is not part of the name, and a raw NUL in a terminal
+ *  renders as nothing or as a stray blank, which makes a failure message look
+ *  mis-indented rather than informative. Stripped for display only — never for
+ *  matching, where the id has to stay exactly what the graph keys on. */
+function stripVirtualMarker(id: string): string {
+  return id.startsWith('\0') ? id.slice(1) : id;
+}
+
+function renderId(root: string, id: string): string {
+  const bare = stripVirtualMarker(id);
+  if (!isAbsolute(bare)) return bare;
+  return relative(root, bare) || bare;
+}
+
+/** True for an id with no file behind it: a virtual module, or a bare specifier a pass
+ *  left unresolved. Both mean "there is nothing here to open in an editor", which is
+ *  what a failure message has to say out loud. */
+function hasNoFileOnDisk(id: string): boolean {
+  return !isAbsolute(stripVirtualMarker(id));
+}
+
 function describeChain(root: string, chain: string[]): string {
-  return chain.map((id) => relative(root, id) || id).join('\n    -> ');
+  return chain.map((id) => renderId(root, id)).join('\n    -> ');
 }
 
 /** Why a module with no page chain is still a violation, spelled out in the failure
@@ -278,7 +374,7 @@ function violationMessage(
   target: string,
   chain: string[] | null,
 ): string {
-  const rel = (id: string) => relative(root, id) || id;
+  const rel = (id: string) => renderId(root, id);
   const lines = [
     `${rel(importer)} imports the auth choke point (src/lib/auth/), which nothing outside that directory may do:`,
     `    ${describeChain(root, chain ?? [importer, target])}`,
@@ -384,54 +480,102 @@ interface ClerkViolation {
  *  "vue" takes in the SSR pass before the client pass resolves it), or as a
  *  resolved path through node_modules/@clerk/... (the client pass, or a server
  *  pass that did resolve it). Both are checked so neither shape lets an import
- *  through unnoticed. */
+ *  through unnoticed. The optional leading `\0` is Rollup's no-file marker, which any
+ *  plugin resolving a `@clerk/*` specifier to a virtual module would add; matching it
+ *  matters on both sides of this function, since it decides what counts as a violation
+ *  AND what counts as one of Clerk's own internal edges. */
 function isClerkModule(id: string): boolean {
-  return /^@clerk\//.test(id) || /(^|\/)node_modules\/@clerk\//.test(id);
+  return /^\0?@clerk\//.test(id) || /(^|\/)node_modules\/@clerk\//.test(id);
 }
 
+/** The importer with no file behind it is the case whoever hits this is least equipped
+ *  to act on: there is nothing to open in an editor, and the natural next move — grep
+ *  src/ for "clerk" — finds nothing and looks like the check is wrong. Name the
+ *  mechanism and the file to actually edit. */
+const VIRTUAL_IMPORTER_EXPLANATION =
+  'That importer is not a file in this repository — it is a module the build generates. ' +
+  'The usual way one comes to import @clerk/* is an Astro integration injecting middleware ' +
+  '(`npx astro add @clerk/astro` does exactly this, via addMiddleware({ entrypoint: ' +
+  "'@clerk/astro/...' })), which wires the SDK in without touching a single file under src/. " +
+  'The fix is in astro.config.mjs, not in src/: drop the integration, and reach Clerk through ' +
+  'src/lib/auth/ from the routes that genuinely need it.';
+
 function clerkViolationMessage(root: string, importer: string, clerkModule: string): string {
-  return [
-    `${relative(root, importer) || importer} imports ${relative(root, clerkModule) || clerkModule} directly, bypassing the auth choke point:`,
-    `    ${relative(root, importer) || importer}\n    -> ${relative(root, clerkModule) || clerkModule}`,
+  const rel = (id: string) => renderId(root, id);
+  const lines = [
+    `${rel(importer)} imports ${rel(clerkModule)} directly, bypassing the auth choke point:`,
+    `    ${rel(importer)}\n    -> ${rel(clerkModule)}`,
     '',
+  ];
+  if (hasNoFileOnDisk(importer)) lines.push(VIRTUAL_IMPORTER_EXPLANATION, '');
+  lines.push(
     'Only src/lib/auth/ may import @clerk/*. A second, unguarded path to the SDK next to ' +
       'the choke point is not caught by the choke point being clean, which is why this is a ' +
       'separate invariant.',
     '',
     COST_ARGUMENT,
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /**
- * Invariant B, as a pure function over an already-built graph: among FIRST-PARTY
- * modules — those under `<root>/src/` — every module that imports `@clerk/*` must
- * be inside `<root>/src/lib/auth/`.
+ * Invariant B, as a pure function over an already-built graph: EVERY module in the
+ * graph that imports `@clerk/*` must be inside `<root>/src/lib/auth/`. The one
+ * exemption is Clerk's own packages importing each other.
  *
- * The first-party restriction is load-bearing, not tidiness. `@clerk/astro` imports
- * `@clerk/shared`, `@clerk/types` and `@clerk/backend`; every one of those intra-
- * Clerk edges has an importer under node_modules/@clerk/, which is not inside the
- * choke point. Without the restriction this function would report all of them and
- * the test would go red on `npm i @clerk/astro` — before a single line of
- * first-party auth code existed, with no way to make it green except by gutting the
- * check. (For scale: of the 1,917 modules in the real build's graph at the time of
- * writing, 1,885 are under node_modules.) The synthetic self-test below pins that a
- * node_modules-to-node_modules Clerk edge is NOT reported.
+ * The scoping is the load-bearing part of this function, and the intuitive scoping is
+ * wrong. Restricting it to first-party importers — those under `<root>/src/` — reads
+ * as the conservative, low-false-positive choice, and it structurally exempts the most
+ * likely way Clerk ever actually arrives here. `npx astro add @clerk/astro`, the
+ * documented installation, edits astro.config.mjs and lets the integration inject its
+ * own middleware with `addMiddleware({ entrypoint: '@clerk/astro/...' })`. No file
+ * under src/ is involved at any point, so Invariant A never fires (nothing imports the
+ * choke point) and a first-party-scoped Invariant B never fires either: the documented
+ * install walks through both guards untouched, and the first evidence is the invoice.
+ * Verified against a stub integration — the real build's graph then holds exactly one
+ * Clerk edge, `virtual:astro:middleware -> @clerk/astro/integration-middleware`, whose
+ * importer is a virtual module rather than a file. It is caught now.
+ *
+ * So the rule is inverted: consider every importer, and exempt only Clerk's own
+ * internal edges — which is the false positive the first-party scoping was really
+ * reaching for. `@clerk/astro` imports `@clerk/shared`, `@clerk/types` and
+ * `@clerk/backend`; every one of those edges has an importer outside the choke point,
+ * and reporting them would turn `npm i @clerk/astro` red on contact — before a line of
+ * first-party auth code existed, with no way to go green except by gutting the check.
+ * (For scale: of the 1,917 modules in the real build's graph at the time of writing,
+ * 1,885 are under node_modules.)
+ *
+ * Exempting them costs nothing, and that is provable rather than hopeful: Clerk cannot
+ * import itself into a build out of nowhere. Some non-Clerk module — a first-party
+ * file, a virtual module, a third-party package — must hold the edge that first pulls a
+ * Clerk module in, and that boundary edge is precisely what this reports. Waiving the
+ * interior of the subgraph never waives its entrance.
+ *
+ * A NON-Clerk package under node_modules importing `@clerk/*` is therefore reported,
+ * deliberately and not as an accident of the phrasing. A dependency that drags the SDK
+ * in ships it to every anonymous reader exactly as a first-party import would, and the
+ * fact that nobody here wrote that import makes it harder to notice, not cheaper. If
+ * such a dependency ever turns out to be legitimate, exempt that package by name and
+ * say why here — do not widen the rule back to first-party-only.
  *
  * Clerk is not a dependency of this project yet, so on the real repo this returns an
  * empty array today — but that is not the same thing as vacuous. The function is
- * exercised directly, without a real build, by the self-test below using a synthetic
- * graph containing `@clerk/*` ids. The day Clerk is added as a dependency, this same
- * function starts gating every first-party module under src/ in the real build too,
- * with no code change required here.
+ * exercised directly, without a real build, by the self-test below using synthetic
+ * graphs containing `@clerk/*` ids in each of the shapes a real graph produces. The day
+ * Clerk is added as a dependency — by any route, including one that touches no
+ * first-party file — this same function starts gating the real build with no code
+ * change required here.
  */
 function checkClerkChokePoint(graph: ModuleGraph, root: string): ClerkViolation[] {
-  const srcDir = join(root, 'src') + sep;
   const authDir = join(root, 'src', 'lib', 'auth') + sep;
   const violations: ClerkViolation[] = [];
 
   for (const [importer, targets] of graph) {
-    if (!importer.startsWith(srcDir)) continue;
     if (importer.startsWith(authDir)) continue;
+    // Clerk's own internals, in either shape isClerkModule recognises: a resolved
+    // node_modules/@clerk/... path, or the bare `@clerk/...` specifier a pass that
+    // left it external produces.
+    if (isClerkModule(importer)) continue;
     for (const target of targets) {
       if (isClerkModule(target)) {
         violations.push({
@@ -446,6 +590,41 @@ function checkClerkChokePoint(graph: ModuleGraph, root: string): ClerkViolation[
   return violations.sort(
     (a, b) => a.importer.localeCompare(b.importer) || a.clerkModule.localeCompare(b.clerkModule),
   );
+}
+
+interface CdnScriptViolation {
+  /** outDir-relative path of the emitted HTML file. */
+  file: string;
+  /** The matched URL, so the failure names the thing to delete. */
+  url: string;
+}
+
+/** Auth SDKs served as a plain browser bundle, by host. Anchored on the host rather
+ *  than on the word "clerk" anywhere in the document: a pack list could legitimately
+ *  mention Clerk in prose, and a check that goes red on page copy is a check somebody
+ *  deletes. Add a host here if another provider is ever evaluated. */
+const AUTH_CDN_URL = /https?:\/\/[^"'\s>]*\bclerk\.(?:com|dev|io|accounts\.dev)\b[^"'\s>]*/gi;
+
+/**
+ * The complement to the two graph invariants, and the reason the header comment can
+ * state a boundary instead of quietly having one.
+ *
+ * `<script is:inline src="https://js.clerk.com/...">` and anything vendored into
+ * public/ never enter the module graph — there is no import for a bundler to resolve —
+ * so both invariants above are structurally blind to them, and Clerk publishes a
+ * browser bundle designed to be loaded exactly that way. This looks at what the build
+ * actually wrote to disk instead of at what it modelled, which is a different kind of
+ * evidence and fails for a different reason. The fixture's cdn-script.astro is caught
+ * here and by nothing else in this file.
+ */
+function checkEmittedHtmlForAuthCdn(build: BuildGraph): CdnScriptViolation[] {
+  const violations: CdnScriptViolation[] = [];
+  for (const [file, contents] of build.emittedHtml) {
+    for (const match of contents.matchAll(AUTH_CDN_URL)) {
+      violations.push({ file, url: match[0] });
+    }
+  }
+  return violations.sort((a, b) => a.file.localeCompare(b.file) || a.url.localeCompare(b.url));
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +653,26 @@ describe('the real site', () => {
     expect(statSync(join(repoRoot, 'src', 'lib', 'auth')).isDirectory()).toBe(true);
   });
 
+  // The tripwire for a silently vacuous suite, and it belongs HERE specifically.
+  // Every other assertion in this describe is "some list derived from the graph is
+  // empty" — which an empty graph satisfies exactly as well as a clean one does.
+  // Replace realBuild with empty maps, or keep its module nodes and drop every edge,
+  // and all of them stay green forever. The fixture block below has its own anchor
+  // (it asserts that specific violations ARE found, which no empty graph can fake),
+  // but the two builds do not share a configuration — the real one also runs
+  // @astrojs/sitemap and Tailwind — so buildEnd could stop firing for this build and
+  // no other, and nothing else here would notice. This asserts the graph is genuinely
+  // populated, so the invariants below are known to be looking at something.
+  it('the real build graph is populated (tripwire: an empty graph passes every other assertion here)', () => {
+    const indexEntry = realBuild.pageEntries.get('src/pages/index');
+
+    expect(indexEntry).toBeDefined();
+    expect(relative(repoRoot, indexEntry!)).toBe(join('src', 'pages', 'index.astro'));
+    expect([...(realBuild.graph.get(indexEntry!) ?? [])].length).toBeGreaterThan(0);
+    // The CDN scan below has the identical failure mode: nothing to scan passes it.
+    expect(realBuild.emittedHtml.size).toBeGreaterThan(0);
+  });
+
   it('nothing outside src/lib/auth/ imports the auth choke point', () => {
     const violations = checkAnonymousReadPath(realBuild, repoRoot);
     expect(violations.map((v) => v.message)).toEqual([]);
@@ -481,10 +680,19 @@ describe('the real site', () => {
 
   // Dormant rather than vacuous: see the comment on checkClerkChokePoint. This
   // assertion is real and will start catching real violations the day
-  // `@clerk/...` lands in package.json — it just has nothing to find yet.
-  it('no first-party module outside src/lib/auth/ imports @clerk/* (dormant: Clerk is not yet a dependency)', () => {
+  // `@clerk/...` lands in package.json — it just has nothing to find yet. Note it
+  // covers the whole graph, not only src/: the integration-injected middleware that
+  // `astro add @clerk/astro` produces has a virtual module as its importer.
+  it('nothing outside src/lib/auth/ imports @clerk/* (dormant: Clerk is not yet a dependency)', () => {
     const violations = checkClerkChokePoint(realBuild.graph, repoRoot);
     expect(violations.map((v) => v.message)).toEqual([]);
+  });
+
+  // The module graph cannot see a script tag; this is the half of the boundary that
+  // can. Both are needed, and the fixture proves this one catches what the graph
+  // misses rather than being decoration.
+  it('no emitted page loads an auth SDK from a CDN, which no module graph would show', () => {
+    expect(checkEmittedHtmlForAuthCdn(realBuild)).toEqual([]);
   });
 });
 
@@ -492,16 +700,26 @@ describe('the real site', () => {
 // Self-test — proves the checker can actually fail
 // ---------------------------------------------------------------------------
 
-/** The six ways the fixture reaches auth, by importing module. Every one of them is
+/** The eight ways the fixture reaches auth, by importing module. Every one of them is
  *  a real edge in a real Astro build of tests/fixtures/anon-read-path-violation, not
  *  a synthetic graph. */
 const FIXTURE_VIOLATING_IMPORTERS = [
   'src/components/AuthGate.astro',
   'src/components/ClientLoadAuth.vue',
   'src/components/ClientOnlyAuth.vue',
+  'src/lib/auth-helpers.ts',
   'src/lib/lazy-auth.ts',
   'src/middleware/index.ts',
   'src/pages/direct.astro',
+  'src/pages/second-auth-module.astro',
+];
+
+/** The two importers no page entry reaches, so no failure message can carry a chain
+ *  for them. They are the whole reason Invariant A is an edge rule: a reachability
+ *  check sees the other six and is blind to exactly these. */
+const FIXTURE_IMPORTERS_WITH_NO_PAGE_CHAIN = [
+  'src/components/ClientOnlyAuth.vue',
+  'src/middleware/index.ts',
 ];
 
 describe('the checker, run against a fixture that actually violates Invariant A', () => {
@@ -529,15 +747,86 @@ describe('the checker, run against a fixture that actually violates Invariant A'
   // direct import" — a checker that only inspected each page's own import list would
   // pass the `direct` case and still miss every realistic violation, which arrives
   // through a shared component two or three hops away.
-  it('flags the component that imports auth, with the full chain from the page that renders it', () => {
+  //
+  // Three fixture pages reach this one component, which is what turns the chain
+  // rendered here into a real choice rather than the only option: deep-transitive
+  // reaches it in two hops and sorts FIRST, second-transitive and transitive reach it
+  // in one and tie. So the reported chain pins both rules at once — prefer the shorter
+  // chain over the earlier route, and break a tie by sorted route.
+  it('flags the component that imports auth, with the shortest chain and the sorted-first route among ties', () => {
     const transitive = find('src/components/AuthGate.astro');
+    const gate = [...fixtureBuild.graph.keys()].find(
+      (id) => rel(id) === 'src/components/AuthGate.astro',
+    )!;
+    const pagesReachingGate = [...fixtureBuild.pageEntries.entries()]
+      .filter(([, file]) => findChain(fixtureBuild.graph, file, (id) => id === gate) !== null)
+      .map(([route]) => route)
+      .sort();
+
+    // The premise of the test above: without three pages reaching it, neither the
+    // shortest-path comparison nor the tie-break is exercised by anything.
+    expect(pagesReachingGate).toEqual([
+      'src/pages/deep-transitive',
+      'src/pages/second-transitive',
+      'src/pages/transitive',
+    ]);
 
     expect(transitive).toBeDefined();
     expect(transitive!.chain?.map(rel)).toEqual([
-      'src/pages/transitive.astro',
+      'src/pages/second-transitive.astro',
       'src/components/AuthGate.astro',
       'src/lib/auth/index.ts',
     ]);
+    expect(transitive!.message).toContain('src/components/AuthGate.astro');
+    expect(transitive!.message).toContain('$6,000');
+  });
+
+  // The choke point is a DIRECTORY, and a checker that recognises only its index.ts
+  // guards one file of it. Everything else in there — including whichever module ends
+  // up actually holding the Clerk client — would be importable from anywhere.
+  it('flags a page importing a module inside the choke point other than index.ts', () => {
+    const second = find('src/pages/second-auth-module.astro');
+
+    expect(second).toBeDefined();
+    expect(second!.chain?.map(rel)).toEqual([
+      'src/pages/second-auth-module.astro',
+      'src/lib/auth/session.ts',
+    ]);
+    expect(second!.message).toContain('src/lib/auth/session.ts');
+    expect(second!.message).toContain('$6,000');
+  });
+
+  // The choke point's own files must be free to import each other, and that exemption
+  // is only executed while the directory holds more than one file. The fixture's
+  // index.ts imports its session.ts precisely so deleting the exemption goes red here.
+  it('does not flag the choke point importing itself', () => {
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+    const authIndex = [...fixtureBuild.graph.keys()].find(
+      (id) => rel(id) === 'src/lib/auth/index.ts',
+    )!;
+
+    // The intra-directory edge is really there — otherwise this asserts nothing.
+    expect([...(fixtureBuild.graph.get(authIndex) ?? [])].map(rel)).toContain(
+      'src/lib/auth/session.ts',
+    );
+    expect(violations.map((v) => rel(v.importer))).not.toContain('src/lib/auth/index.ts');
+  });
+
+  // `src/lib/auth-helpers.ts` is next to the choke point, not inside it. It is caught
+  // by the trailing separator on the directory prefix, and by nothing else: without
+  // the separator the comparison is a bare string prefix, and every `auth*` sibling
+  // exempts itself from the invariant that exists to constrain it.
+  it('flags a sibling module whose path merely starts with the choke point directory name', () => {
+    const helper = find('src/lib/auth-helpers.ts');
+
+    expect(helper).toBeDefined();
+    expect(helper!.chain?.map(rel)).toEqual([
+      'src/pages/auth-helpers.astro',
+      'src/lib/auth-helpers.ts',
+      'src/lib/auth/index.ts',
+    ]);
+    expect(helper!.message).toContain('src/lib/auth-helpers.ts');
+    expect(helper!.message).toContain('$6,000');
   });
 
   /**
@@ -551,9 +840,11 @@ describe('the checker, run against a fixture that actually violates Invariant A'
    * next reader that the hazard has changed shape, instead of the fixture quietly
    * ceasing to test anything while the case below kept passing for the wrong reason.
    *
-   * A reachability-based checker was run against exactly this fixture and reported
-   * only src/pages/direct and src/pages/transitive — the island's import of auth was
-   * invisible to it.
+   * A reachability-based checker was run against this fixture. It reports every
+   * violation that some page entry can walk to — most of them — and is blind to
+   * exactly the two that no page entry reaches: this island, and
+   * src/middleware/index.ts. That set is not left to prose; it is asserted below, from
+   * the same graph, as FIXTURE_IMPORTERS_WITH_NO_PAGE_CHAIN.
    */
   it('flags the client:only island, which no page entry reaches at all', () => {
     const island = [...fixtureBuild.graph.keys()].find((id) =>
@@ -579,6 +870,8 @@ describe('the checker, run against a fixture that actually violates Invariant A'
       'src/components/ClientLoadAuth.vue',
       'src/lib/auth/index.ts',
     ]);
+    expect(island!.message).toContain('src/components/ClientLoadAuth.vue');
+    expect(island!.message).toContain('$6,000');
   });
 
   // Dynamic imports are recorded by Rollup in a different field from static ones
@@ -593,14 +886,17 @@ describe('the checker, run against a fixture that actually violates Invariant A'
       'src/lib/lazy-auth.ts',
       'src/lib/auth/index.ts',
     ]);
+    expect(lazy!.message).toContain('src/lib/lazy-auth.ts');
+    expect(lazy!.message).toContain('$6,000');
   });
 
   // Middleware in the DIRECTORY form. Astro resolves middleware from either
-  // src/middleware.{js,ts,mjs} or src/middleware/index.{js,ts,mjs}; the previous
-  // formulation hardcoded the first spelling and was blind to this one, and no test
-  // ever executed that branch in either spelling. The edge rule needs no path
-  // knowledge, and this case executes it. Like the client:only island, middleware has
-  // no page entry above it — Astro loads it as its own entry, ahead of every route.
+  // src/middleware.{js,ts,mjs} or src/middleware/index.{js,ts,mjs}, so any rule that
+  // hardcodes a middleware path is blind to the other spelling — silently, because the
+  // unchecked spelling still builds and still ships. The edge rule needs no path
+  // knowledge at all, and this case is what executes that claim. Like the client:only
+  // island, middleware has no page entry above it — Astro loads it as its own entry,
+  // ahead of every route.
   it('flags middleware written in the src/middleware/index.ts directory form', () => {
     const middleware = find('src/middleware/index.ts');
 
@@ -618,9 +914,83 @@ describe('the checker, run against a fixture that actually violates Invariant A'
     expect(fixtureBuild.pageEntries.has('src/pages/clean')).toBe(true);
   });
 
-  it('reports exactly those six importers, no more and no fewer', () => {
+  it('reports exactly those eight importers, no more and no fewer', () => {
     const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
     expect(violations.map((v) => rel(v.importer))).toEqual(FIXTURE_VIOLATING_IMPORTERS);
+  });
+
+  // The measurement behind "a reachability checker is blind to exactly these two",
+  // taken from the graph rather than asserted in a comment that can rot as the fixture
+  // grows. A violation with no chain is one no page entry reaches, which is precisely
+  // what a reachability rule would have missed.
+  it('two of the eight are reachable from no page entry at all', () => {
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+
+    expect(violations.filter((v) => v.chain === null).map((v) => rel(v.importer))).toEqual(
+      FIXTURE_IMPORTERS_WITH_NO_PAGE_CHAIN,
+    );
+  });
+
+  // The boundary of the whole approach, executed from both sides. cdn-script.astro
+  // loads an auth SDK over a plain <script src>, the way Clerk's browser bundle is
+  // meant to be loaded: no import, so no edge, so nothing for either invariant to see —
+  // and that is a property of module graphs, not a bug to fix here. The scan of the
+  // emitted HTML is what covers it, and this is the only case in the suite that
+  // distinguishes the two.
+  it('sees no module-graph violation for a CDN script tag, and catches it in the emitted HTML', () => {
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+
+    expect(violations.map((v) => rel(v.importer))).not.toContain('src/pages/cdn-script.astro');
+    expect(fixtureBuild.pageEntries.has('src/pages/cdn-script')).toBe(true);
+
+    expect(checkEmittedHtmlForAuthCdn(fixtureBuild)).toEqual([
+      { file: join('cdn-script', 'index.html'), url: 'https://cdn.clerk.io/clerk.browser.js' },
+    ]);
+  });
+});
+
+describe('findPageChain, on graphs whose insertion order disagrees with their sorted order', () => {
+  // Which route a failure message blames has to be the same on every run, or a
+  // reviewer cannot tell a real change in the graph from a reshuffle of it. A real
+  // build cannot demonstrate that: its page-discovery order is Rollup's, nothing here
+  // chooses it, and for the fixture it currently agrees with sorted order anyway. A
+  // graph built by hand can — these entries are inserted in the reverse of the order
+  // the function must visit them in.
+  const target = join(repoRoot, 'src', 'lib', 'auth', 'index.ts');
+  const page = (name: string) => join(repoRoot, 'src', 'pages', `${name}.astro`);
+
+  it('breaks a tie between equally short chains by sorted route, not insertion order', () => {
+    const build: BuildGraph = {
+      graph: new Map([
+        [page('zebra'), new Set([target])],
+        [page('alpha'), new Set([target])],
+      ]),
+      pageEntries: new Map([
+        ['src/pages/zebra', page('zebra')],
+        ['src/pages/alpha', page('alpha')],
+      ]),
+      emittedHtml: new Map(),
+    };
+
+    expect(findPageChain(build, target)).toEqual([page('alpha'), target]);
+  });
+
+  it('prefers a shorter chain from a later route over a longer one from an earlier route', () => {
+    const middle = join(repoRoot, 'src', 'components', 'Middle.astro');
+    const build: BuildGraph = {
+      graph: new Map([
+        [page('alpha'), new Set([middle])],
+        [middle, new Set([target])],
+        [page('zebra'), new Set([target])],
+      ]),
+      pageEntries: new Map([
+        ['src/pages/alpha', page('alpha')],
+        ['src/pages/zebra', page('zebra')],
+      ]),
+      emittedHtml: new Map(),
+    };
+
+    expect(findPageChain(build, target)).toEqual([page('zebra'), target]);
   });
 });
 
@@ -657,6 +1027,43 @@ describe('checkClerkChokePoint, self-tested with a synthetic graph since @clerk 
     ).toEqual([{ clerkModule: resolved, importer: pageFile }]);
   });
 
+  /**
+   * The case a first-party-scoped rule cannot see, and the most likely way Clerk ever
+   * arrives: `npx astro add @clerk/astro` edits astro.config.mjs, and the integration
+   * injects its middleware with `addMiddleware({ entrypoint: '@clerk/astro/...' })`.
+   * Not one file under src/ changes, so Invariant A has nothing to fire on either.
+   *
+   * These two ids are not invented for the test, down to the leading NUL. They are
+   * what a real build produces: verified by installing a stub `@clerk/astro`
+   * integration exactly as `astro add` would, building this site, and reading the graph
+   * — one Clerk edge, this one, the importer a `\0`-prefixed virtual module rather than
+   * a file, the target left as a bare specifier because no pass resolved it.
+   */
+  it('flags the middleware an Astro integration injects, whose importer is a virtual module', () => {
+    const graph: ModuleGraph = new Map([
+      ['\0virtual:astro:middleware', new Set(['@clerk/astro/integration-middleware'])],
+    ]);
+    const violations = checkClerkChokePoint(graph, repoRoot);
+
+    expect(violations.map((v) => ({ clerkModule: v.clerkModule, importer: v.importer }))).toEqual([
+      {
+        clerkModule: '@clerk/astro/integration-middleware',
+        importer: '\0virtual:astro:middleware',
+      },
+    ]);
+    // A virtual importer is not a path. Rendering it through `relative()` would print
+    // it as a `../../..` walk out of the repo, and leaving the NUL in place prints a
+    // control character that reads as a mis-indented blank — both in the one message
+    // whose reader most needs to recognise that there is no file to go and edit. So the
+    // rendered edge is pinned exactly, and the message names the file that IS editable.
+    expect(violations[0].message).toContain(
+      '    virtual:astro:middleware\n    -> @clerk/astro/integration-middleware',
+    );
+    expect(violations[0].message).not.toContain('\0');
+    expect(violations[0].message).toContain('astro.config.mjs');
+    expect(violations[0].message).toContain('$6,000');
+  });
+
   it('allows a @clerk/* import from inside the choke point', () => {
     const authModule = join(repoRoot, 'src', 'lib', 'auth', 'index.ts');
     const graph: ModuleGraph = new Map([[authModule, new Set(['@clerk/astro'])]]);
@@ -664,18 +1071,50 @@ describe('checkClerkChokePoint, self-tested with a synthetic graph since @clerk 
     expect(checkClerkChokePoint(graph, repoRoot)).toEqual([]);
   });
 
+  // The exemption is src/lib/auth/, not src/lib/. Widening it by one path segment is
+  // a plausible-looking edit — "the auth helpers live in lib, let lib import clerk" —
+  // and it reopens the invariant for every shared module in the codebase.
+  it('flags a @clerk/* import from elsewhere in src/lib/, which is not the choke point', () => {
+    const dbModule = join(repoRoot, 'src', 'lib', 'db.ts');
+    const graph: ModuleGraph = new Map([[dbModule, new Set(['@clerk/astro'])]]);
+
+    expect(
+      checkClerkChokePoint(graph, repoRoot).map((v) => ({
+        clerkModule: v.clerkModule,
+        importer: v.importer,
+      })),
+    ).toEqual([{ clerkModule: '@clerk/astro', importer: dbModule }]);
+  });
+
   // Clerk's own packages import each other. Every one of those edges has an importer
-  // under node_modules/@clerk/, outside the choke point, so a check that looked at
-  // every importer in the graph would report all of them the day `npm i @clerk/astro`
-  // lands — before any first-party auth code exists, and with no way to go green
-  // except by deleting the check. This is the assertion that keeps that from
-  // happening.
-  it('does not flag Clerk packages importing each other inside node_modules', () => {
+  // outside the choke point, so a check with no exemption at all would report all of
+  // them the day `npm i @clerk/astro` lands — before any first-party auth code exists,
+  // and with no way to go green except by deleting the check. This is the assertion
+  // that keeps that from happening, in both shapes an importer takes: the resolved
+  // node_modules path, and the bare specifier a pass that left it external produces.
+  it('does not flag Clerk packages importing each other', () => {
     const clerkAstro = join(repoRoot, 'node_modules', '@clerk', 'astro', 'dist', 'index.js');
     const graph: ModuleGraph = new Map([
       [clerkAstro, new Set(['@clerk/shared', '@clerk/types', '@clerk/backend'])],
+      ['@clerk/astro/integration-middleware', new Set(['@clerk/backend'])],
     ]);
 
     expect(checkClerkChokePoint(graph, repoRoot)).toEqual([]);
+  });
+
+  // Deliberate, and the reason the exemption is "Clerk's own edges" rather than "any
+  // node_modules edge": a dependency that pulls the SDK in ships it to every anonymous
+  // reader exactly as a first-party import would, and nobody here wrote the import to
+  // notice it in review.
+  it('flags a non-Clerk dependency that imports @clerk/*', () => {
+    const someUiKit = join(repoRoot, 'node_modules', 'some-ui-kit', 'dist', 'index.js');
+    const graph: ModuleGraph = new Map([[someUiKit, new Set(['@clerk/astro'])]]);
+
+    expect(
+      checkClerkChokePoint(graph, repoRoot).map((v) => ({
+        clerkModule: v.clerkModule,
+        importer: v.importer,
+      })),
+    ).toEqual([{ clerkModule: '@clerk/astro', importer: someUiKit }]);
   });
 });

@@ -1,0 +1,9 @@
+---
+// The third page that reaches AuthGate.astro, and the only one that reaches it through
+// an extra hop. Its route sorts BEFORE the two pages with a shorter path, so it is the
+// first candidate findPageChain considers and the one a "first route wins" checker
+// would report — see TransitiveWrapper.astro.
+import TransitiveWrapper from '../components/TransitiveWrapper.astro';
+---
+
+<TransitiveWrapper />
