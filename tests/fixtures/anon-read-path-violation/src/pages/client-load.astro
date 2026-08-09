@@ -1,0 +1,7 @@
+---
+// Reaches auth through an island hydrated with `client:load`, which ships the
+// component — and everything it imports — to the browser of every visitor.
+import ClientLoadAuth from '../components/ClientLoadAuth.vue';
+---
+
+<ClientLoadAuth client:load />

@@ -45,7 +45,15 @@ Packsheet should require you to abandon a list you already have.
 
 The public share page is served without authentication by design. It is the most-visited
 surface by a wide margin — most visitors are strangers who never sign in — and keeping it
-free of an auth check is both a performance and a hosting-cost decision.
+free of an auth check is both a performance and a hosting-cost decision: auth providers price
+by monthly active user, and 250k of these anonymous reads counted as MAUs would cost
+thousands of dollars a month against a compute bill in the single digits. All Clerk usage is
+required to go through one choke point, `src/lib/auth/`, and `tests/anonymous-read-path.test.ts`
+builds the site and fails if **any** module outside that directory imports into it, or imports
+`@clerk/*` directly. It is an edge rule, not a "can an anonymous route reach it" rule: a
+`client:only` island's import is stripped from the server module, so a route-rooted walk would
+miss the one case that costs the most. It runs in CI's required `check` job, which is a
+different thing from the `npm run check` script — the job runs the script _and_ the tests.
 
 ## Development
 
@@ -74,7 +82,9 @@ npm run check    # astro check + tsc + eslint + prettier
 npm run format   # apply prettier
 ```
 
-`npm run check` is what CI enforces. Run it before opening a pull request.
+`npm run check` is what CI enforces, alongside `npm test`. Both run in the same required
+CI job, which is also called `check` — the job is the superset, so a clean `npm run check`
+locally is necessary but not sufficient. Run both before opening a pull request.
 
 ### Reproducing staging and production locally
 

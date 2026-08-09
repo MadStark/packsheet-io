@@ -8,7 +8,15 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['dist/**', '.astro/**', 'node_modules/**', 'src/assets/**'],
+    // `**/.astro/**` rather than `.astro/**`: ESLint's flat-config `ignores` isn't
+    // recursive the way .gitignore is, so the un-prefixed form only ever matched
+    // the project's own top-level cache. tests/fixtures/anon-read-path-violation is
+    // a real Astro project in its own right (see anonymous-read-path.test.ts for
+    // why it exists) and running a build against it generates the exact same
+    // `.astro/types.d.ts` cache one level down, which would otherwise be linted as
+    // if it were source. `node_modules/**` doesn't need the same treatment: ESLint
+    // ignores every `node_modules` directory by default, at any depth.
+    ignores: ['dist/**', '**/.astro/**', 'node_modules/**', 'src/assets/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

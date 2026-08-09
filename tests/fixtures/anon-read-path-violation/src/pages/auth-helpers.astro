@@ -1,0 +1,9 @@
+---
+// Here only so src/lib/auth-helpers.ts is genuinely in the build graph: an unimported
+// module is one Rollup never sees, and a fixture case that never enters the graph
+// proves nothing about a checker that reads the graph. This page itself is clean — it
+// imports the helper, and the helper is what imports auth.
+import { helperCookieName } from '../lib/auth-helpers';
+---
+
+<p>{helperCookieName()}</p>

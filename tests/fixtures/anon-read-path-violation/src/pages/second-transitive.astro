@@ -1,0 +1,10 @@
+---
+// The second page rendering AuthGate.astro directly, which is what gives the checker a
+// TIE to break: two chains of exactly equal length to the same violating module. The
+// tie goes to the sorted-first route — `src/pages/second-transitive` before
+// `src/pages/transitive` — and with only one such page the sort inside findPageChain
+// could be deleted with the whole suite still green.
+import AuthGate from '../components/AuthGate.astro';
+---
+
+<AuthGate />

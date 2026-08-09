@@ -1,0 +1,16 @@
+---
+// The documented boundary of a module-graph check, made executable rather than left as
+// a caveat in prose.
+//
+// This page loads an auth SDK the way Clerk's own browser bundle is meant to be
+// loaded — a plain <script> tag pointing at a CDN — and it produces ZERO edges in the
+// build graph. Invariant A and Invariant B are both blind to it, and both are RIGHT to
+// be: there is no import here for a bundler to resolve. Anything hand-placed under
+// public/ has the same shape.
+//
+// The complementary assertion that does catch it scans the HTML the build emitted.
+// This page is what proves that scan is not vacuous either.
+---
+
+<script is:inline src="https://cdn.clerk.io/clerk.browser.js"></script>
+<p>cdn script</p>
