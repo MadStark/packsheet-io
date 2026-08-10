@@ -173,12 +173,36 @@ Docker:
 supabase start                        # local Postgres, Auth, PostgREST, Studio
 supabase migration new <name>         # create the next migration
 supabase db reset                     # replay every migration from empty
+npm run db:types                      # regenerate src/lib/database.types.ts
 ```
 
 `supabase db reset` is the check that matters before opening a pull request: it proves
 the migration runs from a clean database rather than only against the state your
 machine happens to be in. There are no down-migrations, and recovery from a bad
 migration is another migration.
+
+#### Generated types
+
+`src/lib/database.types.ts` is generated from the schema by `npm run db:types` and
+committed. It is what makes `supabase-js` describe rows rather than hand back `any`: a
+column renamed in a migration otherwise goes on type-checking at every call site that
+still says the old name, and returns `undefined` at request time on the page a stranger
+is reading.
+
+So the file has to be regenerated whenever a migration changes a table, and
+`tests/database-types.test.ts` fails when it has not been — comparing the committed file
+against types generated from the migrations replayed from empty, and printing the diff
+and `npm run db:types` when they differ. It compares rather than rewrites, on purpose: a
+CI step that regenerated the file quietly would keep the types correct and leave the call
+sites naming columns that no longer exist, which is the breakage the check exists to
+find. Generation runs against the **local** stack rather than a hosted project, so the
+only thing it can disagree about is the migrations on your branch, not whether somebody
+has hand-edited a hosted database.
+
+The file is excluded from Prettier and ESLint and committed byte for byte as the CLI
+emits it — formatting it would make the committed content a function of the Prettier
+version too, so a Prettier upgrade would read as a schema change. `tsc --noEmit` still
+reads it, which is the point of having it.
 
 **`npm test` needs that stack running.** Part of the suite exercises row-level security
 by querying the database as the `anon` and `authenticated` roles, which nothing can

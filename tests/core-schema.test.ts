@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { adminSql, adminSqlWith, createUser, toOne, type TestUser } from './support/local-database';
+import { adminSql, adminSqlWith, createUser, type TestUser } from './support/local-database';
 import { anonClient, packTreeQuery } from './support/local-database';
 import { createPack } from './support/fixtures';
 
@@ -36,9 +36,11 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
       .eq('id', pack.itemIds[0])
       .single();
 
-    const gear = toOne<{ name: string; weight: string }>(data?.gear_items);
-    expect(gear.name).toBe('Renamed tent');
-    expect(Number(gear.weight)).toBe(999);
+    // `gear_items` is a to-one embed and the generated types say so, so this is an
+    // object rather than the array an untyped client would infer. `weight` is
+    // `numeric(12,3)`, which PostgREST serialises as an unquoted JSON number.
+    expect(data?.gear_items?.name).toBe('Renamed tent');
+    expect(data?.gear_items?.weight).toBe(999);
   });
 
   it('keeps per-list divergence in overrides, leaving the master record alone', async () => {
@@ -57,7 +59,7 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
 
     expect(item.data?.overrides).toEqual({ weight: 450 });
     // The closet is untouched: the divergence belongs to this list only.
-    expect(Number(toOne<{ weight: string }>(item.data?.gear_items).weight)).toBe(100);
+    expect(item.data?.gear_items?.weight).toBe(100);
   });
 
   it('defaults overrides to an empty object rather than null, so consumers need not branch', async () => {
@@ -84,8 +86,10 @@ describe('rule 2 — locking a pack freezes it', () => {
     expect(data).toHaveLength(2);
     for (const item of data ?? []) {
       expect(item.snapshot).not.toBeNull();
-      expect(item.snapshot.name).toMatch(/^Gear \d+$/);
-      expect(item.snapshot.captured_at).toBeTruthy();
+      expect(item.snapshot).toMatchObject({
+        name: expect.stringMatching(/^Gear \d+$/),
+        captured_at: expect.any(String),
+      });
     }
   });
 
@@ -199,7 +203,7 @@ describe('rule 2 — locking a pack freezes it', () => {
       .eq('id', pack.itemIds[0])
       .single();
 
-    expect(data?.snapshot.name).toBe('Gear 1');
+    expect(data?.snapshot).toMatchObject({ name: 'Gear 1' });
   });
 
   it('unlocks, so a freeze is a decision and not a one-way door', async () => {
@@ -231,7 +235,7 @@ describe('rule 3 — deleting a gear item never destroys pack history', () => {
       .single();
 
     expect(data?.gear_item_id).toBeNull();
-    expect(data?.snapshot.name).toBe('Gear 1');
+    expect(data?.snapshot).toMatchObject({ name: 'Gear 1' });
     expect(data?.quantity).toBe(1);
   });
 
@@ -247,7 +251,7 @@ describe('rule 3 — deleting a gear item never destroys pack history', () => {
       .single();
 
     expect(data?.gear_item_id).toBeNull();
-    expect(data?.snapshot.name).toBe('Gear 1');
+    expect(data?.snapshot).toMatchObject({ name: 'Gear 1' });
   });
 
   // The constraint is what makes the trigger's ordering safe to depend on: if the
@@ -394,13 +398,24 @@ describe('timestamps are the server’s to set', () => {
  * the column every read policy keys off, and the NaN bound below closes a hole that a
  * plain `>= 0` leaves wide open.
  */
+/**
+ * A numeric literal that only exists as a string.
+ *
+ * Postgres accepts `'NaN'` and `'Infinity'` as `numeric` values, and JSON cannot carry
+ * either as a number — `JSON.stringify(NaN)` is `null`, which is a different insert
+ * testing a different thing. The generated `Insert` type says `number`, correctly, for
+ * every value the Data API can express; these two are the exception, and the cast is
+ * named and kept in one place rather than spelled out at each call site.
+ */
+const numericLiteral = (literal: 'NaN' | 'Infinity'): number => literal as unknown as number;
+
 describe('the constrained columns refuse values outside their domain', () => {
   it('refuses NaN and Infinity where a plain >= 0 would let them through', async () => {
     // Postgres orders NaN above every numeric value, so 'NaN' >= 0 is TRUE. Without the
     // upper bound this insert succeeds and poisons every total that touches the row.
     const nan = await owner.client
       .from('gear_items')
-      .insert({ name: 'Weight NaN', weight: 'NaN' })
+      .insert({ name: 'Weight NaN', weight: numericLiteral('NaN') })
       .select('id');
     expect(nan.error?.code, 'NaN was accepted as a weight').toBe('23514');
 
@@ -411,7 +426,7 @@ describe('the constrained columns refuse values outside their domain', () => {
     // accepted everywhere the precision happens to be wider.
     const infinity = await owner.client
       .from('gear_items')
-      .insert({ name: 'Weight Infinity', weight: 'Infinity' })
+      .insert({ name: 'Weight Infinity', weight: numericLiteral('Infinity') })
       .select('id');
     expect(infinity.error?.code, 'Infinity was accepted as a weight').toBe('22003');
   });
