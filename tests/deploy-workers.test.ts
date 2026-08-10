@@ -306,12 +306,15 @@ describe('deploy steps', () => {
     expect(stepsOf(file, job).filter(isWranglerAction)).toHaveLength(1);
   });
 
-  // The build writes dist/client/wrangler.json and the deploy must read that file, not
-  // the repository root config — which still carries both environments and would
-  // deploy the wrong one, or nothing.
+  // The build writes dist/server/wrangler.json — dist/client/ before PK-19 added the
+  // first real Worker entry; @cloudflare/vite-plugin writes the resolved config next
+  // to entry.mjs, not next to the static assets, once one exists (verified against a
+  // real build: dist/client never gets a wrangler.json once any route is on-demand) —
+  // and the deploy must read that file, not the repository root config, which still
+  // carries both environments and would deploy the wrong one, or nothing.
   it.each(DEPLOYS)('$file deploys the generated config, not the source one', ({ file, job }) => {
     const command = stepsOf(file, job).find(isWranglerAction)?.with?.command ?? '';
-    expect(command).toContain('-c dist/client/wrangler.json');
+    expect(command).toContain('-c dist/server/wrangler.json');
     expect(command.trim().startsWith('deploy')).toBe(true);
   });
 
@@ -855,9 +858,11 @@ describe('verify-release.sh', () => {
 
 /**
  * Everything above reads wrangler.jsonc — the SOURCE. What `wrangler deploy` reads is
- * dist/client/wrangler.json, which the build generates by resolving one environment
- * out of that source. Those are two different files, and only the second one decides
- * what is publicly reachable.
+ * dist/server/wrangler.json (dist/client/wrangler.json before PK-19 gave this project
+ * its first on-demand route — see the comment on "deploys the generated config, not
+ * the source one" above for why the location moved), which the build generates by
+ * resolving one environment out of that source. Those are two different files, and
+ * only the second one decides what is publicly reachable.
  *
  * The gap is not theoretical. Wrangler environments do not inherit every key: some are
  * inherited, some must be repeated per environment, and which is which is a property
@@ -885,7 +890,7 @@ describe('the generated deploy config', () => {
         env: { ...process.env, CLOUDFLARE_ENV: env, PUBLIC_SITE_ENV: env },
         stdio: 'pipe',
       });
-      const generated = join(outDir, 'client', 'wrangler.json');
+      const generated = join(outDir, 'server', 'wrangler.json');
       if (!existsSync(generated)) {
         throw new Error(`No generated wrangler.json for ${env} at ${generated}`);
       }

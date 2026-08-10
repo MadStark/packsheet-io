@@ -47,6 +47,24 @@ export default defineConfig({
 
   integrations: [vue(), sitemap()],
 
+  // PK-19's CSRF protection for every mutating on-demand route (sign-in, sign-up,
+  // account deletion, sign-out) rests on this plus the session cookie's `sameSite:
+  // 'lax'` (see REQUIRED_COOKIE_ATTRIBUTES in src/lib/auth/index.ts) — nothing else in
+  // this project adds a CSRF token on top of that pair, so this is load-bearing.
+  //
+  // `checkOrigin: true` is Astro 7.2's own default (confirmed against
+  // node_modules/astro/dist/core/config/schemas/defaults.js), so this line changes no
+  // behaviour today. It is written out anyway, rather than left implicit, for two
+  // reasons: a reader auditing CSRF protection should find the decision in this file
+  // rather than have to go and check astro's source to confirm what "unset" resolves
+  // to, and an explicit `true` here cannot be silently weakened by a future Astro
+  // version changing its own default out from under an unrelated dependency bump.
+  // Astro rejects a same-origin-suspicious POST/PUT/PATCH/DELETE to an on-demand route
+  // with a 403 before that route's own code ever runs.
+  security: {
+    checkOrigin: true,
+  },
+
   vite: {
     plugins: [tailwindcss()],
   },

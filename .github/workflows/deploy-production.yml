@@ -110,6 +110,21 @@ jobs:
           # tests/deploy-workers.test.ts. The failure that costs something is the
           # mirror image of it, in deploy-staging.yml.
           CLOUDFLARE_ENV: production
+
+          # PK-19: build-time inputs Vite inlines into the client bundle at this step —
+          # see the identical comment in deploy-staging.yml. Production's own
+          # environment-scoped secrets, distinct from staging's: separate Supabase
+          # project, separate URL, separate key. See the README's "Database" section.
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
+
+          # Off (this secret unset, or anything other than the literal "true") until a
+          # Google Cloud OAuth client exists AND the provider is switched on in
+          # production's own Supabase project — see .env.example and
+          # src/lib/auth-routes.ts (GOOGLE_AUTH_ENABLED). Same build-time mechanism as
+          # the pair above: whichever way this resolves is compiled into the artifact
+          # here, not decided later.
+          PUBLIC_GOOGLE_AUTH_ENABLED: ${{ secrets.PUBLIC_GOOGLE_AUTH_ENABLED }}
         run: npm run build
 
       - name: Deploy to Cloudflare Workers
@@ -119,7 +134,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # Pinned to package-lock.json's wrangler. See deploy-staging.yml.
           wranglerVersion: '4.120.0'
-          command: deploy -c dist/client/wrangler.json
+          command: deploy -c dist/server/wrangler.json
 
       # The upload reporting success is not the same as the site answering, and this is
       # the one deploy nobody gets to re-run casually. A release that builds, uploads

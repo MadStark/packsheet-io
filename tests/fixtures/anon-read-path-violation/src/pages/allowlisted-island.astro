@@ -1,0 +1,10 @@
+---
+// Hydrates the allowlisted island, which is what puts it in the client Rollup pass and
+// therefore in front of Invariant D. `client:load` rather than `client:only` on purpose:
+// the point of this case is a module that is genuinely bundled for the browser, and
+// `client:load` says so without also removing the page's edge to it — the missing-edge
+// hazard has its own case in src/pages/client-only.astro and does not need repeating here.
+import AllowlistedIsland from '../components/AllowlistedIsland.vue';
+---
+
+<AllowlistedIsland client:load />

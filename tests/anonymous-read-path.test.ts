@@ -21,6 +21,19 @@ import type { build as AstroBuild } from 'astro';
  * still renders. The cost only shows up on an invoice, weeks later, from a provider that
  * cannot be un-billed retroactively.
  *
+ * That first argument is quieter than it was, and pretending otherwise would leave this
+ * file arguing for a rule on grounds nobody can check. Authentication here is Supabase
+ * Auth, not Clerk: Auth is $0.00325/MAU and anonymous reads are not metered at all, so the
+ * cliff above is a cliff this project chose not to stand on rather than one it is standing
+ * next to. The numbers stay in the failure messages because Invariant B still guards
+ * against acquiring a MAU-priced provider by accident, and because that is the decision
+ * they explain. What keeps Invariant A worth its cost now is not the invoice: it is
+ * LATENCY (an auth round trip on a page whose whole value is being static-fast),
+ * CACHE-ABILITY (a response that depends on a session cannot be one cached response shared
+ * by every reader), and BLAST RADIUS (this directory is where a privileged client would
+ * live, so who may import it decides what an auth bug can touch). See
+ * WHAT_THE_COST_ARGUMENT_IS_WORTH_NOW, which says the same thing in the failure itself.
+ *
  * The second is an authorization problem, and it is sharper. Anonymous reads go through
  * Supabase with the publishable `anon` key, which is public by design and confined by
  * row-level security to the rows meant to be public. `SUPABASE_SERVICE_ROLE_KEY` bypasses
@@ -29,23 +42,28 @@ import type { build as AstroBuild } from 'astro';
  * policy in the database decorative — the database stops being the thing that says no,
  * and the code has to remember again, on every query, forever.
  *
- * So this file enforces three invariants at build time, by building the real site and
+ * So this file enforces four invariants at build time, by building the real site and
  * inspecting the actual Rollup module graph Astro produces — not by convention, which
  * relies on every future PR author having read this comment.
  *
- * "Not by grep" applies to two of the three, and the difference is worth stating because
- * the phrase reads as if it covered all of them. Invariants A and B are graph rules: they
- * follow edges, which is what grep cannot do through a re-export or an aliased import.
- * Invariant C IS a text scan — the same kind of thing grep does. What the graph gives it
- * is not sight through indirection but SCOPE: it decides which text is scanned, namely
- * every module that actually ships, dependencies included, rather than whatever happens to
- * be lying in the working tree.
+ * "Not by grep" applies to some of them and not to others, and the difference is worth
+ * stating because the phrase reads as if it covered all four. Invariants A and B are graph
+ * rules: they follow edges, which is what grep cannot do through a re-export or an aliased
+ * import. Invariant D is not about edges at all but about PASS MEMBERSHIP — which of
+ * Astro's Rollup passes a module was transformed for, i.e. whether it is server code or
+ * code a browser downloads — which no amount of reading source text can answer, because
+ * the same file is server-only or browser-bound depending on how a page renders it.
+ * Invariant C IS a text scan, the same kind of thing grep does. What the graph gives it is
+ * not sight through indirection but SCOPE: it decides which text is scanned, namely every
+ * module that actually ships, dependencies included, rather than whatever happens to be
+ * lying in the working tree.
  *
- * Invariant A: no module outside src/lib/auth/ may import anything under
- * src/lib/auth/. Not "no anonymous route may transitively reach it" — an EDGE rule,
- * not a reachability rule, and the difference is the whole point. See the comment on
- * checkAnonymousReadPath below for why reachability is unsafe here, and for what has
- * to be solved before anyone relaxes this back to reachability.
+ * Invariant A: no module outside src/lib/auth/ may import anything under src/lib/auth/,
+ * EXCEPT the modules enumerated in AUTH_CONSUMERS below. Not "no anonymous route may
+ * transitively reach it" — an EDGE rule with a named exemption list, not a reachability
+ * rule, and the difference is the whole point. See the comment on checkAnonymousReadPath
+ * below for why reachability is unsafe here, why the allowlist is enumerated rather than
+ * inferred, and what an entry has to be true of.
  *
  * Invariant B: NO module in the build graph outside src/lib/auth/ may import
  * `@clerk/*`, with one exemption — Clerk's own packages importing each other. This is
@@ -69,6 +87,33 @@ import type { build as AstroBuild } from 'astro';
  * modules of the real build's graph, and neither @supabase/supabase-js@2.112.2 nor
  * @supabase/ssr@0.12.4 contains the string SERVICE_ROLE anywhere, so this does not go red
  * on contact when those land (Ref 49). See checkServiceRoleKey.
+ *
+ * That measurement is narrower than it reads, and the difference is a live tripwire rather
+ * than a quibble — so it is recorded here rather than left for somebody to rediscover from
+ * a red build. It was taken over SERVICE_ROLE and over the graph AS IT IS TODAY, in which
+ * nothing imports the choke point, so @supabase/ssr's own dependencies are not in the
+ * graph at all. Measured while writing PK-19, by allowlisting one server-only page and
+ * having it import src/lib/auth/: the graph then acquires @supabase/auth-js, and
+ * `node_modules/@supabase/auth-js/dist/module/GoTrueAdminApi.js:24` names
+ * SUPABASE_SECRET_KEY — in a JSDoc example, which this check cannot tell from an
+ * assignment and by design does not try to. Invariant C goes red there, on somebody else's
+ * comment, the day the first genuine consumer lands. Nothing has been changed here to
+ * pre-empt that, deliberately: the remedy is a named entry in
+ * PACKAGES_EXEMPT_FROM_KEY_SCAN and it belongs to whoever lands that route, as a decision
+ * made with the failure in front of them rather than one taken in advance for a build
+ * nobody has run. See that constant, which carries the same note.
+ *
+ * Invariant D: NO module under src/lib/auth/, and no module named in AUTH_CONSUMERS, may
+ * appear in the CLIENT Rollup pass — the pass whose output a browser downloads. This is
+ * the invariant that makes the allowlist in Invariant A sound rather than a hole. An
+ * allowlist is only ever as good as the judgement of whoever last added a line to it, and
+ * this is the part that judgement cannot get wrong: whatever is on the list, the auth SDK
+ * cannot reach a visitor, because a module that reaches a visitor is in the client pass
+ * and this fails. It is also why the `client:only` attribution problem described on
+ * checkAnonymousReadPath did not have to be solved before the allowlist could exist. An
+ * island importing auth is not on the allowlist, so Invariant A's unchanged edge rule
+ * still catches it — and if somebody put one ON the allowlist, this invariant catches it a
+ * second time, from the other side. See checkAuthStaysOffTheClient.
  *
  * A module graph tells you what SHIPS; it cannot tell you what a module says. So
  * Invariant C needs source text, correlated with graph membership: the graph recorder
@@ -106,7 +151,7 @@ import type { build as AstroBuild } from 'astro';
  *     instead of naming it. Deliberate: stripping comments means depending on a parser
  *     being correct, and this guardrail has to stay simpler than the thing it guards.
  *
- * What none of the three invariants can see, stated plainly because the rest of this file
+ * What none of the four invariants can see, stated plainly because the rest of this file
  * invites the assumption that it is airtight: a module graph contains only what the
  * bundler resolved. `<script is:inline src="https://js.clerk.com/...">` in a .astro file,
  * or a vendored SDK dropped into public/, produce ZERO graph edges — and Clerk ships a
@@ -123,11 +168,14 @@ import type { build as AstroBuild } from 'astro';
  * broken one — this repo already has a documented case of that failure mode (see
  * the header comment on deploy-origin-lock.test.ts). Today nothing in the real site
  * imports auth, so Invariant A's real-repo assertion passes trivially and proves
- * nothing about the checker on its own. Two things answer that. The self-test lower
- * down in this file runs the exact same functions against a fixture project that DOES
- * violate the invariants, in eight ways for Invariant A and in one way per spelling
- * Invariant C recognises plus one per source its text can come from, and asserts each is
- * caught with the right chain, the right lines and the right message.
+ * nothing about the checker on its own; the same goes for Invariant D, whose allowlist
+ * is empty and whose choke point is not in the real build at all. Two things answer
+ * that. The self-test lower down in this file runs the exact same functions against a
+ * fixture project that DOES violate the invariants, in ten ways for Invariant A (two of
+ * which are allowlisted there, leaving eight reported), in four ways for Invariant D, and
+ * in one way per spelling Invariant C recognises plus one per source its text can come
+ * from, and asserts each is caught with the right chain, the right lines and the right
+ * message.
  * And the real-site block opens with a tripwire asserting its graph is genuinely
  * populated and its transform hook genuinely fired, because every other assertion there
  * is "this derived list is empty" — which an empty graph, and a transform hook that
@@ -146,7 +194,7 @@ import type { build as AstroBuild } from 'astro';
  *   for instance, is the only one that resolves a Vue island's own client-side
  *   dependencies. The passes are unioned into one graph below; checking only the
  *   first pass would miss anything reachable only from client-hydrated code. The
- *   fixture has a Vue integration and two islands specifically so this union is
+ *   fixture has a Vue integration and three islands specifically so this union is
  *   exercised rather than merely asserted here in prose: against the fixture the three
  *   passes contain an empty one, a server pass of a couple of hundred modules, and a
  *   client pass of a dozen or so, and the `client:only` island's own import of auth is
@@ -154,6 +202,22 @@ import type { build as AstroBuild } from 'astro';
  *   down — they move every time the fixture gains a case — but the property that matters
  *   is pinned by a test rather than by this sentence: the client:only case below fails
  *   if that third pass stops being unioned in.
+ * - That union loses which pass a module came from, and Invariant D is exactly the
+ *   question the union throws away. The pass identity is recovered from the `transform`
+ *   hook instead of from `buildEnd`: Vite passes an options argument to `transform(code,
+ *   id, options)` whose `ssr` boolean says which environment the module is being
+ *   transformed for, and `clientIds` below records every id transformed with it falsy.
+ *   Measured rather than assumed, against both projects at the time of writing: the
+ *   options object is always present, always `{ moduleType, ssr }`, and the split is
+ *   total — pass 1 transforms nothing, pass 2 is 226 modules all `ssr: true`, pass 3 is
+ *   15 modules all `ssr: false` in the fixture (2,069 / 1,726 in the real site), with no
+ *   module ever arriving `ssr: false` in a server pass. First-party ids in the fixture's
+ *   client pass are its three islands and the three choke-point modules they drag in;
+ *   pages, middleware and .astro components never appear there. The polarity of the test
+ *   below is deliberate: anything NOT positively marked `ssr: true` counts as client. If
+ *   a future Vite stops passing the argument, every module lands in `clientIds` and the
+ *   real-site tripwire goes red on the spot, which is the direction a guardrail should
+ *   break in — the other polarity would empty `clientIds` and pass forever.
  * - Page entry points are read off the build's own `virtual:astro:page:<route>@_@
  *   <ext>` modules rather than globbed from the filesystem, so the route list used
  *   here cannot drift from the routes the build actually produces. Under the
@@ -181,6 +245,28 @@ const COST_ARGUMENT =
   'same traffic as static pages. Most visitors here are anonymous strangers opening a ' +
   'shared pack list from a Reddit link, so the auth SDK must never be reachable from an ' +
   'anonymous route.';
+
+/** Said in the same breath as COST_ARGUMENT wherever Invariant A reports, because the
+ *  reader is entitled to know that the headline number is the reason this rule was BUILT
+ *  rather than the reason it still stands. Leaving that unsaid is how a guardrail gets
+ *  argued away in one line ("we're on Supabase, this is obsolete") by somebody who checked
+ *  the pricing page and was right about the pricing page. The three reasons below are the
+ *  ones that survive, and none of them is about an invoice — so none of them is answered
+ *  by cheaper auth. */
+const WHAT_THE_COST_ARGUMENT_IS_WORTH_NOW =
+  'The paragraph above is why this rule was built, and it is softer than it reads. This ' +
+  'project runs Supabase Auth, at $0.00325/MAU, and Supabase does not meter anonymous ' +
+  'reads at all — an accidental import here no longer buys a $6,000 invoice, and pretending ' +
+  'it does is how this check gets argued away by somebody who is right about the pricing. ' +
+  'Three reasons survive, and cheaper auth answers none of them. LATENCY: an auth call on ' +
+  'the anonymous read path adds a round trip to the auth server in front of a page whose ' +
+  'entire value is arriving as fast as a static file. CACHE-ABILITY: a response that ' +
+  'depends on who is asking cannot be the one cached response every reader shares, so a ' +
+  'page that consults auth stops being cacheable at the edge for anybody, including the ' +
+  'anonymous majority it was cached for. BLAST RADIUS: src/lib/auth/ is the one directory ' +
+  'exempt from the privileged-key rule and the only place a service-role client could ever ' +
+  'live, so who may import it decides what an auth mistake can touch — the difference ' +
+  'between one signed-in screen and every page a stranger can open.';
 
 // ---------------------------------------------------------------------------
 // The walker
@@ -252,6 +338,20 @@ interface BuildGraph {
    *  ones whose reference is injected into the transformed text rather than written in
    *  the file. The real-site tripwire asserts this is populated for exactly that reason. */
   transformedIds: Set<string>;
+  /** Every id transformed for the CLIENT — i.e. every module a browser downloads. This is
+   *  the one thing the unioned `graph` above cannot answer: unioning the passes is what
+   *  makes Invariants A, B and C see everything that ships, and it is also what throws
+   *  away the distinction between "ships to the server" and "ships to the visitor", which
+   *  is the entire question Invariant D asks.
+   *
+   *  Recovered from the `transform` hook's options argument rather than from pass order:
+   *  `options.ssr` is true for the server/prerender pass and false for the client pass.
+   *  Pass ORDER would have been the tempting alternative and is not usable — it is an
+   *  artefact of how Astro currently sequences its builds, nothing asserts it, and a rule
+   *  resting on "the third `buildEnd` is the client one" silently inverts the day that
+   *  changes. `ssr` is a documented property of the environment the module is being
+   *  transformed for; see the mechanism note in the header for what was measured. */
+  clientIds: Set<string>;
 }
 
 /** Module ids sometimes carry a query suffix (e.g. a font imported as `...woff2?
@@ -273,6 +373,93 @@ function stripQuery(id: string): string {
  *  exists to constrain it. The fixture has that exact sibling for that exact reason. */
 function chokePointDir(root: string): string {
   return join(root, 'src', 'lib', 'auth') + sep;
+}
+
+/**
+ * THE ALLOWLIST. Every module permitted to import the auth choke point, named one by one.
+ * Anything not on this list fails Invariant A exactly as everything did before it existed.
+ *
+ * Paths are relative to the project root and written with forward slashes whatever the
+ * platform, because they are read by people more often than by the checker.
+ *
+ * Why a list and not a rule. Invariant A used to be unconditional, which was correct while
+ * no route authenticated anybody: there was nothing legitimate for it to forbid. PK-19
+ * added real auth, so some modules now genuinely have to import this directory, and the
+ * check had to learn to tell those from the accidents. The obvious move — go back to a
+ * reachability rule rooted at anonymous routes — is the one thing that must not be done
+ * here, and checkAnonymousReadPath says why at length: a `client:only` island's import is
+ * dropped from the emitted server module, so a route-rooted walk is structurally blind to
+ * precisely the case this file exists to catch. Enumerating the exceptions keeps the edge
+ * rule intact and makes each exception a line somebody wrote on purpose and a reviewer
+ * saw, rather than a category that quietly grows to fit whatever was added last.
+ *
+ * WHAT AN ENTRY HAS TO BE TRUE OF, both of which are checked rather than trusted:
+ *
+ *   1. It must exist. A stale entry — a route that was renamed or deleted with its line
+ *      left behind — is how an allowlist rots into permanent green: the name sits there
+ *      waiting for some unrelated future file to be given that path and inherit an
+ *      exemption nobody granted it. The real-site block fails if any entry here has no
+ *      file on disk, and the fixture block does the same for its own list.
+ *   2. It must be SERVER-ONLY. A page, an API route, middleware — never a component that
+ *      hydrates. That is not a convention either: Invariant D fails the build if anything
+ *      on this list turns up in the client Rollup pass, which is what makes the list safe
+ *      to have at all rather than a hole in the middle of the guardrail.
+ *
+ * Each entry carries a comment saying what that module does with auth. "Needs auth" is not
+ * one; the next reader has to be able to tell whether the reason is still true.
+ *
+ * Empty today, deliberately and not by oversight: the routes that will need auth are a
+ * later task's, and this landed first so that they arrive into a check that already knows
+ * how to say yes. Adding one is a single line here plus its comment. Removing the import
+ * is always the better fix where it is available — everything auth-adjacent that an
+ * anonymous route can legitimately want (paths, constants, types) belongs in
+ * src/lib/auth-routes.ts or beside its consumer, not in the choke point.
+ */
+const AUTH_CONSUMERS: readonly string[] = [
+  // Resolves the signed-in user once per request into Astro.locals.user and enforces
+  // the private/no-store caching rule on every session-bearing or auth-route response.
+  // Astro loads this as its own entry ahead of every route (see this file's own
+  // comment on why the edge rule covers middleware "in either spelling" for free),
+  // and it never hydrates — server-only by construction.
+  'src/middleware.ts',
+  // Renders the email/password form and the Google button; calls signInWithPassword,
+  // getGoogleAuthorizationUrl and, on a failed POST, nothing further — a page, never
+  // an island.
+  'src/pages/sign-in.astro',
+  // Same shape as sign-in.astro for registration; calls signUpWithPassword,
+  // getGoogleAuthorizationUrl and getUser (the last to tell "signed in immediately" —
+  // enable_confirmations off — from "awaiting an email confirmation" apart, without
+  // assuming which one this project's Supabase settings produce).
+  'src/pages/sign-up.astro',
+  // The signed-in account screen: reads Astro.locals.user (set by middleware, not
+  // fetched again here), renders a sign-out control and the two-step, typed-
+  // confirmation delete-account flow; calls deleteOwnAccount and signOut.
+  'src/pages/account/index.astro',
+  // The OAuth/PKCE return leg named by AUTH_CALLBACK_PATH; calls exchangeCodeForSession.
+  'src/pages/auth/callback.ts',
+  // POST-only sign-out endpoint; calls signOut. No GET handler at all, so a
+  // prefetcher or a cross-site <img src> cannot trigger it.
+  'src/pages/auth/signout.ts',
+];
+
+/** The allowlist as absolute ids, to be compared against graph keys. Entries are written
+ *  with `/` regardless of platform, so they are split and re-joined rather than
+ *  concatenated — on Windows `join(root, 'src/pages/x.astro')` and the id Rollup reports
+ *  for that file do not agree on the separator, and the entry would silently exempt
+ *  nothing. */
+function resolveAuthConsumers(root: string, consumers: readonly string[]): Set<string> {
+  return new Set(consumers.map((entry) => join(root, ...entry.split('/'))));
+}
+
+/** Allowlist entries with no file behind them. The whole failure mode this guards is
+ *  silent, so it is returned as a list to be asserted on rather than filtered away: an
+ *  entry that matches nothing exempts nothing today and cannot be distinguished, from
+ *  inside the checker, from one that is doing its job. */
+function staleAuthConsumers(root: string, consumers: readonly string[]): string[] {
+  return consumers.filter(
+    (entry) =>
+      statSync(join(root, ...entry.split('/')), { throwIfNoEntry: false })?.isFile() !== true,
+  );
 }
 
 /**
@@ -349,8 +536,36 @@ const PRIVILEGED_KEY_PATTERNS: readonly PrivilegedKeyPattern[] = [
  *  narrowing the rule to first-party code. Matched against the `node_modules/<name>/`
  *  segment of a resolved id, so it exempts a package and not a path that merely contains
  *  its name. Empty today, and it should stay a list of named exceptions rather than
- *  becoming a category. */
-const PACKAGES_EXEMPT_FROM_KEY_SCAN: readonly string[] = [];
+ *  becoming a category.
+ *
+ *  THE FIRST ENTRY IS ALREADY KNOWN, and is left off deliberately rather than forgotten.
+ *  @supabase/auth-js — a transitive dependency of @supabase/ssr, so it enters the graph the
+ *  moment anything imports the choke point — names SUPABASE_SECRET_KEY in a JSDoc example
+ *  at dist/module/GoTrueAdminApi.js:24, and this rule cannot tell a comment from an
+ *  assignment. Measured during PK-19 by allowlisting one server-only page and having it
+ *  import src/lib/auth/: Invariants A, B and D stay green and Invariant C reports that one
+ *  file. It is not exempted here yet because nothing in the build reaches it yet, and an
+ *  exemption written ahead of the failure is one nobody has checked the shape of — the
+ *  package might by then name the key somewhere that matters. Whoever lands the first
+ *  allowlisted route will see it go red on their first run: add `'@supabase/auth-js'`
+ *  below with a reason, having first confirmed the hit is still only that comment. */
+const PACKAGES_EXEMPT_FROM_KEY_SCAN: readonly string[] = [
+  // @supabase/auth-js — a transitive dependency of @supabase/ssr, pulled into the
+  // graph the moment anything imports the choke point, which PK-19's AUTH_CONSUMERS
+  // entries now do. It names SUPABASE_SECRET_KEY at
+  // dist/module/GoTrueAdminApi.js:24, inside a JSDoc @example block documenting how a
+  // CALLER of the admin API is expected to construct their own client — it is prose
+  // in a comment, not a reference this package holds or reads at runtime. Confirmed
+  // by running the real build with AUTH_CONSUMERS populated (this change) and
+  // checking that this is the only file Invariant C reports: Invariants A, B and D
+  // all stay green. This project holds no service-role/secret key at all — see "WHAT
+  // CHANGED WITH SUPABASE" in src/lib/auth/index.ts for the SECURITY DEFINER pattern
+  // that replaces the one place that key would otherwise have been reached for
+  // (deleteOwnAccount) — so there is no live credential this exemption could be
+  // hiding, only a dependency's own documentation example the scanner cannot tell
+  // from code.
+  '@supabase/auth-js',
+];
 
 /** Longest snippet a failure message will print for one line. A bundled dependency can
  *  be one line of several hundred kilobytes, and a guardrail whose failure output has to
@@ -489,6 +704,7 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
   const passGraphs: PassGraph[] = [];
   const serviceRoleRefs = new Map<string, ServiceRoleRef[]>();
   const transformedIds = new Set<string>();
+  const clientIds = new Set<string>();
 
   // A minimal Rollup plugin: it changes nothing. It reads the graph Rollup has already
   // built and hands it to buildEnd once per pass, and it reads — without rewriting — the
@@ -505,9 +721,17 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
       // Fires once per module per Rollup pass, so the same id arrives two or three times
       // in one build with identical findings — deduped by line and snippet so a failure
       // message names each line once.
-      transform(code: string, id: string): null {
+      //
+      // The third argument is what tells the passes apart. Vite hands `transform` an
+      // options object whose `ssr` is true for the server/prerender pass and false for the
+      // client pass, so a module that a browser downloads is one this hook was called for
+      // with `ssr` falsy. Anything not positively marked `ssr: true` is treated as client
+      // — see the header note on why that polarity, and not the other one, is the safe
+      // way for this to break.
+      transform(code: string, id: string, options?: { ssr?: boolean }): null {
         const file = stripQuery(id);
         transformedIds.add(file);
+        if (options?.ssr !== true) clientIds.add(file);
         const found = scanForPrivilegedKey(code, 'transform');
         if (found.length === 0) return null;
         const refs = serviceRoleRefs.get(file) ?? [];
@@ -579,7 +803,7 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
     }
   }
 
-  return { graph, pageEntries, emittedHtml, serviceRoleRefs, transformedIds };
+  return { graph, pageEntries, emittedHtml, serviceRoleRefs, transformedIds, clientIds };
 }
 
 /** Every .html file under `outDir`, keyed by its path relative to it. Astro's default
@@ -708,6 +932,31 @@ const NO_PAGE_CHAIN_EXPLANATION =
   'middleware (which Astro loads as its own entry, ahead of every route). The module is in ' +
   'the build graph, so it ships.';
 
+/** The remedy, and the exact point at which this message is most likely to be read: by
+ *  somebody who has just written a route that genuinely does authenticate a person, and
+ *  who is now looking at a red build telling them not to. They need to be told that "yes"
+ *  is available, and told the two things that make it safe, in the same breath — an
+ *  allowlist offered without its conditions is an invitation to put an island on it.
+ *
+ *  It deliberately leads with the alternative rather than with the allowlist. Most modules
+ *  that trip this rule do not need auth at all; they need a path, a constant or a type
+ *  that happens to live in the wrong directory, and adding them here would be answering
+ *  the wrong question. */
+const HOW_TO_BE_ALLOWED_TO_IMPORT_AUTH =
+  'If this module does not actually need to authenticate anybody — if what it wanted was a ' +
+  'route path, a shared constant or a type — then it should not import this directory at ' +
+  'all: those live in src/lib/auth-routes.ts or beside their consumer, precisely so that ' +
+  'wanting one does not drag the choke point along. If it genuinely does authenticate ' +
+  'somebody, add it to AUTH_CONSUMERS in tests/anonymous-read-path.test.ts: one line, with ' +
+  'a comment saying what it does with auth. Two conditions, and neither is on trust. The ' +
+  'entry must name a file that exists, or it is a permanent exemption waiting for an ' +
+  'unrelated future file to inherit. And the module must be SERVER-ONLY — a page, an API ' +
+  'route, middleware. Never a component that hydrates: a `client:only` or `client:load` ' +
+  'island on that list would hand the auth SDK to every anonymous reader of the page that ' +
+  'renders it, which is the thing this whole file exists to prevent. Invariant D enforces ' +
+  'that second condition rather than trusting it, so an entry for a module that reaches the ' +
+  'browser trades this failure for that one instead of going green.';
+
 function violationMessage(
   root: string,
   importer: string,
@@ -716,12 +965,18 @@ function violationMessage(
 ): string {
   const rel = (id: string) => renderId(root, id);
   const lines = [
-    `${rel(importer)} imports the auth choke point (src/lib/auth/), which nothing outside that directory may do:`,
+    `${rel(importer)} imports the auth choke point (src/lib/auth/), which only the modules named in AUTH_CONSUMERS may do:`,
     `    ${describeChain(root, chain ?? [importer, target])}`,
     '',
   ];
   if (chain === null) lines.push(NO_PAGE_CHAIN_EXPLANATION, '');
-  lines.push(COST_ARGUMENT);
+  lines.push(
+    HOW_TO_BE_ALLOWED_TO_IMPORT_AUTH,
+    '',
+    COST_ARGUMENT,
+    '',
+    WHAT_THE_COST_ARGUMENT_IS_WORTH_NOW,
+  );
   return lines.join('\n');
 }
 
@@ -738,11 +993,13 @@ interface AuthImportViolation {
 }
 
 /**
- * Invariant A, as a pure function over an already-built graph: does ANY module
- * outside `<root>/src/lib/auth/` have an import edge to a module inside it?
+ * Invariant A, as a pure function over an already-built graph: does any module outside
+ * `<root>/src/lib/auth/`, other than the ones named in `consumers`, have an import edge to
+ * a module inside it?
  *
- * This is deliberately an edge rule and not a reachability rule ("can an anonymous
- * route walk to auth?"), because reachability is unsound on an Astro build graph:
+ * This is deliberately an edge rule with an enumerated exemption list, and not a
+ * reachability rule ("can an anonymous route walk to auth?"), because reachability is
+ * unsound on an Astro build graph:
  *
  *   For a `client:only` island the compiler removes the component import from the
  *   emitted server module altogether. The island still appears in the build graph —
@@ -759,35 +1016,70 @@ interface AuthImportViolation {
  * itself sufficient evidence that the choke point ships. It also covers middleware
  * in every spelling for free — `src/middleware.ts` and `src/middleware/index.ts` are
  * both just modules with an edge — where the previous formulation special-cased one
- * hardcoded path and missed the other. While nothing in this codebase is
- * authenticated, the edge rule is strictly stronger than reachability: every module
- * that reaches auth via a chain also has an edge somewhere along that chain.
+ * hardcoded path and missed the other. Where a module is not exempt, the edge rule is
+ * strictly stronger than reachability: every module that reaches auth via a chain also has
+ * an edge somewhere along that chain.
  *
- * WHEN THE FIRST GENUINELY AUTHENTICATED ROUTE ARRIVES, THIS RULE MUST BE REVISITED.
- * At that point some module legitimately imports auth, and this check must learn to
- * distinguish it — which almost certainly means going back to a reachability rule
- * with a list of authenticated routes. Whoever does that inherits the `client:only`
- * attribution problem above and must solve it BEFORE relaxing the rule: a
- * reachability check needs an edge from a page to its `client:only` island, which is
- * not in the graph and has to be reconstructed some other way (the client-pass entry
- * chunks, or Astro's island manifest). The acceptance test for that work is not "the
- * suite still passes" — a reachability check passes this suite happily while blind to
- * client-only islands. It is a fixture like tests/fixtures/anon-read-path-violation
- * whose `client:only` island importing auth is still caught by the relaxed version.
- * Do not delete that fixture case; it is the only thing standing between this
- * guardrail and a $6,000/month invoice.
+ * ---------------------------------------------------------------------------
+ * WHAT HAPPENED WHEN THE FIRST GENUINELY AUTHENTICATED ROUTE ARRIVED (PK-19)
+ * ---------------------------------------------------------------------------
+ *
+ * This paragraph used to be a warning addressed to whoever hit that moment. They have
+ * hit it, so it is now a record of what was done, kept because the next person to touch
+ * this rule will reach for the same wrong idea the warning was about.
+ *
+ * The warning said the rule would have to be revisited, and predicted the revision would
+ * be a return to reachability with a list of authenticated routes — while noting that
+ * whoever did that inherits the `client:only` attribution problem above and must solve it
+ * FIRST, because a reachability check needs an edge from a page to its `client:only`
+ * island and that edge is not in the graph. It would have to be reconstructed from the
+ * client-pass entry chunks or Astro's island manifest.
+ *
+ * That is not what was done, and the prediction is the part to ignore. Reachability was
+ * not restored. The edge rule is untouched — what changed is that it now consults an
+ * enumerated list, AUTH_CONSUMERS, of modules permitted to hold such an edge. Everything
+ * not on that list fails exactly as everything did before. That keeps the property the
+ * warning was protecting: a `client:only` island importing auth is not on the allowlist,
+ * so it is still caught by the same edge, with no island manifest to reconstruct and no
+ * new way for the check to be blind.
+ *
+ * The price of an allowlist is that it is only as good as the last line added to it, and
+ * that price is paid by Invariant D rather than by hoping: no module on the list, and
+ * nothing inside the choke point, may appear in the client Rollup pass. So the worst thing
+ * a careless entry can do is trade one red build for another. It cannot ship the SDK to a
+ * visitor, which is the outcome the whole file is about. See checkAuthStaysOffTheClient.
+ *
+ * WHAT REMAINS TRUE FOR WHOEVER COMES NEXT. Do not relax this to reachability, and do not
+ * be tempted by "but nothing anonymous can reach it" as an argument for a specific import:
+ * the `client:only` case above is exactly a violation that nothing anonymous appears to
+ * reach, right up until it is served. Do not delete the fixture's client:only case; it
+ * remains the only thing standing between this guardrail and shipping an auth SDK to
+ * every anonymous reader. And if the allowlist ever grows past a handful of entries, that
+ * is evidence about the shape of the codebase rather than about this rule — auth has
+ * spread into places that should be reading a route path or a prop instead, and the fix
+ * is there, not here.
  *
  * `findChain` survives purely to render a readable `page -> ... -> auth` chain in the
  * failure message where one exists; where none does, the importing module is reported
  * directly and the message explains why that is the whole story.
  */
-function checkAnonymousReadPath(build: BuildGraph, root: string): AuthImportViolation[] {
+function checkAnonymousReadPath(
+  build: BuildGraph,
+  root: string,
+  consumers: readonly string[],
+): AuthImportViolation[] {
   const authDir = chokePointDir(root);
   const isAuthModule = (id: string) => id.startsWith(authDir);
+  const allowed = resolveAuthConsumers(root, consumers);
   const violations: AuthImportViolation[] = [];
 
   for (const [importer, targets] of build.graph) {
     if (isAuthModule(importer)) continue;
+    // The allowlist is matched on the importer's own id and nothing else — not on a
+    // directory, not on a pattern. An entry exempts that one module's edges into the
+    // choke point and grants nothing to anything it imports, which is what keeps
+    // "allowlisted" from spreading down a dependency chain nobody enumerated.
+    if (allowed.has(importer)) continue;
     for (const target of targets) {
       if (!isAuthModule(target)) continue;
       const pageChain = findPageChain(build, importer);
@@ -807,6 +1099,141 @@ function checkAnonymousReadPath(build: BuildGraph, root: string): AuthImportViol
   return violations.sort(
     (a, b) => a.importer.localeCompare(b.importer) || a.target.localeCompare(b.target),
   );
+}
+
+/** Why a module is not allowed in the client pass. The two cases fail for the same
+ *  ultimate reason and need different first sentences, because the reader's situation is
+ *  different: one has put auth code somewhere it hydrates, the other has written a
+ *  perfectly reasonable entry on the allowlist for a module that turns out not to be
+ *  server-only, and telling the second person about the choke point tells them nothing. */
+type ClientBundleReason = 'choke-point' | 'allowlisted-consumer';
+
+interface ClientBundleViolation {
+  /** The module the client pass transformed. */
+  module: string;
+  reason: ClientBundleReason;
+  message: string;
+}
+
+/** The consequence, said the way the other arguments in this file are said: what shipped,
+ *  to whom, and why that is a failure rather than merely wasteful. The last part is the
+ *  one that has to land — "it makes the bundle bigger" is an argument somebody can accept
+ *  and move on from, and this is not a size problem. */
+const AUTH_ON_THE_CLIENT_ARGUMENT =
+  'WHAT SHIPPED: this module, and everything src/lib/auth/ pulls in behind it, as ' +
+  'JavaScript a browser downloads, parses and executes. TO WHOM: every visitor of every ' +
+  'page that hydrates it — signed in or not, which on this site means overwhelmingly not. ' +
+  'The stranger opening a shared pack list from a Reddit link downloads an auth stack for ' +
+  'an account they will never have. WHY THAT IS A FAILURE and not just waste: ' +
+  'authentication here is a server-side fact. The session cookie is httpOnly precisely so ' +
+  'that page JavaScript cannot read it, so this code cannot do the job it looks like it is ' +
+  'doing — and code that decides who you are while running inside your own browser is not ' +
+  'an authorization boundary, it is a suggestion, because the visitor owns that runtime ' +
+  'and can edit it. Everything server-side the module touches on the way is now public ' +
+  'too: an internal URL, the shape of a privileged query, any value the bundler inlined ' +
+  'into it. Not one of those is visible in the rendered page.';
+
+/** The half a reader will get wrong if only the ban is stated: they will delete the
+ *  allowlist entry, leave the import, and expect green. */
+const WHY_INVARIANT_D_EXISTS =
+  'This is the rule that makes AUTH_CONSUMERS safe to have. Invariant A stopped being ' +
+  'unconditional when the first real authenticated route arrived, and an allowlist is only ' +
+  'ever as good as the judgement of whoever last added a line to it. This is the part that ' +
+  'judgement cannot get wrong: whatever is on that list, the auth SDK cannot reach a ' +
+  'visitor, because a module that reaches a visitor is in the client pass and this fails. ' +
+  'So do NOT fix this by deleting the allowlist entry and keeping the import — that is the ' +
+  'same bytes shipping to the same browsers, reported by Invariant A instead. The fix is ' +
+  'to move the auth call to the server: do it in the page, in an API route or in ' +
+  'middleware, and pass the result — a boolean, a display name, whatever the interface ' +
+  'actually needs — into the island as an ordinary prop.';
+
+function clientBundleViolationMessage(
+  root: string,
+  module: string,
+  reason: ClientBundleReason,
+): string {
+  const rel = renderId(root, module);
+  const lead =
+    reason === 'choke-point'
+      ? `${rel} is inside the auth choke point (src/lib/auth/), and the build transformed it for the CLIENT:`
+      : `${rel} is named in AUTH_CONSUMERS, which is a list of SERVER-ONLY modules, and the build transformed it for the CLIENT:`;
+  const because =
+    reason === 'choke-point'
+      ? 'Something rendered as an island imports this directory, directly or through a ' +
+        'chain. That is normally caught by Invariant A first, since an island is not on ' +
+        'the allowlist — if this is the only failure you are seeing, the island IS on the ' +
+        'allowlist and should not be.'
+      : 'An entry on that list is a promise that the module never reaches a browser. This ' +
+        'one does, so the promise is false and the exemption it was granted is unsound.';
+  return [
+    lead,
+    `    ${rel}`,
+    '',
+    because,
+    '',
+    AUTH_ON_THE_CLIENT_ARGUMENT,
+    '',
+    WHY_INVARIANT_D_EXISTS,
+  ].join('\n');
+}
+
+/**
+ * Invariant D, as a pure function over an already-built graph: no module under
+ * `<root>/src/lib/auth/`, and no module named in `consumers`, may have been transformed for
+ * the client.
+ *
+ * It reads `build.clientIds`, which is the one thing the unioned module graph deliberately
+ * throws away — see the field's own comment. Every other invariant in this file wants the
+ * union, because "does this ship at all" is the question they ask; this one asks "ships to
+ * WHOM", and the union has already merged the two answers together.
+ *
+ * The scope is exactly those two sets and nothing wider, which is worth stating because a
+ * more sweeping version is easy to write and would be wrong. "No module in the client pass
+ * may transitively reach auth" sounds stronger and is unenforceable in a useful way: the
+ * client pass is where Vue, the icon set and every island live, and a rule over all of it
+ * fails on things nobody can act on. The two sets here are the ones whose presence in a
+ * browser is a defect by definition — the directory that exists to be unreachable, and the
+ * modules that were granted an exemption on the strength of being server-only.
+ *
+ * Note what this does NOT report, because it is a layering choice rather than an oversight:
+ * an ordinary island that imports auth without being allowlisted is not on this list. It is
+ * Invariant A's, and reporting it twice would mean two failures, two messages and one
+ * defect. What Invariant D adds in that case is a second, independent catch of its
+ * CONSEQUENCE — the choke point's own modules land in the client pass when an island drags
+ * them there, so this fires on those even when the island itself is somebody else's
+ * report. The fixture pins exactly that: three of its four Invariant D violations are the
+ * choke-point modules its islands pull in.
+ *
+ * Like Invariant C, this rides on the `transform` hook, and inherits the same failure mode:
+ * a hook that silently stops running leaves `clientIds` empty and this permanently green.
+ * The real-site tripwire asserts the set is populated AND that it excludes a module known
+ * to be server-only, which is what distinguishes a working hook from one returning
+ * everything or nothing.
+ */
+function checkAuthStaysOffTheClient(
+  build: BuildGraph,
+  root: string,
+  consumers: readonly string[],
+): ClientBundleViolation[] {
+  const authDir = chokePointDir(root);
+  const allowed = resolveAuthConsumers(root, consumers);
+  const violations: ClientBundleViolation[] = [];
+
+  for (const id of build.clientIds) {
+    const reason: ClientBundleReason | null = id.startsWith(authDir)
+      ? 'choke-point'
+      : allowed.has(id)
+        ? 'allowlisted-consumer'
+        : null;
+    if (reason === null) continue;
+    violations.push({
+      module: id,
+      reason,
+      message: clientBundleViolationMessage(root, id, reason),
+    });
+  }
+
+  return violations.sort((a, b) => a.module.localeCompare(b.module));
 }
 
 interface ClerkViolation {
@@ -961,23 +1388,25 @@ const ANON_KEY_IS_THE_RIGHT_KEY =
   'the rows that are meant to be public. PUBLIC_SUPABASE_ANON_KEY is the correct key here and ' +
   'this check has nothing to say about it.';
 
-/** Where the key belongs — and, said in the same breath because the obvious next move is
- *  currently blocked, what happens if you go and do it. src/lib/auth/ is the one directory
- *  Invariant C exempts, so a service-role client goes there. But Invariant A is an
- *  unconditional EDGE rule: importing that directory from a route is itself a violation
- *  today, and one whose failure message is about a $6,000/month auth bill that has nothing
- *  to do with what you just did. Sending a reader from one red build straight into another,
- *  more confusing one is how a guardrail earns the reputation that gets it deleted. */
+/** Where the key belongs — and, said in the same breath because the obvious next move
+ *  trips a second rule, what happens if you go and do it. src/lib/auth/ is the one
+ *  directory Invariant C exempts, so a service-role client goes there. Importing that
+ *  directory is governed by Invariant A, which is an edge rule with an enumerated
+ *  allowlist: it is not blocked outright any more, but it is not open either, and finding
+ *  that out from a second red build whose message is about a $6,000/month auth bill is how
+ *  a guardrail earns the reputation that gets it deleted. So it is said here instead. */
 const REACH_IT_THROUGH_THE_CHOKE_POINT =
   'If something genuinely needs the privileged key, it belongs behind src/lib/auth/ — the one ' +
-  'directory this rule exempts, and where a service-role client would live. Be aware that ' +
-  'importing that directory from a route is ALSO blocked right now, by a separate rule ' +
-  '(Invariant A) that forbids any module outside it from importing into it, and whose failure ' +
-  'message is about auth billing rather than about this. That is not an oversight to work ' +
-  'around: there is no privileged consumer in this codebase yet, and the first genuine one is ' +
-  'the trigger for revisiting Invariant A rather than for quietly widening it. See the ' +
-  'all-caps paragraph in checkAnonymousReadPath in tests/anonymous-read-path.test.ts, which ' +
-  'says what has to be solved first and what the acceptance test for that work is.';
+  'directory this rule exempts, and where a service-role client would live. Importing that ' +
+  'directory is governed by a SEPARATE rule (Invariant A), whose failure message is about auth ' +
+  'billing rather than about this: only the modules enumerated in AUTH_CONSUMERS may import ' +
+  'into it, so the consumer needs a line there too, it must be server-only, and Invariant D ' +
+  'fails the build if it is not. Before doing any of that, note that this project has decided ' +
+  'against ever holding a service-role key at all — the pattern that replaces it is a ' +
+  '`SECURITY DEFINER` Postgres function that checks `auth.uid()` itself, which gets the same ' +
+  'guarantee from the database without an elevated key existing anywhere. See ' +
+  'checkAnonymousReadPath in tests/anonymous-read-path.test.ts for what an allowlist entry has ' +
+  'to be true of, and src/lib/auth/index.ts for the decision.';
 
 /** Said in the failure itself because the alternative is somebody spending an afternoon
  *  concluding the check is broken. See the header comment for why it is not worth fixing. */
@@ -1282,6 +1711,23 @@ describe('the real site', () => {
     // and names one module that must specifically be in there.
     expect(realBuild.transformedIds.size).toBeGreaterThan(realBuild.graph.size * 0.9);
     expect(realBuild.transformedIds.has(indexEntry!)).toBe(true);
+
+    // And Invariant D, which rides on the same hook but on a different property of it, so
+    // it has a failure mode of its own that none of the above would notice. Its whole
+    // content is "these modules are not in this set", which an empty set satisfies
+    // perfectly — and an empty set is what a `transform` hook that stopped receiving its
+    // options argument would NOT produce, but one that stopped firing would.
+    //
+    // Both directions are pinned, because each rules out a different broken
+    // implementation. Non-empty rules out a hook that never fired: this site really does
+    // ship a hydrated island, so its client pass has content. Excluding the index page
+    // rules out the opposite failure, the one that is otherwise invisible — if a Vite
+    // change ever drops the `ssr` flag, every module in the build is classified as client
+    // and the invariant becomes an assertion about the entire graph. A page is server-only
+    // by construction, so it is the sharpest available witness that the two passes are
+    // still being told apart.
+    expect(realBuild.clientIds.size).toBeGreaterThan(0);
+    expect(realBuild.clientIds.has(indexEntry!)).toBe(false);
   });
 
   /**
@@ -1312,8 +1758,46 @@ describe('the real site', () => {
     expect(scanned.length).toBeGreaterThan(realBuild.graph.size * 0.9);
   });
 
-  it('nothing outside src/lib/auth/ imports the auth choke point', () => {
-    const violations = checkAnonymousReadPath(realBuild, repoRoot);
+  it('nothing outside src/lib/auth/ imports the auth choke point, except AUTH_CONSUMERS', () => {
+    const violations = checkAnonymousReadPath(realBuild, repoRoot, AUTH_CONSUMERS);
+    expect(violations.map((v) => v.message)).toEqual([]);
+  });
+
+  /**
+   * The way an allowlist rots, made loud. An entry whose file has been renamed or deleted
+   * exempts nothing, so nothing goes red and nobody has any reason to notice — it simply
+   * sits there, a granted exemption with no owner, until some unrelated future file is
+   * given that path and inherits it. That is not a hypothetical shape for this list:
+   * `src/pages/account/index.astro` is the kind of path that gets restructured twice
+   * before it settles, and the old spelling is exactly what stays behind.
+   *
+   * Vacuous while AUTH_CONSUMERS is empty, and knowingly so — this is the assertion that
+   * starts working the moment the first entry lands, which is the moment it is needed. The
+   * unit test further down is what proves the check itself has teeth today, and the
+   * fixture block runs the same check against a list that is genuinely populated.
+   *
+   * If this fails, the fix is to correct or delete the entry. It is never to delete this
+   * assertion: an allowlist nobody validates is a list of names that used to mean
+   * something.
+   */
+  it('every AUTH_CONSUMERS entry names a file that exists', () => {
+    expect(staleAuthConsumers(repoRoot, AUTH_CONSUMERS)).toEqual([]);
+  });
+
+  /**
+   * Invariant D. Green today for two independent reasons, both of which are worth saying
+   * out loud so nobody reads this as evidence of anything: AUTH_CONSUMERS is empty, and
+   * nothing in the real site imports src/lib/auth/ at all, so the choke point is not even a
+   * module in this build. It will do real work for the first time the day an allowlisted
+   * route arrives, and more importantly the first day one of them turns out to hydrate.
+   *
+   * The tripwire above is what keeps that from being indistinguishable from a broken
+   * check: it asserts the client pass was genuinely observed, and genuinely told apart
+   * from the server pass, before this assertion is allowed to mean "and auth was not in
+   * it".
+   */
+  it('no auth module and no allowlisted consumer reaches the client build', () => {
+    const violations = checkAuthStaysOffTheClient(realBuild, repoRoot, AUTH_CONSUMERS);
     expect(violations.map((v) => v.message)).toEqual([]);
   });
 
@@ -1362,7 +1846,47 @@ describe('the real site', () => {
 // Self-test — proves the checker can actually fail
 // ---------------------------------------------------------------------------
 
-/** The eight ways the fixture reaches auth, by importing module. Every one of them is
+/**
+ * The fixture's own allowlist, standing in for AUTH_CONSUMERS. It is a separate constant
+ * rather than a reuse of the real one because the two lists name files in two different
+ * projects: an entry in AUTH_CONSUMERS is a path under the repo root, and resolving it
+ * against the fixture root would name a file that does not exist there — which is exactly
+ * the stale-entry condition the on-disk check fails on. Both lists are checked against
+ * their own project's disk for that reason.
+ *
+ * The two entries are the two halves of what an allowlist entry is: one module that
+ * satisfies the server-only condition and one that does not, so both the "yes" and the
+ * "no" are executed against a real build.
+ */
+const FIXTURE_AUTH_CONSUMERS = [
+  // A server-rendered page that imports the choke point. The legitimate case: exempt from
+  // Invariant A, and never in the client pass, so Invariant D has nothing to say about it.
+  'src/pages/allowlisted-route.astro',
+  // A hydrated Vue island, allowlisted by mistake. Exempt from Invariant A on the strength
+  // of a promise it cannot keep, and caught by Invariant D for breaking it.
+  'src/components/AllowlistedIsland.vue',
+];
+
+/** The ten ways the fixture reaches auth, by importing module, when NOTHING is allowlisted.
+ *  Every one of them is a real edge in a real Astro build of
+ *  tests/fixtures/anon-read-path-violation, not a synthetic graph. Two of the ten are on
+ *  FIXTURE_AUTH_CONSUMERS, which is what leaves FIXTURE_VIOLATING_IMPORTERS at eight:
+ *  the difference between the two lists IS the allowlist doing its job, and it is asserted
+ *  in both directions below rather than described here. */
+const FIXTURE_IMPORTERS_WITH_EMPTY_ALLOWLIST = [
+  'src/components/AllowlistedIsland.vue',
+  'src/components/AuthGate.astro',
+  'src/components/ClientLoadAuth.vue',
+  'src/components/ClientOnlyAuth.vue',
+  'src/lib/auth-helpers.ts',
+  'src/lib/lazy-auth.ts',
+  'src/middleware/index.ts',
+  'src/pages/allowlisted-route.astro',
+  'src/pages/direct.astro',
+  'src/pages/second-auth-module.astro',
+];
+
+/** The eight the fixture still reports once its allowlist is applied. Every one of them is
  *  a real edge in a real Astro build of tests/fixtures/anon-read-path-violation, not
  *  a synthetic graph. */
 const FIXTURE_VIOLATING_IMPORTERS = [
@@ -1384,6 +1908,23 @@ const FIXTURE_IMPORTERS_WITH_NO_PAGE_CHAIN = [
   'src/middleware/index.ts',
 ];
 
+/** Every module the fixture expects Invariant D to report, in the order the checker sorts
+ *  them. Three are the choke point's own files, which reach the client pass because the
+ *  fixture's islands import them — the consequence Invariant D catches independently of
+ *  whose report the island itself is. The fourth is the allowlisted island, and it is the
+ *  one that proves the allowlist half of the rule runs at all.
+ *
+ *  What is NOT here matters as much: ClientOnlyAuth.vue and ClientLoadAuth.vue are in the
+ *  client pass and import auth, and are absent because they are neither inside the choke
+ *  point nor allowlisted. They are Invariant A's, and reporting them here too would mean
+ *  two failures and one defect. */
+const FIXTURE_CLIENT_BUNDLED_AUTH_MODULES = [
+  'src/components/AllowlistedIsland.vue',
+  'src/lib/auth/index.ts',
+  'src/lib/auth/service-role.ts',
+  'src/lib/auth/session.ts',
+];
+
 /** Every module the fixture expects Invariant C to report, in the order the checker sorts
  *  them — one per spelling in PRIVILEGED_KEY_PATTERNS, plus the destructured-binding case
  *  and the generated-only case. Everything else in that build must stay off this list:
@@ -1402,12 +1943,14 @@ const FIXTURE_SERVICE_ROLE_MODULES = [
   'src/pages/supabase-secret-key.astro',
 ];
 
-describe('the checkers, run against a fixture that actually violates Invariants A and C', () => {
+describe('the checkers, run against a fixture that actually violates Invariants A, C and D', () => {
   let fixtureBuild: BuildGraph;
   let fixtureBuildFailure: unknown;
   const rel = (id: string) => relative(fixtureRoot, id);
   const find = (importer: string) =>
-    checkAnonymousReadPath(fixtureBuild, fixtureRoot).find((v) => rel(v.importer) === importer);
+    checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS).find(
+      (v) => rel(v.importer) === importer,
+    );
 
   // Captured rather than thrown, for the reason spelled out on the real site's beforeAll:
   // a throwing beforeAll makes vitest report every test in this describe as `skipped`, and
@@ -1440,6 +1983,22 @@ describe('the checkers, run against a fixture that actually violates Invariants 
     expect(direct!.message).toContain('$6,000');
     expect(direct!.message).toContain('$3,000-4,000');
     expect(direct!.message).toContain('$9/month');
+
+    // The numbers above stay, and on their own they now overstate the case — Supabase
+    // Auth is $0.00325/MAU and anonymous reads are unmetered, which anybody can look up
+    // in a minute and use to dismiss the whole rule. So the message has to carry the
+    // correction next to the claim, and name the reasons that survive cheaper auth.
+    expect(direct!.message).toContain('$0.00325/MAU');
+    expect(direct!.message).toContain('LATENCY');
+    expect(direct!.message).toContain('CACHE-ABILITY');
+    expect(direct!.message).toContain('BLAST RADIUS');
+
+    // And it has to say how to be allowed, because the person reading it most carefully is
+    // the one whose route genuinely does authenticate somebody. Offering the allowlist
+    // without its conditions is how an island ends up on it.
+    expect(direct!.message).toContain('AUTH_CONSUMERS');
+    expect(direct!.message).toContain('SERVER-ONLY');
+    expect(direct!.message).toContain('src/lib/auth-routes.ts');
   });
 
   // The claim this suite actually makes is transitive detection, not "can spot a
@@ -1499,7 +2058,7 @@ describe('the checkers, run against a fixture that actually violates Invariants 
   // is only executed while the directory holds more than one file. The fixture's
   // index.ts imports its session.ts precisely so deleting the exemption goes red here.
   it('does not flag the choke point importing itself', () => {
-    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS);
     const authIndex = [...fixtureBuild.graph.keys()].find(
       (id) => rel(id) === 'src/lib/auth/index.ts',
     )!;
@@ -1608,14 +2167,162 @@ describe('the checkers, run against a fixture that actually violates Invariants 
   // The other half of "not vacuous": a checker that reported every module as a
   // violation would also pass every assertion above.
   it('does not flag the page that never goes near auth', () => {
-    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS);
     expect(violations.some((v) => rel(v.importer) === 'src/pages/clean.astro')).toBe(false);
     expect(fixtureBuild.pageEntries.has('src/pages/clean')).toBe(true);
   });
 
   it('reports exactly those eight importers, no more and no fewer', () => {
-    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS);
     expect(violations.map((v) => rel(v.importer))).toEqual(FIXTURE_VIOLATING_IMPORTERS);
+  });
+
+  /**
+   * The allowlist, proved from both ends against the same build.
+   *
+   * The first assertion is the one that keeps the rule unchanged where it was already
+   * right: with nothing allowlisted, all ten importers are reported, INCLUDING the two the
+   * fixture normally exempts. So the eight above are eight because of the list and not
+   * because the checker stopped noticing the other two — and a mutation that made the
+   * exemption unconditional, or that widened it to a directory, changes this number.
+   *
+   * The second is the difference itself, stated as a set rather than as two counts,
+   * because "ten became eight" is also what deleting two unrelated cases looks like.
+   *
+   * The third is the property that stops an entry being a blanket pardon: an allowlisted
+   * module's own edge into the choke point is exempt, and nothing it imports inherits
+   * anything. src/pages/allowlisted-route.astro imports the choke point directly, and
+   * src/lib/auth-helpers.ts — which is nobody's allowlist entry — is still reported for
+   * its own edge. If exemption ever spread down a chain, an entry for one page would
+   * quietly cover every module beneath it.
+   */
+  it('reports all ten importers when nothing is allowlisted, and exempts exactly the two that are', () => {
+    const unfiltered = checkAnonymousReadPath(fixtureBuild, fixtureRoot, []);
+    const filtered = checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS);
+
+    expect(unfiltered.map((v) => rel(v.importer))).toEqual(FIXTURE_IMPORTERS_WITH_EMPTY_ALLOWLIST);
+
+    const exempted = unfiltered
+      .map((v) => rel(v.importer))
+      .filter((importer) => !filtered.map((v) => rel(v.importer)).includes(importer));
+    expect(exempted.sort()).toEqual([...FIXTURE_AUTH_CONSUMERS].sort());
+
+    expect(filtered.map((v) => rel(v.importer))).toContain('src/lib/auth-helpers.ts');
+  });
+
+  /**
+   * Case (c): the legitimate entry. A server-rendered page that imports the choke point,
+   * named on the allowlist, and clean under BOTH rules — Invariant A because it is
+   * exempt, Invariant D because it is genuinely server-only.
+   *
+   * The first two assertions are the premise, and without them this proves nothing: the
+   * edge really is in the graph (so the page is a module that would be reported), and the
+   * page really is absent from the client pass (so passing Invariant D is a fact about the
+   * build rather than about the checker having no opinion). Its unallowlisted twin
+   * src/pages/direct.astro holds the identical edge and is reported, which is what makes
+   * this a controlled comparison rather than an observation about one file.
+   */
+  it('does NOT flag an allowlisted server-only page, which is also absent from the client pass', () => {
+    const page = join(fixtureRoot, 'src', 'pages', 'allowlisted-route.astro');
+    const authIndex = join(fixtureRoot, 'src', 'lib', 'auth', 'index.ts');
+
+    expect([...(fixtureBuild.graph.get(page) ?? [])]).toContain(authIndex);
+    expect(fixtureBuild.transformedIds.has(page)).toBe(true);
+    expect(fixtureBuild.clientIds.has(page)).toBe(false);
+
+    expect(find('src/pages/allowlisted-route.astro')).toBeUndefined();
+    expect(
+      checkAuthStaysOffTheClient(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS).map((v) =>
+        rel(v.module),
+      ),
+    ).not.toContain('src/pages/allowlisted-route.astro');
+
+    // The controlled half: same edge, no allowlist entry, still reported.
+    expect(find('src/pages/direct.astro')).toBeDefined();
+  });
+
+  /**
+   * Case (d), and the reason Invariant D is worth its code: an allowlisted module that is
+   * NOT server-only. This is the failure the allowlist would otherwise have introduced —
+   * one careless line granting an island the right to import auth, and the SDK shipping to
+   * every anonymous reader of the page that renders it with Invariant A satisfied and
+   * silent.
+   *
+   * Built from the real build rather than a synthetic graph, deliberately. Dropping an id
+   * into a hand-made `clientIds` proves the function can filter a Set; it proves nothing
+   * about whether Astro actually puts an allowlisted island in that Set, which is the only
+   * claim anybody cares about. So the premise is asserted from the build: the island is in
+   * the client pass, and Invariant A has been silenced for it.
+   */
+  it('flags an allowlisted module that IS in the client bundle, which Invariant A no longer sees', () => {
+    const island = join(fixtureRoot, 'src', 'components', 'AllowlistedIsland.vue');
+
+    // The premise, both halves. It really did reach the client pass, and Invariant A
+    // really has stopped reporting it — so this is the only thing standing between that
+    // entry and a shipped SDK.
+    expect(fixtureBuild.clientIds.has(island)).toBe(true);
+    expect(find('src/components/AllowlistedIsland.vue')).toBeUndefined();
+
+    const violation = checkAuthStaysOffTheClient(
+      fixtureBuild,
+      fixtureRoot,
+      FIXTURE_AUTH_CONSUMERS,
+    ).find((v) => rel(v.module) === 'src/components/AllowlistedIsland.vue');
+
+    expect(violation).toBeDefined();
+    expect(violation!.reason).toBe('allowlisted-consumer');
+    expect(violation!.message).toContain('SERVER-ONLY');
+    expect(violation!.message).toContain('WHAT SHIPPED');
+    expect(violation!.message).toContain('TO WHOM');
+    // The consequence has to be stated as a consequence, not as a size complaint.
+    expect(violation!.message).toContain('httpOnly');
+    expect(violation!.message).toContain('not an authorization boundary');
+    // And the wrong fix has to be named, because it is the obvious one: delete the entry,
+    // keep the import, and the same bytes ship under a different failure.
+    expect(violation!.message).toContain('deleting the allowlist entry and keeping the import');
+    expect(violation!.message).toContain('as an ordinary prop');
+  });
+
+  /**
+   * The other half of Invariant D, and the one that fires without anybody having touched
+   * the allowlist: the choke point's own modules, dragged into the client pass by the two
+   * islands that import them. Nothing allowlisted is involved — this is what the invariant
+   * catches on a codebase that has never edited AUTH_CONSUMERS at all.
+   *
+   * It is also the concrete answer to the question the header raises about `client:only`.
+   * The island itself is reported by Invariant A; its CONSEQUENCE, auth code in a browser
+   * bundle, is reported here, independently, from a completely different piece of evidence.
+   * Two rules would have to fail at once for that to ship.
+   */
+  it('flags the choke point itself when an island drags it into the client pass', () => {
+    const violations = checkAuthStaysOffTheClient(
+      fixtureBuild,
+      fixtureRoot,
+      FIXTURE_AUTH_CONSUMERS,
+    );
+
+    expect(violations.map((v) => rel(v.module))).toEqual(FIXTURE_CLIENT_BUNDLED_AUTH_MODULES);
+
+    const chokePoint = violations.find((v) => rel(v.module) === 'src/lib/auth/index.ts');
+    expect(chokePoint!.reason).toBe('choke-point');
+    expect(chokePoint!.message).toContain('src/lib/auth/index.ts');
+    expect(chokePoint!.message).toContain('rendered as an island');
+
+    // Not vacuous in the other direction: the islands that are neither inside the choke
+    // point nor allowlisted are in the client pass too, and belong to Invariant A. A
+    // checker that reported every client module would fail this.
+    expect(
+      fixtureBuild.clientIds.has(join(fixtureRoot, 'src', 'components', 'ClientOnlyAuth.vue')),
+    ).toBe(true);
+    expect(violations.map((v) => rel(v.module))).not.toContain('src/components/ClientOnlyAuth.vue');
+  });
+
+  // The fixture's own allowlist is subject to the same rule the real one is, and unlike
+  // the real one it is not empty — so this is where the on-disk check runs against
+  // something. Two entries, both of which must name real files in this fixture.
+  it('every FIXTURE_AUTH_CONSUMERS entry names a file that exists', () => {
+    expect(staleAuthConsumers(fixtureRoot, FIXTURE_AUTH_CONSUMERS)).toEqual([]);
+    expect(FIXTURE_AUTH_CONSUMERS.length).toBeGreaterThan(0);
   });
 
   // The measurement behind "a reachability checker is blind to exactly these two",
@@ -1623,7 +2330,7 @@ describe('the checkers, run against a fixture that actually violates Invariants 
   // grows. A violation with no chain is one no page entry reaches, which is precisely
   // what a reachability rule would have missed.
   it('two of the eight are reachable from no page entry at all', () => {
-    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS);
 
     expect(violations.filter((v) => v.chain === null).map((v) => rel(v.importer))).toEqual(
       FIXTURE_IMPORTERS_WITH_NO_PAGE_CHAIN,
@@ -1637,7 +2344,7 @@ describe('the checkers, run against a fixture that actually violates Invariants 
   // emitted HTML is what covers it, and this is the only case in the suite that
   // distinguishes the two.
   it('sees no module-graph violation for a CDN script tag, and catches it in the emitted HTML', () => {
-    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot);
+    const violations = checkAnonymousReadPath(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS);
 
     expect(violations.map((v) => rel(v.importer))).not.toContain('src/pages/cdn-script.astro');
     expect(fixtureBuild.pageEntries.has('src/pages/cdn-script')).toBe(true);
@@ -1990,12 +2697,18 @@ describe('the checkers, run against a fixture that actually violates Invariants 
       expect(message).toContain('cannot tell code from a comment');
 
       // The advice must not send the reader into a different red build without warning:
-      // moving the key behind src/lib/auth/ and importing it from a route trades this
-      // failure for an Invariant A failure about a $6,000/month auth bill, which has
-      // nothing to do with what they just did.
-      expect(message).toContain('is ALSO blocked right now');
-      expect(message).toContain('Invariant A');
+      // moving the key behind src/lib/auth/ and importing it from a route runs into
+      // Invariant A, whose failure message is about a $6,000/month auth bill and has
+      // nothing to do with what they just did. Importing the choke point is no longer
+      // forbidden outright — it needs an allowlist entry — so the message says that, and
+      // says the condition attached to one, rather than sending them off to discover it.
+      expect(message).toContain('SEPARATE rule (Invariant A)');
+      expect(message).toContain('AUTH_CONSUMERS');
+      expect(message).toContain('Invariant D');
       expect(message).toContain('checkAnonymousReadPath');
+      // And it points at the reason none of this should be needed here: the project has
+      // decided against holding a service-role key at all.
+      expect(message).toContain('SECURITY DEFINER');
 
       // And it must say which spellings it knows, because "this rule does not know my
       // key's name" and "this rule does not care about my key" look identical otherwise.
@@ -2053,6 +2766,7 @@ describe('the parts of Invariant C a real build does not currently exercise', ()
         ],
       ]),
       transformedIds: new Set(['\0some-plugin/runtime.js']),
+      clientIds: new Set(),
     };
 
     const violations = checkServiceRoleKey(build, repoRoot);
@@ -2077,8 +2791,10 @@ describe('the parts of Invariant C a real build does not currently exercise', ()
     expect(isExemptPackage(join(repoRoot, 'src', 'pages', 'index.astro'), ['some-admin-sdk'])).toBe(
       false,
     );
-    // Nothing is exempt today, and the list is meant to stay a list of named exceptions.
-    expect(PACKAGES_EXEMPT_FROM_KEY_SCAN).toEqual([]);
+    // PK-19 landed the one real exemption the docstrings above promised —
+    // @supabase/auth-js, documented at its own definition — and the list is meant to
+    // stay exactly that: a list of named exceptions, not a category.
+    expect(PACKAGES_EXEMPT_FROM_KEY_SCAN).toEqual(['@supabase/auth-js']);
   });
 
   // A minified dependency is one line of several hundred kilobytes. Slicing from column 0
@@ -2092,6 +2808,91 @@ describe('the parts of Invariant C a real build does not currently exercise', ()
     expect(ref.snippet.length).toBeLessThanOrEqual(SNIPPET_LIMIT + 2);
     expect(ref.snippet.startsWith('…')).toBe(true);
     expect(ref.snippet.endsWith('…')).toBe(true);
+  });
+});
+
+/**
+ * AUTH_CONSUMERS was empty from when this file was written until PK-19 landed the first
+ * real routes, and this block predates that: it exercises staleAuthConsumers and friends
+ * on lists written here rather than on the real AUTH_CONSUMERS export, which is what lets
+ * it hold the two cases that describe below explains a fixture cannot.
+ *
+ * The real-site block now runs the same machinery against a genuinely populated list —
+ * see "every AUTH_CONSUMERS entry names a file that exists" there — so this suite's title
+ * is a record of why it exists rather than a claim about the current state of that export.
+ *
+ * The fixture block covers the same ground against a real build with a populated list.
+ * What these add is the cases a fixture cannot hold: an entry naming a file that does not
+ * exist, and one naming a directory. Both are things somebody types by accident; neither
+ * can be committed to a fixture, because a fixture case has to be a real file to be built.
+ */
+describe('the allowlist machinery, exercised on lists written here rather than on AUTH_CONSUMERS', () => {
+  it('reports an entry whose file does not exist, which is how an allowlist rots green', () => {
+    // A plausible-looking future route — not src/pages/account/index.astro, which
+    // PK-19 made real; picking a path that exists would make this assertion about
+    // "missing" pass by accident of testing the wrong branch entirely.
+    expect(staleAuthConsumers(repoRoot, ['src/pages/settings/index.astro'])).toEqual([
+      'src/pages/settings/index.astro',
+    ]);
+    // And is quiet about one that does, so the check distinguishes rather than complains.
+    expect(staleAuthConsumers(repoRoot, ['src/lib/auth/index.ts'])).toEqual([]);
+  });
+
+  // A directory is not a module and can never be a graph key, so an entry naming one
+  // exempts nothing while looking entirely plausible in a diff — "src/pages/account" reads
+  // like a route. Rejected for the same reason a missing file is.
+  it('reports an entry that names a directory rather than a file', () => {
+    expect(staleAuthConsumers(repoRoot, ['src/lib/auth'])).toEqual(['src/lib/auth']);
+  });
+
+  // The empty list is the state this ships in, and it must be quiet rather than
+  // degenerate: no entries means nothing missing, not "everything is missing".
+  it('says nothing about an empty allowlist', () => {
+    expect(staleAuthConsumers(repoRoot, [])).toEqual([]);
+    expect(resolveAuthConsumers(repoRoot, []).size).toBe(0);
+  });
+
+  // Entries are written with `/` whatever the platform; the ids they are compared against
+  // are built with the platform separator. Joining segment by segment is what makes those
+  // two agree, and on a `/` platform this test passes either way — which is precisely why
+  // it asserts the constructed id rather than a round trip through the checker.
+  it('resolves a slash-written entry to a platform-native absolute id', () => {
+    expect([...resolveAuthConsumers(repoRoot, ['src/pages/account.astro'])]).toEqual([
+      join(repoRoot, 'src', 'pages', 'account.astro'),
+    ]);
+  });
+
+  /**
+   * Invariant D over a hand-made graph, for the one property a fixture cannot show: that
+   * the rule is scoped to the choke point and the allowlist and NOT to the client pass at
+   * large. The fixture's client pass is full of Vue and its islands, and every one of them
+   * staying unreported there is consistent both with correct scoping and with a checker
+   * that happens not to have looked. Here the sets are chosen so the difference is the
+   * only thing being measured.
+   */
+  it('ignores client modules that are neither in the choke point nor on the allowlist', () => {
+    const vue = join(repoRoot, 'node_modules', 'vue', 'dist', 'vue.runtime.esm-bundler.js');
+    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const authModule = join(repoRoot, 'src', 'lib', 'auth', 'index.ts');
+    const build: BuildGraph = {
+      graph: new Map(),
+      pageEntries: new Map(),
+      emittedHtml: new Map(),
+      serviceRoleRefs: new Map(),
+      transformedIds: new Set(),
+      clientIds: new Set([vue, island, authModule]),
+    };
+
+    expect(checkAuthStaysOffTheClient(build, repoRoot, []).map((v) => v.module)).toEqual([
+      authModule,
+    ]);
+    // Add the island to the allowlist and it becomes a violation — the same module, the
+    // same build, reported only because somebody promised it was server-only.
+    expect(
+      checkAuthStaysOffTheClient(build, repoRoot, ['src/components/ThemeToggle.vue']).map(
+        (v) => v.module,
+      ),
+    ).toEqual([island, authModule]);
   });
 });
 
@@ -2118,6 +2919,7 @@ describe('findPageChain, on graphs whose insertion order disagrees with their so
       emittedHtml: new Map(),
       serviceRoleRefs: new Map(),
       transformedIds: new Set(),
+      clientIds: new Set(),
     };
 
     expect(findPageChain(build, target)).toEqual([page('alpha'), target]);
@@ -2138,6 +2940,7 @@ describe('findPageChain, on graphs whose insertion order disagrees with their so
       emittedHtml: new Map(),
       serviceRoleRefs: new Map(),
       transformedIds: new Set(),
+      clientIds: new Set(),
     };
 
     expect(findPageChain(build, target)).toEqual([page('zebra'), target]);

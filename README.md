@@ -141,16 +141,21 @@ Production is deliberately **not** behind Access. It is a public website.
 
 ```bash
 CLOUDFLARE_ENV=staging npm run build     # resolves the staging block
-npx wrangler deploy -c dist/client/wrangler.json
+npx wrangler deploy -c dist/server/wrangler.json
 ```
 
 `astro build` resolves one environment out of `wrangler.jsonc` and writes the result to
-`dist/client/wrangler.json`, which is the file `wrangler deploy` actually reads. That
-generated file has no environments left in it, so `wrangler deploy --env staging` reads
-plausibly and does nothing — the deploy would go to whichever Worker the build had already
-chosen. `tests/deploy-workers.test.ts` pins that each workflow sets `CLOUDFLARE_ENV`
-explicitly, in both directions, because the failure that costs something is a staging build
-landing on the Worker that serves `packsheet.io`.
+`dist/server/wrangler.json`, which is the file `wrangler deploy` actually reads. (Before
+PK-19 this was `dist/client/wrangler.json` — every route was prerendered, there was no
+Worker entry, and Cloudflare's Vite plugin wrote the resolved config next to the static
+assets. The first `export const prerender = false` route gave the build a real
+`entry.mjs`, and the plugin writes the config next to _that_ instead — verified against
+a real build, not merely expected.) That generated file has no environments left in it,
+so `wrangler deploy --env staging` reads plausibly and does nothing — the deploy would
+go to whichever Worker the build had already chosen. `tests/deploy-workers.test.ts` pins
+that each workflow sets `CLOUDFLARE_ENV` explicitly, in both directions, because the
+failure that costs something is a staging build landing on the Worker that serves
+`packsheet.io`.
 
 Two settings in that file are load-bearing:
 
@@ -173,6 +178,35 @@ re-running a release is a no-op rather than a replay.
 There are two hosted projects — production and staging — with separate keys and
 separate data. Neither ref appears in this repository; CI selects between them from an
 environment-scoped secret.
+
+Each deploy workflow's GitHub _environment_ (`staging` or `production` — see
+`environment:` in the workflow file) needs its own copies of these secrets, matching
+that environment's Supabase project:
+
+- `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF` — used by `scripts/supabase.sh link`
+  and `db push` to apply migrations before the Worker deploys.
+- `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` — used by the `wrangler-action` step
+  to deploy the built Worker.
+- `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY` (added by PK-19) — the same two
+  values `.env.example` describes for local development, but for the hosted project.
+  Vite inlines every `PUBLIC_`-prefixed variable into the client bundle at **build**
+  time, so these have to be present before `npm run build` runs, not merely before the
+  deploy step — see the `Build` step's own env block in `deploy-staging.yml` /
+  `deploy-production.yml`. Both are safe to hold as plain secrets rather than anything
+  more careful: they are public by design (see `src/lib/auth/index.ts`'s doc comment
+  for the key that is NOT this one), scoped per environment purely so staging and
+  production build against their own separate Supabase projects rather than because
+  either value is sensitive on its own.
+- `PUBLIC_GOOGLE_AUTH_ENABLED` — same build-time mechanism as the pair above,
+  alongside them in both workflows' `Build` step, gating whether the "Continue with
+  Google" button is compiled into the built site at all (see
+  `src/lib/auth-routes.ts`). Off — unset, or anything other than the literal `true` —
+  in every environment until a Google Cloud OAuth client exists and the Google
+  provider is switched on in that environment's own Supabase project; see
+  `.env.example` for exactly what that requires. Neither exists yet anywhere, so this
+  stays off. Turning it on early is not a harmless placeholder: it sends every visitor
+  who clicks the button to Supabase's own raw JSON error page rather than merely
+  hiding an unfinished feature.
 
 **Local development runs the whole stack in Docker, one per git worktree:**
 

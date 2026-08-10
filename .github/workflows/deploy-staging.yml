@@ -104,11 +104,35 @@ jobs:
 
           # Selects which block of wrangler.jsonc applies. This is a BUILD-time
           # choice, not a deploy-time one: @astrojs/cloudflare resolves the named
-          # environment and writes the result to dist/client/wrangler.json, which is
-          # the file the deploy step consumes. Passing `--env staging` to wrangler
-          # instead does nothing — the generated config has no environments left in
-          # it — and the deploy would silently go to the PRODUCTION Worker.
+          # environment and writes the result to dist/server/wrangler.json (PK-19:
+          # dist/client/ before this route had a real Worker entry — Cloudflare's
+          # Vite plugin writes the resolved config next to entry.mjs, not next to
+          # the static assets, once one exists), which is the file the deploy step
+          # consumes. Passing `--env staging` to wrangler instead does nothing — the
+          # generated config has no environments left in it — and the deploy would
+          # silently go to the PRODUCTION Worker.
           CLOUDFLARE_ENV: staging
+
+          # PK-19: build-time inputs, same as CLOUDFLARE_ENV above and for the same
+          # reason — Vite inlines every PUBLIC_-prefixed var into the client bundle at
+          # this step, not at deploy time, so there is no later point at which these
+          # could be supplied instead. Both are safe to ship in a browser bundle (see
+          # .env.example and src/lib/auth/index.ts's own comment on the key that is
+          # NOT this one) but still come from this GitHub *environment*'s own secret
+          # store rather than being hardcoded here, because staging and production are
+          # separate Supabase projects with separate URLs and keys — the same reason
+          # SUPABASE_PROJECT_REF below is a secret and not a literal. See the README's
+          # "Database" section for what backs these two secrets.
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
+
+          # Off (this secret unset, or anything other than the literal "true") until a
+          # Google Cloud OAuth client exists AND the provider is switched on in
+          # staging's own Supabase project — see .env.example and
+          # src/lib/auth-routes.ts (GOOGLE_AUTH_ENABLED). Same build-time mechanism as
+          # the pair above: whichever way this resolves is compiled into the artifact
+          # here, not decided later.
+          PUBLIC_GOOGLE_AUTH_ENABLED: ${{ secrets.PUBLIC_GOOGLE_AUTH_ENABLED }}
         run: npm run build
 
       - name: Deploy to Cloudflare Workers
@@ -125,4 +149,4 @@ jobs:
           # -c, not the action's `environment:` input. See the CLOUDFLARE_ENV comment
           # above: by this point the environment is already baked into the generated
           # config, and `--env` would look correct while doing nothing.
-          command: deploy -c dist/client/wrangler.json
+          command: deploy -c dist/server/wrangler.json

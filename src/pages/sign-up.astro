@@ -1,0 +1,205 @@
+---
+// On-demand for the same reason as sign-in.astro — see that file and
+// src/middleware.ts for why this costs nothing on the anonymous read path.
+export const prerender = false;
+
+import Layout from '../layouts/Layout.astro';
+import { getGoogleAuthorizationUrl, getUser, signUpWithPassword } from '../lib/auth';
+import {
+  AUTH_CALLBACK_PATH,
+  GOOGLE_AUTH_ENABLED,
+  googleAuthUnavailableMessage,
+  SIGN_IN_PATH,
+  safeNextPath,
+} from '../lib/auth-routes';
+
+const next = safeNextPath(Astro.url.searchParams.get('next'));
+
+const oauthFailed = Astro.url.searchParams.has('oauth_error');
+
+let errorMessage: string | null = oauthFailed
+  ? 'Something went wrong signing up with Google. Please try again, or use email and password below.'
+  : null;
+
+// Shown instead of redirecting when sign-up succeeded but did NOT itself produce a
+// session — i.e. this project's Supabase "Confirm email" setting is on and the new
+// account is genuinely waiting on a confirmation email before it can sign in. See the
+// branch below for why that is checked with a second call rather than assumed either
+// way, and why createAuthClient's per-request cookie overlay (src/lib/auth/index.ts)
+// is what makes the check trustworthy: locally, with confirmations OFF
+// (enable_confirmations = false in supabase/config.toml), this branch is never
+// reached at all — signUpWithPassword's own cookies already carry a real session, and
+// this page redirects straight past it.
+let awaitingConfirmation = false;
+
+// CSRF: same protection as sign-in.astro — Astro's on-demand origin check
+// (security.checkOrigin, set explicitly in astro.config.mjs) plus the session
+// cookie's sameSite: 'lax'. See the comment there for why no separate token is
+// needed on top of that pair.
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const intent = form.get('intent');
+
+  if (intent === 'google') {
+    if (!GOOGLE_AUTH_ENABLED) {
+      // Reached only by a stale cached form or a crafted POST — GOOGLE_AUTH_ENABLED
+      // being false is also why the button below is never rendered. Refuse outright
+      // rather than attempting the OAuth call: see the identical branch in
+      // sign-in.astro and GOOGLE_AUTH_ENABLED's own comment in src/lib/auth-routes.ts.
+      errorMessage = googleAuthUnavailableMessage('up');
+    } else {
+      const callbackUrl = new URL(AUTH_CALLBACK_PATH, Astro.url.origin);
+      callbackUrl.searchParams.set('next', next);
+      const result = await getGoogleAuthorizationUrl({
+        cookies: Astro.cookies,
+        request: Astro.request,
+        redirectTo: callbackUrl.toString(),
+      });
+      if (result.ok) {
+        return Astro.redirect(result.url);
+      }
+      // Reachable once a provider IS configured and Supabase itself refuses for some
+      // other reason. Never render that raw string; say what a visitor can do about it.
+      errorMessage = googleAuthUnavailableMessage('up');
+    }
+  } else {
+    const email = String(form.get('email') ?? '');
+    const password = String(form.get('password') ?? '');
+    const result = await signUpWithPassword({
+      cookies: Astro.cookies,
+      request: Astro.request,
+      email,
+      password,
+    });
+    if (result.ok) {
+      // signUpWithPassword's own AuthResult only ever carries `{ user }`, and
+      // Supabase hands back a non-null user for BOTH outcomes of a project's
+      // "Confirm email" setting — the only way to tell "a session now exists" from
+      // "a user row exists but is waiting on a confirmation email" is to ask again,
+      // which getUser() does by checking the cookies createAuthClient's setAll just
+      // wrote a moment ago, IN THIS SAME REQUEST. That read-after-write is only
+      // trustworthy because createAuthClient overlays cookies written earlier in the
+      // request on top of the raw inbound header (see that function's own comment in
+      // src/lib/auth/index.ts) — without it this call would re-read the request's
+      // ORIGINAL Cookie header, see none of what signUpWithPassword just wrote, and
+      // report no session even when one genuinely exists (enable_confirmations =
+      // false locally). This is one extra auth-server round trip on an on-demand
+      // route that was never on the anonymous read path, not a repeat of the cost
+      // this project otherwise guards against.
+      const signedInUser = await getUser({ cookies: Astro.cookies, request: Astro.request });
+      if (signedInUser) {
+        return Astro.redirect(next);
+      }
+      awaitingConfirmation = true;
+    } else {
+      // Sign-up failures are not the account-enumeration-sensitive case sign-in is —
+      // see the comment on signUpWithPassword in src/lib/auth/index.ts — so
+      // result.error is safe to render as-is.
+      errorMessage = result.error;
+    }
+  }
+}
+---
+
+<Layout title="Create an account — Packsheet" description="Create a free Packsheet account.">
+  <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
+    <a href="/" class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Packsheet</a>
+    <h1 class="mt-6 text-3xl">Create an account</h1>
+
+    {
+      awaitingConfirmation ? (
+        <p class="text-ink-2 mt-6 text-sm">
+          Almost there — check your inbox for a confirmation email, then{' '}
+          <a href={SIGN_IN_PATH} class="text-blue-deep hover:text-blue-ink underline">
+            sign in
+          </a>
+          .
+        </p>
+      ) : (
+        <Fragment>
+          {errorMessage && (
+            <p
+              role="alert"
+              class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+            >
+              {errorMessage}
+            </p>
+          )}
+
+          <form method="POST" class="mt-8 space-y-4">
+            <input type="hidden" name="next" value={next} />
+            <div>
+              <label for="email" class="text-ink-2 block text-sm">
+                Email
+              </label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                autocomplete="email"
+                required
+                class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label for="password" class="text-ink-2 block text-sm">
+                Password
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="new-password"
+                required
+                minlength="6"
+                class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+              />
+            </div>
+            <button
+              type="submit"
+              class="border-blue-deep text-blue-deep hover:bg-blue-tint w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+            >
+              Create account
+            </button>
+          </form>
+
+          {
+            // See the identical guard in sign-in.astro and GOOGLE_AUTH_ENABLED's own
+            // comment in src/lib/auth-routes.ts: off until a Google OAuth client
+            // exists, so as not to offer a control that cannot currently work.
+            GOOGLE_AUTH_ENABLED && (
+              <Fragment>
+                <div class="my-6 flex items-center gap-3" aria-hidden="true">
+                  <span class="border-hairline h-px flex-1 border-t" />
+                  <span class="text-ink-3 text-xs tracking-wide uppercase">or</span>
+                  <span class="border-hairline h-px flex-1 border-t" />
+                </div>
+
+                <form method="POST">
+                  <input type="hidden" name="intent" value="google" />
+                  <input type="hidden" name="next" value={next} />
+                  <button
+                    type="submit"
+                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+                  >
+                    Continue with Google
+                  </button>
+                </form>
+              </Fragment>
+            )
+          }
+
+          <p class="text-ink-2 mt-8 text-sm">
+            Already have an account?{' '}
+            <a
+              href={`${SIGN_IN_PATH}?next=${encodeURIComponent(next)}`}
+              class="text-blue-deep hover:text-blue-ink underline"
+            >
+              Sign in
+            </a>
+          </p>
+        </Fragment>
+      )
+    }
+  </main>
+</Layout>
