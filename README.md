@@ -122,8 +122,15 @@ front of staging itself:
 the edge and the Worker never executes — so staging is not "unindexed and hopefully
 unnoticed", it is closed. The allow-list lives in Cloudflare Zero Trust
 (`packsheet.cloudflareaccess.com`), not in this repository, which means nothing you can
-merge here weakens it and nothing here is evidence that it is still on. Pull request
-preview URLs are covered by a second Access application on the same allow-list.
+merge here weakens it and nothing here is evidence that it is still on. It authenticates
+with a one-time PIN by email; an Access application admits nobody at all until an
+identity provider exists in the account, however correct its allow-list.
+
+**There are no per-pull-request preview deployments.** They were removed deliberately:
+a workflow, a fork guard, a second Access application and a third hostname, in exchange
+for a URL that was rarely opened. The staging branch auto-deploys to
+`staging.packsheet.io` and that is the shared environment; anything needing a closer
+look runs locally against this worktree's own database.
 
 Production is deliberately **not** behind Access. It is a public website.
 
@@ -166,19 +173,37 @@ There are two hosted projects — production and staging — with separate keys 
 separate data. Neither ref appears in this repository; CI selects between them from an
 environment-scoped secret.
 
-For local work you do not need either of them. `supabase start` runs the whole stack in
-Docker:
+**Local development runs the whole stack in Docker, one per git worktree:**
 
 ```bash
-supabase start                        # local Postgres, Auth, PostgREST, Studio
-supabase migration new <name>         # create the next migration
-supabase db reset                     # replay every migration from empty
+npm run db:start     # this worktree's Postgres, Auth, PostgREST, Studio
+npm run db:status
+npm run db:reset     # replay every migration from empty
+npm run db:stop
+npm run db -- migration new <name>   # any other CLI command
 ```
 
-`supabase db reset` is the check that matters before opening a pull request: it proves
+Each worktree gets its **own** stack — its own containers and its own data — because
+`supabase/config.toml` reads its project name and all seven of its ports from the
+environment, and `scripts/supabase.sh` derives them from the checkout directory. Two
+worktrees can run at once without colliding, and switching branches never inherits the
+other branch's database. Override `PACKSHEET_STACK` or `PACKSHEET_PORT_BASE` to pin
+either by hand.
+
+> **Never call `supabase` directly.** With those variables unset the config does not
+> parse and the CLI reports `failed to read config: ProjectConfigParseError`, which
+> names neither the cause nor the fix. Use `npm run db:*`, or `scripts/supabase.sh`
+> — the deploy workflows go through it too, because `link` and `db push` parse the
+> same file even though they never start a stack.
+
+`npm run db:reset` is the check that matters before opening a pull request: it proves
 the migration runs from a clean database rather than only against the state your
 machine happens to be in. There are no down-migrations, and recovery from a bad
 migration is another migration.
+
+There is no `supabase/seed.sql` yet, and until there is, a reset leaves you with an
+empty database. It is deliberately absent rather than forgotten: there is no schema to
+seed against until the core tables land.
 
 ### What still is not covered
 
@@ -186,10 +211,6 @@ The production deploy checks that `packsheet.io` answers 200 with HTML and an in
 `robots.txt` immediately after each release, so a broken release is loud within a minute.
 Nothing checks **between** releases: if something breaks on a quiet Tuesday, no deploy runs
 to notice. An external uptime monitor is the missing third leg, and is not yet set up.
-
-Pull request previews share the **staging** database rather than getting one of their own.
-A Supabase branch per pull request needs the Pro plan; the organisation is on Free. Nothing
-reads a database yet, so this costs nothing today, but it is a gap rather than a decision.
 
 ## Design system
 

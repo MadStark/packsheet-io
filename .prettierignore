@@ -6,3 +6,9 @@ package-lock.json
 LICENSE
 NOTICE
 src/assets/fonts/licenses/
+
+# Local Docker stack + wrangler scratch. Gitignored, but prettier does not read
+# .gitignore, so `npm run check` would fail merely because a database is running.
+supabase/.temp/
+.wrangler/
+.astro-build-out-*/

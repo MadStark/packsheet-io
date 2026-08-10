@@ -16,7 +16,21 @@ export default [
     // `.astro/types.d.ts` cache one level down, which would otherwise be linted as
     // if it were source. `node_modules/**` doesn't need the same treatment: ESLint
     // ignores every `node_modules` directory by default, at any depth.
-    ignores: ['dist/**', '**/.astro/**', 'node_modules/**', 'src/assets/**'],
+    // `supabase/.temp/**` is the local Docker stack's scratch directory. `npm run
+    // db:start` writes a bundled edge-runtime `index.ts` into it — one 30 KB minified
+    // line that produces ~190 lint errors about code nobody here wrote. It is
+    // gitignored, but ESLint's flat config does not read .gitignore, so merely
+    // starting a database made `npm run check` fail. `.wrangler/**` is the same story
+    // for `wrangler dev`.
+    ignores: [
+      'dist/**',
+      '**/.astro/**',
+      'node_modules/**',
+      'src/assets/**',
+      '**/supabase/.temp/**',
+      '**/.wrangler/**',
+      '.astro-build-out-*/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

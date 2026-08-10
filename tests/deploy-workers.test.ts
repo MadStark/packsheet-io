@@ -1,5 +1,14 @@
 import { describe, it, expect, afterEach, afterAll, beforeAll } from 'vitest';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  mkdtempSync,
+  rmSync,
+  chmodSync,
+  existsSync,
+  statSync,
+  readdirSync,
+} from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -82,12 +91,13 @@ const executable = (run: string | undefined) =>
 const isBuild = (s: Step) => s.name === 'Build';
 const isTest = (s: Step) => executable(s.run).trim() === 'npm test';
 const isWranglerAction = (s: Step) => (s.uses ?? '').startsWith('cloudflare/wrangler-action');
-const isMigrate = (s: Step) => executable(s.run).includes('supabase db push');
+const isMigrate = (s: Step) => /(^|\/|\s)supabase(\.sh)? db push\b/.test(executable(s.run));
 const isVerify = (s: Step) => executable(s.run).includes('verify-release.sh');
 
 /**
- * The deploy workflows, and the pull-request preview, which is a deploy in every
- * respect that can go wrong.
+ * The two deploy workflows. There is no third: per-pull-request previews were
+ * removed deliberately — staging.packsheet.io auto-deploys from the staging branch
+ * and everything else is exercised locally.
  */
 const DEPLOYS = [
   { file: 'deploy-production.yml', job: 'deploy', env: 'production', worker: 'packsheet-io' },
@@ -160,11 +170,13 @@ describe('wrangler.jsonc', () => {
     expect(config.env?.production?.preview_urls).toBe(false);
   });
 
-  // The other half: previews have to work, and they are staging's. Asserted so that
-  // "turn preview_urls off everywhere" cannot silently break every pull request
-  // preview while looking like a tightening.
-  it('does enable version preview URLs on staging, which is where previews live', () => {
-    expect(config.env?.staging?.preview_urls).toBe(true);
+  // Off on staging too, now that per-PR previews are gone. Turning it back on
+  // republishes every uploaded version at
+  // <version>-packsheet-io-staging.packsheet-io.workers.dev — a public hostname, since
+  // the Cloudflare Access application that used to cover those URLs was deleted with
+  // the workflow. That is the Ref 46 shape of problem arriving through a different door.
+  it('does not enable version preview URLs on staging either', () => {
+    expect(config.env?.staging?.preview_urls).toBe(false);
   });
 
   // The SPA fallback answers 200 with the home page for every unknown URL. Once
@@ -248,26 +260,10 @@ describe('environment selection', () => {
     },
   );
 
-  // Only "production" produces an indexable site, so a preview must be anything else.
-  // Asserted rather than trusted to the fail-safe default, because the cost of the
-  // preview build being indexable is duplicate content under a URL nobody controls.
-  it('builds previews as something other than production', () => {
-    const build = stepsOf('pr-preview.yml', 'preview').find(isBuild);
-    expect(build?.env?.PUBLIC_SITE_ENV).toBeDefined();
-    expect(build?.env?.PUBLIC_SITE_ENV).not.toBe('production');
-  });
-
-  // A preview built against production's config would be uploaded to the Worker that
-  // serves packsheet.io, where preview_urls is off — so it would either fail or, worse,
-  // succeed as a version of production.
-  it('builds previews against the staging Worker, never production', () => {
-    expect(stepsOf('pr-preview.yml', 'preview').find(isBuild)?.env?.CLOUDFLARE_ENV).toBe('staging');
-  });
-
   // `wrangler deploy --env staging` reads plausibly and does nothing: by deploy time
   // the generated config has no environments left in it. Someone reaching for it has
   // misunderstood where the choice is made, and the deploy would go to production.
-  it.each([...DEPLOYS, { file: 'pr-preview.yml', job: 'preview' }])(
+  it.each(DEPLOYS)(
     'does not try to select the environment at deploy time in $file',
     ({ file, job }) => {
       for (const step of stepsOf(file, job).filter(isWranglerAction)) {
@@ -296,40 +292,26 @@ describe('deploy steps', () => {
     expect(command.trim().startsWith('deploy')).toBe(true);
   });
 
-  // `deploy` in the preview workflow points staging.packsheet.io at an unmerged pull
-  // request. `versions upload` mints a URL and routes no traffic.
-  it('the preview workflow uploads a version and does not deploy one', () => {
-    const command =
-      stepsOf('pr-preview.yml', 'preview').find(isWranglerAction)?.with?.command ?? '';
-    expect(command.trim().startsWith('versions upload')).toBe(true);
-  });
-
   // Two wrangler invocations — the build's and the deploy's — must agree about the
   // config format. Letting the action install its own latest is the drift .nvmrc
   // exists to prevent, one layer down.
-  it.each([...DEPLOYS, { file: 'pr-preview.yml', job: 'preview' }])(
-    '$file pins the same wrangler the lockfile installs',
-    ({ file, job }) => {
-      const lock = JSON.parse(readFileSync(repoPath('package-lock.json'), 'utf8'));
-      const installed = lock.packages['node_modules/wrangler'].version;
-      expect(stepsOf(file, job).find(isWranglerAction)?.with?.wranglerVersion).toBe(installed);
-    },
-  );
+  it.each(DEPLOYS)('$file pins the same wrangler the lockfile installs', ({ file, job }) => {
+    const lock = JSON.parse(readFileSync(repoPath('package-lock.json'), 'utf8'));
+    const installed = lock.packages['node_modules/wrangler'].version;
+    expect(stepsOf(file, job).find(isWranglerAction)?.with?.wranglerVersion).toBe(installed);
+  });
 
   // Credentials reach wrangler from the environment-scoped secret store, never from
   // the workflow body.
-  it.each([...DEPLOYS, { file: 'pr-preview.yml', job: 'preview' }])(
-    '$file takes its credentials from secrets',
-    ({ file, job }) => {
-      const step = stepsOf(file, job).find(isWranglerAction);
-      expect(step?.with?.apiToken).toBe('${{ secrets.CLOUDFLARE_API_TOKEN }}');
-      expect(step?.with?.accountId).toBe('${{ secrets.CLOUDFLARE_ACCOUNT_ID }}');
-    },
-  );
+  it.each(DEPLOYS)('$file takes its credentials from secrets', ({ file, job }) => {
+    const step = stepsOf(file, job).find(isWranglerAction);
+    expect(step?.with?.apiToken).toBe('${{ secrets.CLOUDFLARE_API_TOKEN }}');
+    expect(step?.with?.accountId).toBe('${{ secrets.CLOUDFLARE_ACCOUNT_ID }}');
+  });
 
   // `continue-on-error` or an `if:` on the deploy turns a failed release into a green
   // tick. Both are plausible edits when someone is fighting a flaky run.
-  it.each([...DEPLOYS, { file: 'pr-preview.yml', job: 'preview' }])(
+  it.each(DEPLOYS)(
     'does not let the deploy in $file fail silently or be skipped',
     ({ file, job }) => {
       const step = stepsOf(file, job).find(isWranglerAction);
@@ -346,16 +328,13 @@ describe('deploy steps', () => {
 describe('step order', () => {
   // ci.yml runs on the same push and nothing makes a deploy wait for it. The required
   // status check protects the merge button; this step is what protects the artifact.
-  it.each([...DEPLOYS, { file: 'pr-preview.yml', job: 'preview' }])(
-    '$file runs the tests before building',
-    ({ file, job }) => {
-      const steps = stepsOf(file, job);
-      const test = steps.findIndex(isTest);
-      const build = steps.findIndex(isBuild);
-      expect(test).toBeGreaterThanOrEqual(0);
-      expect(build).toBeGreaterThan(test);
-    },
-  );
+  it.each(DEPLOYS)('$file runs the tests before building', ({ file, job }) => {
+    const steps = stepsOf(file, job);
+    const test = steps.findIndex(isTest);
+    const build = steps.findIndex(isBuild);
+    expect(test).toBeGreaterThanOrEqual(0);
+    expect(build).toBeGreaterThan(test);
+  });
 
   // A release that deploys code before the schema it queries has a window in which the
   // site is live against a database that does not have the column yet.
@@ -365,12 +344,6 @@ describe('step order', () => {
     const deploy = steps.findIndex(isWranglerAction);
     expect(migrate).toBeGreaterThanOrEqual(0);
     expect(deploy).toBeGreaterThan(migrate);
-  });
-
-  // Previews share staging's database. Running an unmerged branch's migrations against
-  // it would let a pull request that is never merged permanently alter staging.
-  it('the preview workflow does not migrate any database', () => {
-    expect(stepsOf('pr-preview.yml', 'preview').filter(isMigrate)).toHaveLength(0);
   });
 
   it.each(DEPLOYS)('$file takes the project ref from a secret, not the file', ({ file, job }) => {
@@ -452,15 +425,6 @@ describe('production release safety', () => {
     const name = typeof environment === 'string' ? environment : environment?.name;
     expect(name).toBe(env);
   });
-
-  // Fork pull requests get a read-only token and no secrets. Without this guard the
-  // preview job fails on every external contribution to a public repository, which
-  // reads as "your PR is broken" to someone who did nothing wrong.
-  it('skips the preview job for pull requests from forks', () => {
-    expect(workflow('pr-preview.yml').jobs.preview.if).toContain(
-      'github.event.pull_request.head.repo.full_name',
-    );
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -493,8 +457,6 @@ describe('load-bearing steps cannot be made optional', () => {
     { file: 'deploy-staging.yml', job: 'deploy', label: 'migrate', pred: isMigrate },
     { file: 'deploy-staging.yml', job: 'deploy', label: 'deploy', pred: isWranglerAction },
     { file: 'deploy-staging.yml', job: 'deploy', label: 'build', pred: isBuild },
-    { file: 'pr-preview.yml', job: 'preview', label: 'npm test', pred: isTest },
-    { file: 'pr-preview.yml', job: 'preview', label: 'build', pred: isBuild },
   ] as const;
 
   it.each(GATES)('$file: the $label step is present, un-skipped and un-swallowed', (gate) => {
@@ -520,6 +482,60 @@ describe('load-bearing steps cannot be made optional', () => {
 // ---------------------------------------------------------------------------
 // Azure is gone
 // ---------------------------------------------------------------------------
+
+describe('the Supabase CLI is always called through the wrapper', () => {
+  /**
+   * supabase/config.toml reads its project name and all seven ports from the
+   * environment, so that each git worktree gets its own Docker stack instead of
+   * silently sharing one database. The CLI has no way to default an `env(...)`, so
+   * with those variables unset the file does not parse at all:
+   *
+   *     failed to read config: ProjectConfigParseError
+   *
+   * These jobs never start a local stack — but `link` and `db push` parse that same
+   * file. Calling `supabase` directly here therefore breaks the RELEASE, at the
+   * migration step, with an error that names neither the cause nor the fix. The cost
+   * lands a long way from the local-dev convenience that caused it, which is exactly
+   * the kind of coupling worth pinning.
+   */
+  it.each(DEPLOYS)('$file calls scripts/supabase.sh, never bare supabase', ({ file, job }) => {
+    const step = stepsOf(file, job).find(isMigrate);
+    expect(step).toBeDefined();
+    const run = executable(step?.run);
+    // Every supabase invocation on its own line must go through the wrapper.
+    const invocations = run
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /(^|\/)supabase(\.sh)?\s/.test(l));
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const line of invocations) {
+      expect(line.startsWith('scripts/supabase.sh ')).toBe(true);
+    }
+  });
+
+  it('the wrapper is committed and executable', () => {
+    const mode = statSync(repoPath('scripts/supabase.sh')).mode;
+    expect(mode & 0o111).not.toBe(0);
+  });
+});
+
+describe('per-pull-request previews are gone, not half-removed', () => {
+  // Removing the workflow while leaving preview_urls on would keep minting public
+  // <version>-packsheet-io-staging.packsheet-io.workers.dev hostnames with no
+  // Cloudflare Access application in front of them — that app was deleted with the
+  // workflow. A second public copy of the site on a hostname nobody watches is the
+  // Ref 46 problem arriving through a different door.
+  it('has no pull-request preview workflow', () => {
+    expect(existsSync(repoPath('.github/workflows/pr-preview.yml'))).toBe(false);
+  });
+
+  it('no workflow uploads a Worker version', () => {
+    const offenders = readdirSync(repoPath('.github/workflows')).filter((f) =>
+      /versions upload/.test(readFileSync(repoPath(`.github/workflows/${f}`), 'utf8')),
+    );
+    expect(offenders).toEqual([]);
+  });
+});
 
 describe('nothing still deploys to Azure', () => {
   // Tracked files only: node_modules and dist are full of unrelated matches, and a
@@ -824,8 +840,8 @@ describe('the generated deploy config', () => {
     expect(built.get('production')?.preview_urls).toBe(false);
   });
 
-  it('staging keeps preview URLs in the built config', () => {
-    expect(built.get('staging')?.preview_urls).toBe(true);
+  it('staging has no preview URLs in the built config', () => {
+    expect(built.get('staging')?.preview_urls).toBe(false);
   });
 
   it.each([
