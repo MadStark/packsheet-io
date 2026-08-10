@@ -123,6 +123,7 @@ describe('wrangler.jsonc', () => {
           name?: string;
           workers_dev?: boolean;
           preview_urls?: boolean;
+          routes?: { pattern?: string; custom_domain?: boolean }[];
           assets?: { directory?: string; not_found_handling?: string };
         }
       >;
@@ -174,6 +175,36 @@ describe('wrangler.jsonc', () => {
   // build ran against.
   it('pins a compatibility date rather than tracking today', () => {
     expect(config.compatibility_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  // Deploying binds these hostnames and rewrites their DNS records. Crossing them
+  // over — staging's Worker answering on packsheet.io — is a single-character edit
+  // that no build, test or deploy would otherwise notice, and it puts a
+  // `Disallow: /` build on the live site behind an Access gate that locks everyone
+  // out of it.
+  it.each([
+    { env: 'production', hostname: 'packsheet.io' },
+    { env: 'staging', hostname: 'staging.packsheet.io' },
+  ])('binds $env to exactly $hostname', ({ env, hostname }) => {
+    expect(config.env?.[env]?.routes).toEqual([{ pattern: hostname, custom_domain: true }]);
+  });
+
+  // A route pattern rather than a custom domain leaves the DNS record pointing
+  // wherever it already pointed — which, mid-migration, is Azure.
+  it.each(DEPLOYS)('binds $env as a custom domain, not a route pattern', ({ env }) => {
+    for (const route of config.env?.[env]?.routes ?? []) {
+      expect(route.custom_domain).toBe(true);
+    }
+  });
+
+  // www serves a 301 to the apex from a zone redirect rule. Binding it to a Worker
+  // would make it serve the site instead — the same pages under two hostnames, which
+  // is the duplicate-content half of the problem workers_dev: false solves.
+  it('binds no www hostname to any Worker', () => {
+    const patterns = Object.values(config.env ?? {}).flatMap((e) =>
+      (e.routes ?? []).map((r) => r.pattern ?? ''),
+    );
+    expect(patterns.filter((p) => p.startsWith('www.'))).toEqual([]);
   });
 });
 

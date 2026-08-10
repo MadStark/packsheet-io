@@ -82,6 +82,18 @@
       // same shape of problem as the Azure hostname, self-inflicted.
       "preview_urls": false,
 
+      // The hostname is declared here rather than clicked into a dashboard, so the
+      // binding between a Worker and the name it answers on is reviewable, and so a
+      // rebuilt account reproduces it. `custom_domain` (not a route pattern) makes
+      // Cloudflare own the DNS record and issue the certificate; there is no origin
+      // to point at, because the edge IS the origin now.
+      //
+      // www.packsheet.io is deliberately absent. It 301s to the apex through a zone
+      // redirect rule that has nothing to do with the origin, and it kept working
+      // untouched across this migration. Adding it here would make it serve the site
+      // instead of redirecting to it — the same page under two hostnames.
+      "routes": [{ "pattern": "packsheet.io", "custom_domain": true }],
+
       "observability": { "enabled": true },
       "assets": {
         "directory": "./dist/client",
@@ -102,6 +114,11 @@
       // request. Those URLs have their own Cloudflare Access application, so a
       // preview is no more public than staging is.
       "preview_urls": true,
+
+      // Cloudflare Access sits in front of this hostname. The Access application is
+      // account configuration, not repository configuration, so nothing here proves
+      // it is still on — see the README.
+      "routes": [{ "pattern": "staging.packsheet.io", "custom_domain": true }],
 
       "observability": { "enabled": true },
       "assets": {
