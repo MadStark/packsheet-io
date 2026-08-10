@@ -52,6 +52,32 @@ jobs:
             exit 1
           fi
 
+      # The row-level-security tests need a real Postgres, because a policy is a SQL
+      # expression and the only thing that can say what it does is Postgres evaluating
+      # it as the `anon` role. They do not skip when there is no database — they fail —
+      # so this step is what stands between that and a red build on every PR.
+      #
+      # Deliberately in THIS job rather than a new one. `check` is the registered
+      # required status check on main and staging; a separate `database` job would
+      # report without blocking until somebody added it to branch protection by hand,
+      # and Ref 49's acceptance criterion is specifically that a table without RLS
+      # "fails the build rather than shipping". A guardrail that runs but cannot block
+      # is the failure mode this repository keeps writing tests against.
+      #
+      # Pinned to the same CLI version as the two deploy workflows, so the migrations
+      # replayed here and the migrations pushed to a hosted project are applied by the
+      # same tool.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      # `supabase start` applies every migration in order against an empty database on
+      # the way up, which makes this step the same check as `supabase db reset` locally:
+      # it proves the migrations run from clean, not merely against whatever state a
+      # machine happens to be in.
+      - name: Start the local database
+        run: supabase start
+
       # Vitest, kept as its own step rather than folded into `npm run check` so the
       # static checks and the tests fail distinguishably in the log. Both run in this
       # one job on purpose — `check` is the required status check on main and staging,

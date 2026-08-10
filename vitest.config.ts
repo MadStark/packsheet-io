@@ -63,6 +63,33 @@ const astroViteConfig = getViteConfig({
     include: ['tests/**/*.{test,spec}.ts', 'src/**/*.{test,spec}.ts'],
     exclude: ['src/pages/**'],
     environment: 'node',
+
+    // One test file at a time. This suite has two kinds of test that are not safe to
+    // run beside themselves, and both fail in the way that is hardest to act on — an
+    // error in a file nobody touched, on a re-run that passes.
+    //
+    // 1. Two files run a real `astro build` against this project root:
+    //    anonymous-read-path.test.ts in process, deploy-workers.test.ts through
+    //    `npx astro build`. The Cloudflare adapter's Vite plugin persists workerd
+    //    state to `.wrangler/state` under the root, and the root is the same for both.
+    //    Concurrently, the second build to arrive dies on
+    //    `SQLITE_BUSY: database is locked` before it has compiled anything, and every
+    //    invariant in that file reports as a failure of the invariant rather than of
+    //    the build. The plugin's `persistState` path is not reachable from here — it
+    //    is set by @astrojs/cloudflare, not by us — so there is nowhere to give the
+    //    two builds separate state.
+    //
+    // 2. The row-level-security tests share one Postgres. They scope their assertions
+    //    to rows they created, so they do not corrupt each other's data — but the
+    //    query PLANNER reads the whole table, and a test asserting how a lookup is
+    //    executed will read a different plan depending on how many packs some other
+    //    file happened to have inserted by then.
+    //
+    // Both were observed, not anticipated. The cost is the whole suite going from
+    // roughly 4s to roughly 11s, which is the right trade against a suite that fails
+    // for reasons unrelated to the change under test — the first flake teaches people
+    // to re-run, and the second teaches them to stop reading the output.
+    fileParallelism: false,
   },
 });
 

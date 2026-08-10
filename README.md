@@ -180,6 +180,36 @@ the migration runs from a clean database rather than only against the state your
 machine happens to be in. There are no down-migrations, and recovery from a bad
 migration is another migration.
 
+**`npm test` needs that stack running.** Part of the suite exercises row-level security
+by querying the database as the `anon` and `authenticated` roles, which nothing can
+stand in for — a policy is a SQL expression, and only Postgres can say what it does. Those
+tests fail, with the command to fix it, when there is no database. They deliberately do
+not skip: a guardrail that reports green while not running is worse than no guardrail,
+and this one is what stands between a private pack and the public internet. CI starts the
+stack in the same job for the same reason.
+
+```bash
+supabase start && npm test
+```
+
+### Authorization
+
+Row-level security is the authorization boundary, not a second opinion on one. A private
+pack is unreachable with the `anon` key because the database returns zero rows for it,
+so a bug in the share page cannot leak one.
+
+Two things follow, and both are enforced by `tests/rls-enabled.test.ts` across every
+table in `public` rather than by review:
+
+- **A new table must enable RLS and carry policies in the migration that creates it.**
+  Not in a follow-up — a table shipped without policies is not "unprotected pending
+  policies", it is readable by the `anon` key, which is public by design and shipped to
+  every browser.
+- **A new table must revoke the default grants and re-grant what it needs.** Postgres
+  hands `anon` TRUNCATE, REFERENCES, TRIGGER and MAINTAIN by default on tables owned by
+  `postgres`, and **row-level security does not apply to TRUNCATE** — no policy can stop
+  it. `supabase/migrations/20260810120000_core_schema.sql` has the block to copy.
+
 ### What still is not covered
 
 The production deploy checks that `packsheet.io` answers 200 with HTML and an indexable
