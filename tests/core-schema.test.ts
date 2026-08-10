@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { adminSql, createUser, toOne, type TestUser } from './support/local-database';
+import { adminSql, adminSqlWith, createUser, toOne, type TestUser } from './support/local-database';
+import { anonClient, packTreeQuery } from './support/local-database';
 import { createPack } from './support/fixtures';
 
 /**
@@ -111,6 +112,75 @@ describe('rule 2 — locking a pack freezes it', () => {
       .eq('id', pack.itemIds[0])
       .single();
     expect(data?.quantity).toBe(1);
+  });
+
+  // The other four write paths into a locked pack. Each has a `locked_at is null`
+  // clause in the migration and none had a test: removing any one of them left the
+  // suite green, so rule 2 was pinned on a third of its surface.
+  it('refuses inserting a new item into a locked pack', async () => {
+    const pack = await createPack(owner, { itemCount: 1, locked: true });
+
+    const { error } = await owner.client
+      .from('pack_items')
+      .insert({ pack_category_id: pack.categoryId, gear_item_id: pack.gearItemIds[0], quantity: 1 })
+      .select('id');
+
+    expect(error).not.toBeNull();
+
+    const { data } = await owner.client
+      .from('pack_items')
+      .select('id')
+      .eq('pack_category_id', pack.categoryId);
+    expect(data).toHaveLength(1);
+  });
+
+  it('refuses deleting an item from a locked pack', async () => {
+    const pack = await createPack(owner, { itemCount: 1, locked: true });
+
+    await owner.client.from('pack_items').delete().eq('id', pack.itemIds[0]);
+
+    const { data } = await owner.client.from('pack_items').select('id').eq('id', pack.itemIds[0]);
+    expect(data).toHaveLength(1);
+  });
+
+  it('refuses renaming a locked pack’s category', async () => {
+    const pack = await createPack(owner, { itemCount: 1, locked: true });
+
+    await owner.client
+      .from('pack_categories')
+      .update({ name: 'Renamed after locking' })
+      .eq('id', pack.categoryId);
+
+    const { data } = await owner.client
+      .from('pack_categories')
+      .select('name')
+      .eq('id', pack.categoryId)
+      .single();
+    expect(data?.name).toBe('Shelter');
+  });
+
+  it('refuses deleting a locked pack’s category', async () => {
+    const pack = await createPack(owner, { itemCount: 1, locked: true });
+
+    await owner.client.from('pack_categories').delete().eq('id', pack.categoryId);
+
+    const { data } = await owner.client
+      .from('pack_categories')
+      .select('id')
+      .eq('id', pack.categoryId);
+    expect(data).toHaveLength(1);
+  });
+
+  // A pack that arrives already locked would never fire the BEFORE UPDATE freeze, so it
+  // would be frozen with no snapshots and permanently uneditable — the insert policy
+  // refuses the state rather than letting it exist.
+  it('refuses a pack created already locked', async () => {
+    const { error } = await owner.client
+      .from('packs')
+      .insert({ name: 'Born locked', locked_at: new Date().toISOString() })
+      .select('id');
+
+    expect(error?.code).toBe('42501');
   });
 
   // A completed trip stays true as the closet evolves: the frozen values do not move
@@ -246,27 +316,196 @@ describe('the public lookup', () => {
   });
 
   it('can answer the slug lookup from that index', async () => {
-    const plan = await adminSql<{ 'QUERY PLAN': string }>(
-      `set enable_seqscan = off;
-       explain (costs off) select id from public.packs where slug = 'anything'::citext`,
+    const plan = await adminSqlWith<{ 'QUERY PLAN': string }>(
+      ['set enable_seqscan = off'],
+      `explain (costs off) select id from public.packs where slug = 'anything'::citext`,
     );
     const text = plan.map((row) => row['QUERY PLAN']).join('\n');
     expect(text).toMatch(/Index (Only )?Scan/);
   });
 });
 
-describe('updated_at is the server’s to set', () => {
-  it('ignores a value sent by the client', async () => {
+describe('timestamps are the server’s to set', () => {
+  const FORGED = '2000-01-01T00:00:00.000Z';
+
+  it('ignores an updated_at sent by the client on UPDATE', async () => {
     const pack = await createPack(owner, {});
-    const forged = '2000-01-01T00:00:00.000Z';
 
     const { data } = await owner.client
       .from('packs')
-      .update({ name: 'Touched', updated_at: forged })
+      .update({ name: 'Touched', updated_at: FORGED })
       .eq('id', pack.packId)
       .select('updated_at')
       .single();
 
     expect(new Date(data!.updated_at).getFullYear()).toBeGreaterThan(2000);
+  });
+
+  // The baseline migration's reason for making updated_at unforgeable is that
+  // optimistic concurrency will compare against it — which applies to the first write
+  // as much as the second. A DEFAULT does not carry that: it only supplies a value the
+  // client omitted, so INSERT was the one place the guarantee did not hold.
+  it('ignores created_at and updated_at sent by the client on INSERT', async () => {
+    const { data } = await owner.client
+      .from('packs')
+      .insert({ name: 'Forged timestamps', created_at: FORGED, updated_at: FORGED })
+      .select('created_at, updated_at')
+      .single();
+
+    expect(new Date(data!.created_at).getFullYear()).toBeGreaterThan(2000);
+    expect(new Date(data!.updated_at).getFullYear()).toBeGreaterThan(2000);
+  });
+
+  // All four tables, not just packs: each carries its own pair of triggers, and three
+  // of them had no test at all.
+  it('stamps updated_at on every core table', async () => {
+    const pack = await createPack(owner, { itemCount: 1 });
+
+    const gear = await owner.client
+      .from('gear_items')
+      .update({ name: 'Touched gear', updated_at: FORGED })
+      .eq('id', pack.gearItemIds[0])
+      .select('updated_at')
+      .single();
+    const category = await owner.client
+      .from('pack_categories')
+      .update({ name: 'Touched category', updated_at: FORGED })
+      .eq('id', pack.categoryId)
+      .select('updated_at')
+      .single();
+    const item = await owner.client
+      .from('pack_items')
+      .update({ quantity: 2, updated_at: FORGED })
+      .eq('id', pack.itemIds[0])
+      .select('updated_at')
+      .single();
+
+    for (const [table, result] of Object.entries({ gear, category, item })) {
+      expect(new Date(result.data!.updated_at).getFullYear(), table).toBeGreaterThan(2000);
+    }
+  });
+});
+
+/**
+ * The CHECK constraints.
+ *
+ * Every one of these except pack_items_reference_or_snapshot could be dropped without
+ * turning the suite red. They are not decoration: `packs_visibility_check` constrains
+ * the column every read policy keys off, and the NaN bound below closes a hole that a
+ * plain `>= 0` leaves wide open.
+ */
+describe('the constrained columns refuse values outside their domain', () => {
+  it('refuses NaN and Infinity where a plain >= 0 would let them through', async () => {
+    // Postgres orders NaN above every numeric value, so 'NaN' >= 0 is TRUE. Without the
+    // upper bound this insert succeeds and poisons every total that touches the row.
+    const nan = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Weight NaN', weight: 'NaN' })
+      .select('id');
+    expect(nan.error?.code, 'NaN was accepted as a weight').toBe('23514');
+
+    // Infinity is refused one layer earlier, by numeric(12,3) itself — 22003, numeric
+    // value out of range, rather than the check constraint. Asserted as its own code
+    // rather than folded in with NaN, because "some error" would hide the check
+    // constraint being dropped: NaN would then still be refused here and silently
+    // accepted everywhere the precision happens to be wider.
+    const infinity = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Weight Infinity', weight: 'Infinity' })
+      .select('id');
+    expect(infinity.error?.code, 'Infinity was accepted as a weight').toBe('22003');
+  });
+
+  it('refuses an unknown weight unit, status or visibility', async () => {
+    const unit = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Bad unit', weight: 1, weight_unit: 'banana' })
+      .select('id');
+    const status = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Bad status', status: 'borrowed' })
+      .select('id');
+    const visibility = await owner.client
+      .from('packs')
+      .insert({ name: 'Bad visibility', visibility: 'unlisted' })
+      .select('id');
+
+    expect(unit.error?.code).toBe('23514');
+    expect(status.error?.code).toBe('23514');
+    // The one that matters most: 'unlisted' is a value the read policy does not handle,
+    // and the constraint is what stops it reaching the column.
+    expect(visibility.error?.code).toBe('23514');
+  });
+
+  it('refuses half a price', async () => {
+    const noCurrency = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Price only', price: 42 })
+      .select('id');
+    const noPrice = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Currency only', currency: 'GBP' })
+      .select('id');
+
+    expect(noCurrency.error?.code).toBe('23514');
+    expect(noPrice.error?.code).toBe('23514');
+  });
+
+  it('refuses a non-positive quantity and a negative position', async () => {
+    const pack = await createPack(owner, { itemCount: 1 });
+
+    const quantity = await owner.client
+      .from('pack_items')
+      .update({ quantity: 0 })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    const position = await owner.client
+      .from('pack_categories')
+      .update({ position: -1 })
+      .eq('id', pack.categoryId)
+      .select('id');
+
+    expect(quantity.error?.code).toBe('23514');
+    expect(position.error?.code).toBe('23514');
+  });
+
+  // The shape check on snapshot. Without it `{}` satisfies reference-or-snapshot, and
+  // an item that renders as nothing is one PATCH away through the ordinary Data API.
+  it('refuses a snapshot that could not render the item', async () => {
+    const pack = await createPack(owner, { itemCount: 1 });
+
+    const { error } = await owner.client
+      .from('pack_items')
+      .update({ snapshot: {}, gear_item_id: null })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+
+    expect(error?.code).toBe('23514');
+  });
+});
+
+/**
+ * Ordering.
+ *
+ * `position` is deliberately not unique, and the migration says ties "resolve
+ * deterministically on id" — which is only true if something actually orders by it.
+ * PostgREST emits no ORDER BY unless asked, so without this the ordering index and the
+ * column itself would be aspirational.
+ */
+describe('the pack tree comes back in position order', () => {
+  it('orders categories and items, breaking ties on id', async () => {
+    const pack = await createPack(owner, { itemCount: 3, visibility: 'public' });
+
+    // Deliberately duplicate positions, which the schema permits: the tie-break is the
+    // part that is easy to get wrong and impossible to notice.
+    await owner.client.from('pack_items').update({ position: 0 }).in('id', pack.itemIds);
+
+    const { data, error } = await packTreeQuery(anonClient(), pack.slug).single();
+    expect(error).toBeNull();
+
+    const items = data!.pack_categories[0].pack_items as { id: string }[];
+    expect(items).toHaveLength(3);
+    const ids = items.map((i) => i.id);
+    expect(ids).toEqual([...ids].sort());
   });
 });

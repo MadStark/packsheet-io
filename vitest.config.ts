@@ -64,6 +64,13 @@ const astroViteConfig = getViteConfig({
     exclude: ['src/pages/**'],
     environment: 'node',
 
+    // Waits for the database to be ready, once, before any file runs — and fails the
+    // whole run with one actionable message if it never is. The file explains the
+    // observed flake it exists to prevent; the short version is that `supabase db
+    // reset` returns before its containers have settled, and a test that reads a
+    // half-applied schema reports it as "a stranger can read a private pack".
+    globalSetup: ['tests/support/global-setup.ts'],
+
     // One test file at a time. This suite has two kinds of test that are not safe to
     // run beside themselves, and both fail in the way that is hardest to act on — an
     // error in a file nobody touched, on a re-run that passes.

@@ -209,6 +209,25 @@ table in `public` rather than by review:
   hands `anon` TRUNCATE, REFERENCES, TRIGGER and MAINTAIN by default on tables owned by
   `postgres`, and **row-level security does not apply to TRUNCATE** — no policy can stop
   it. `supabase/migrations/20260810120000_core_schema.sql` has the block to copy.
+- **A helper function goes in `private`, not `public`.** `public` is served by PostgREST
+  and a function is created with `EXECUTE` to `PUBLIC`, so a helper written there is an
+  anonymous RPC endpoint the moment it exists. This matters most for the one function
+  people reach for under pressure: a `SECURITY DEFINER` helper added to break policy
+  recursion would sit on the anonymous surface running as its owner.
+
+Two things this does **not** yet do, so they are not mistaken for solved:
+
+- A public pack exposes the **whole** gear row, including `notes` and `url`, and every
+  table's `user_id`. Column-level grants are the obvious fix and are incompatible with
+  PostgREST embedding — any table in an embed needs table-level `SELECT`, so restricting
+  columns breaks the single-round-trip share query outright. The two mechanisms that do
+  work (a `security_invoker` view, or moving those fields to a 1:1 owner-only table) are
+  product decisions that belong with the share page. The frozen `snapshot` already omits
+  them.
+- `visibility = 'public'` means **listed**, not merely "reachable by anyone with the
+  link": the Data API answers an unfiltered `GET /rest/v1/packs` with the publishable
+  key. An `'unlisted'` value would need a code path that excludes it from that listing,
+  and none exists yet.
 
 ### What still is not covered
 

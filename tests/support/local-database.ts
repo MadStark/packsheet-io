@@ -65,12 +65,15 @@ const START_HINT =
 /**
  * Ask the CLI where this worktree's stack is.
  *
- * Via `scripts/supabase.sh` when that script exists, because it is the only thing
- * that knows this worktree's ports — supabase/config.toml reads them from the
- * environment and the CLI has no way to express a default, so invoking `supabase`
- * directly dies on an unparseable config. The script does not exist on every branch
- * yet, hence the fallback; `--workdir` matters there so the command reads THIS
- * worktree's supabase/ directory rather than whichever one it was invoked from.
+ * `--workdir` rather than a bare `supabase`, so the command reads THIS worktree's
+ * supabase/ directory regardless of where the test runner was invoked from.
+ *
+ * `scripts/supabase.sh` is preferred when it exists, and on this branch it does not —
+ * supabase/config.toml here hardcodes its ports, so the CLI is invoked directly (as
+ * ci.yml and the README also do). The branch is forward compatibility with Ref 54, which
+ * moves those ports into the environment so each worktree gets its own stack; at that
+ * point config.toml no longer parses without the wrapper, and this resolves to it
+ * without anyone having to remember to come back here.
  */
 function readStatusEnv(): Record<string, string> {
   const script = `${repoRoot}scripts/supabase.sh`;
@@ -90,13 +93,36 @@ function readStatusEnv(): Record<string, string> {
     );
   }
 
-  // KEY="value" lines, interleaved with human-readable notices such as
-  // `Stopped services: [...]` that must not be parsed as settings.
+  // KEY="value" lines, interleaved with human-readable notices that must not be parsed
+  // as settings — but one of those notices is load-bearing and used to be thrown away.
+  //
+  // `supabase status` exits 0 and prints a full, correct-looking env block when only
+  // SOME containers are up, listing the rest on a `Stopped services: [...]` line. So a
+  // stack with PostgREST down reports every URL and key it would have had, this function
+  // returned them happily, and the tests died on an opaque hook timeout instead of the
+  // actionable message below. `supabase start` leaves exactly that state behind when a
+  // container fails, so it is the common failure, not an exotic one.
   const env: Record<string, string> = {};
+  let stopped = '';
   for (const line of raw.split('\n')) {
     const match = /^([A-Z0-9_]+)="(.*)"$/.exec(line.trim());
-    if (match) env[match[1]] = match[2];
+    if (match) {
+      env[match[1]] = match[2];
+      continue;
+    }
+    const notice = /^Stopped services:\s*\[(.*)\]$/.exec(line.trim());
+    if (notice) stopped = notice[1];
   }
+
+  // Only the services these tests actually depend on. Studio, mailpit and the edge
+  // runtime being down is not a reason to fail a database test.
+  const required = ['_db', '_rest', '_auth'].filter((service) => stopped.includes(service));
+  if (required.length > 0) {
+    throw new Error(
+      `The local Supabase stack is only partly up — these are stopped: ${stopped}. ${START_HINT}`,
+    );
+  }
+
   return env;
 }
 
@@ -111,15 +137,36 @@ let cached: LocalDatabase | undefined;
 export function localDatabase(): LocalDatabase {
   if (cached) return cached;
 
-  const env =
-    process.env.SUPABASE_API_URL && process.env.SUPABASE_ANON_KEY && process.env.SUPABASE_DB_URL
-      ? process.env
-      : { ...readStatusEnv(), ...process.env };
+  // SUPABASE_-prefixed variables are an explicit override and win outright. Everything
+  // else comes from the CLI, as one set, describing one stack.
+  //
+  // What is deliberately NOT read is the ambient unprefixed `API_URL` / `DB_URL` /
+  // `ANON_KEY`. An earlier version fell back to those and let `process.env` outrank the
+  // CLI, which meant a `DB_URL` exported by a direnv or a shell profile silently
+  // redirected the superuser half of the suite to a different database while the
+  // PostgREST half still talked to this one. That is not hypothetical here: this project
+  // runs one Supabase stack per worktree, so the other database is the same schema at a
+  // different version, and the catalogue sweep would have certified one branch by
+  // reading another. `DB_URL` is far too common a name to trust from the environment.
+  const override =
+    process.env.SUPABASE_API_URL &&
+    process.env.SUPABASE_ANON_KEY &&
+    process.env.SUPABASE_DB_URL &&
+    process.env.SUPABASE_JWT_SECRET;
 
-  const apiUrl = env.SUPABASE_API_URL ?? env.API_URL;
-  const anonKey = env.SUPABASE_ANON_KEY ?? env.ANON_KEY;
-  const dbUrl = env.SUPABASE_DB_URL ?? env.DB_URL;
-  const jwtSecret = env.SUPABASE_JWT_SECRET ?? env.JWT_SECRET;
+  const env = override
+    ? {
+        API_URL: process.env.SUPABASE_API_URL,
+        ANON_KEY: process.env.SUPABASE_ANON_KEY,
+        DB_URL: process.env.SUPABASE_DB_URL,
+        JWT_SECRET: process.env.SUPABASE_JWT_SECRET,
+      }
+    : readStatusEnv();
+
+  const apiUrl = env.API_URL;
+  const anonKey = env.ANON_KEY;
+  const dbUrl = env.DB_URL;
+  const jwtSecret = env.JWT_SECRET;
 
   const missing = Object.entries({ apiUrl, anonKey, dbUrl, jwtSecret })
     .filter(([, value]) => !value)
@@ -233,9 +280,27 @@ export async function createUser(label = 'user'): Promise<TestUser> {
  * schema drift fails the build"), which is a separate, Ready ticket. This is the seam
  * until it lands — one named place to delete, rather than a cast at each call site.
  */
-export const toOne = <T>(embedded: unknown): T => embedded as T;
+export function toOne<T>(embedded: unknown): T {
+  // Checked, because an unchecked cast here would launder the two values it is most
+  // likely to be handed. `undefined` arrives whenever a `.single()` above it errored,
+  // and turns into `Cannot read properties of undefined` several lines later; an ARRAY
+  // arrives if the embed ever becomes to-many, which is precisely the confusion this
+  // helper exists to paper over, and would surface as `expected undefined to be ...`
+  // rather than as the schema change it is.
+  if (embedded === null || typeof embedded !== 'object' || Array.isArray(embedded)) {
+    throw new Error(
+      `Expected a to-one embed, got ${Array.isArray(embedded) ? 'an array' : String(embedded)}`,
+    );
+  }
+  return embedded as T;
+}
 
-/** The full pack tree, in the shape the share page asks PostgREST for. */
+/**
+ * The full pack tree, in the shape the share page asks PostgREST for.
+ *
+ * Ordering is applied by packTreeQuery() rather than written here, because PostgREST
+ * orders an embedded resource from a separate parameter, not from the select list.
+ */
 export const PACK_TREE_SELECT =
   'id, name, slug, visibility, locked_at, pack_categories(id, name, position, pack_items(id, quantity, worn, position, overrides, snapshot, gear_items(id, name, brand, weight, weight_unit)))';
 
@@ -259,18 +324,70 @@ export async function adminSql<T extends Record<string, unknown> = Record<string
   text: string,
   params: unknown[] = [],
 ): Promise<T[]> {
+  // Multi-statement strings are refused, and this is a correctness guard rather than
+  // fussiness. node-postgres returns an ARRAY of results for one, and an earlier version
+  // of this function returned the LAST result's rows — so any query ending in a `set` or
+  // `reset` returned `[]`. Every catalogue assertion in this suite is of the form
+  // `expect(rows).toEqual([])`, which means "adminSql returned nothing" is the PASSING
+  // condition for all of them: one trailing `set` would have turned the RLS sweep, the
+  // grants sweep and the definer sweep green simultaneously and silently. Use
+  // adminSqlWith() when a session setting is genuinely needed.
+  if (/;\s*\S/.test(text.trim().replace(/;\s*$/, ''))) {
+    throw new Error(
+      'adminSql takes a single statement — use adminSqlWith(setup, query) for session settings.',
+    );
+  }
+
   const client = new pg.Client({ connectionString: localDatabase().dbUrl });
   await client.connect();
   try {
     const result = await client.query(text, params);
-    // node-postgres returns an ARRAY of results for a multi-statement string, which is
-    // how a test sets a planner GUC and then asks for the plan on one connection —
-    // each call here opens its own, so a `set` issued separately would be gone by the
-    // time the next statement ran. The rows that matter are always the last
-    // statement's; the leading ones are `set`s and return none.
-    const results = Array.isArray(result) ? result : [result];
-    return results[results.length - 1].rows as T[];
+    return result.rows as T[];
   } finally {
     await client.end();
   }
+}
+
+/**
+ * Run one or more session settings, then a query, on the same connection.
+ *
+ * Separate statements over one client rather than a semicolon-joined string: each
+ * `set` is issued and acknowledged in its own round trip, so a typo in one fails at
+ * that statement instead of silently changing which result set the caller reads.
+ * `adminSql` opens a fresh connection per call, which is why a `set` issued through it
+ * would be gone before the next statement ran.
+ */
+export async function adminSqlWith<T extends Record<string, unknown> = Record<string, unknown>>(
+  setup: string[],
+  text: string,
+  params: unknown[] = [],
+): Promise<T[]> {
+  const client = new pg.Client({ connectionString: localDatabase().dbUrl });
+  await client.connect();
+  try {
+    for (const statement of setup) await client.query(statement);
+    const result = await client.query(text, params);
+    return result.rows as T[];
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * The pack tree, ordered, as one PostgREST request.
+ *
+ * The `position` columns are deliberately not unique, so ties are broken on `id` to
+ * make the result a stable sequence rather than whatever order the rows came back in.
+ * Without an explicit order PostgREST emits no ORDER BY at all — which would leave the
+ * ordering index, and the `position` column itself, as decoration.
+ */
+export function packTreeQuery(client: SupabaseClient, slug: string) {
+  return client
+    .from('packs')
+    .select(PACK_TREE_SELECT)
+    .eq('slug', slug)
+    .order('position', { referencedTable: 'pack_categories', ascending: true })
+    .order('id', { referencedTable: 'pack_categories', ascending: true })
+    .order('position', { referencedTable: 'pack_categories.pack_items', ascending: true })
+    .order('id', { referencedTable: 'pack_categories.pack_items', ascending: true });
 }

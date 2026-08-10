@@ -3,7 +3,7 @@ import {
   anonClient,
   countingFetch,
   createUser,
-  PACK_TREE_SELECT,
+  packTreeQuery,
   toOne,
   type TestUser,
 } from './support/local-database';
@@ -101,6 +101,15 @@ describe('a private pack is unreachable with the anon key', () => {
     const items = await anon.from('pack_items').select('id');
     const gear = await anon.from('gear_items').select('id');
 
+    // The public pack must be IN these listings before their not-containing anything is
+    // worth asserting. An unfiltered select plus `.not.toContain()` is satisfied by an
+    // empty or truncated result, and PostgREST truncates at `db-max-rows` — unset
+    // locally, and ordinary production hardening. Without this, the strongest negative
+    // in the file quietly becomes a tautology.
+    expect(packs.data?.map((p) => p.id)).toContain(publicPack.packId);
+    expect(items.data?.map((i) => i.id)).toContain(publicPack.itemIds[0]);
+    expect(gear.data?.map((g) => g.id)).toContain(publicPack.gearItemIds[0]);
+
     expect(packs.data?.map((p) => p.id)).not.toContain(privatePack.packId);
     for (const id of privatePack.itemIds) expect(items.data?.map((i) => i.id)).not.toContain(id);
     for (const id of privatePack.gearItemIds) expect(gear.data?.map((g) => g.id)).not.toContain(id);
@@ -173,11 +182,7 @@ describe('a pack with 40 items loads in one round trip', () => {
     const bigPack = await createPack(owner, { visibility: 'public', itemCount: 40 });
 
     const counter = countingFetch();
-    const { data, error } = await anonClient(counter.fetch)
-      .from('packs')
-      .select(PACK_TREE_SELECT)
-      .eq('slug', bigPack.slug)
-      .single();
+    const { data, error } = await packTreeQuery(anonClient(counter.fetch), bigPack.slug).single();
 
     expect(error).toBeNull();
     expect(counter.count()).toBe(1);
@@ -188,5 +193,35 @@ describe('a pack with 40 items loads in one round trip', () => {
     // Embedded through to the closet, so nothing needs a second query for names.
     const gear = toOne<{ name: string }>(categories[0].pack_items[0].gear_items);
     expect(gear.name).toBeTruthy();
+  });
+});
+
+/**
+ * What a frozen pack carries forward.
+ *
+ * There is a known gap here, recorded in the grants block of the migration: a public
+ * pack currently exposes the whole gear row, `notes` and `url` included. Column-level
+ * grants are the obvious fix and are incompatible with PostgREST embedding — measured,
+ * not assumed — so the live-path decision belongs to the share page (Ref 26).
+ *
+ * What IS decided here is the frozen copy, and this test pins it. A snapshot is read by
+ * `anon` on a public pack and is permanent, so freezing those fields would put them
+ * somewhere a later fix to the live path could not reach.
+ */
+describe('the frozen snapshot carries only what renders the item', () => {
+  it('omits notes and url', async () => {
+    const locked = await createPack(owner, { visibility: 'public', itemCount: 1, locked: true });
+
+    const { data } = await anonClient()
+      .from('pack_items')
+      .select('snapshot')
+      .eq('id', locked.itemIds[0])
+      .single();
+
+    expect(data?.snapshot).not.toHaveProperty('notes');
+    expect(data?.snapshot).not.toHaveProperty('url');
+    // Still a usable display record.
+    expect(data?.snapshot.name).toBe('Gear 1');
+    expect(data?.snapshot.weight_unit).toBe('g');
   });
 });
