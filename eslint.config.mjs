@@ -16,7 +16,22 @@ export default [
     // `.astro/types.d.ts` cache one level down, which would otherwise be linted as
     // if it were source. `node_modules/**` doesn't need the same treatment: ESLint
     // ignores every `node_modules` directory by default, at any depth.
-    ignores: ['dist/**', '**/.astro/**', 'node_modules/**', 'src/assets/**'],
+    // `supabase/.temp/**` is the Supabase CLI's local scratch directory. Starting a
+    // local stack writes the edge runtime's bundled `main/index.ts` there — third-party
+    // generated code that produces ~190 lint errors and is deleted by `supabase stop`.
+    // It is gitignored, but ESLint's flat config does not read .gitignore, so it has to
+    // be named here too. Without it, `npm run lint` passes or fails according to
+    // whether a database happens to be running; CI only escaped that because
+    // `npm run check` runs before the stack starts, which is the kind of accidental
+    // ordering that stops being true the moment somebody reorders a workflow.
+    ignores: [
+      'dist/**',
+      '**/.astro/**',
+      'node_modules/**',
+      'src/assets/**',
+      'supabase/.temp/**',
+      'supabase/.branches/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

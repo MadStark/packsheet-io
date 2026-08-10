@@ -38,6 +38,22 @@ jobs:
 
       - run: npm ci
 
+      # Ahead of `npm test`, not just ahead of the migration push. Part of the suite
+      # queries a real database as the `anon` and `authenticated` roles, and it fails
+      # rather than skips when there is not one — so without this the deploy stops here,
+      # before it pushes migrations or builds anything.
+      #
+      # There is a second reason it belongs in a DEPLOY workflow specifically: the step
+      # below is about to `db push` these exact migrations to a hosted project. Replaying
+      # them into an empty local database and running the policy tests against the result
+      # is the closest thing to a rehearsal this pipeline can have, and it happens before
+      # anything irreversible.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      - uses: ./.github/actions/local-database
+
       # Runs here as well as in ci.yml, on purpose. This workflow and CI are both
       # triggered by the same push and neither depends on the other, so a red CI does
       # not stop a deploy — it is not a race that usually resolves safely, it is no
@@ -59,10 +75,6 @@ jobs:
       # projects with no password set at all. Referencing a secret that does not exist
       # would expand to an empty string and connect, or fail to, for reasons nobody
       # could read off the log.
-      - uses: supabase/setup-cli@v3
-        with:
-          version: 2.113.0
-
       - name: Apply database migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
