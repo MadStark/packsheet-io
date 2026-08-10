@@ -44,18 +44,19 @@ import { execFileSync } from 'node:child_process';
 import { createHmac, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
 import type { Database } from '../../src/lib/database.types';
+import { POSTGREST_MAJOR, type PacksheetClient } from '../../src/lib/supabase';
 
 /**
- * Every client here is generic over the generated `Database` (Ref 52), which is what
- * makes an embed resolve to the shape PostgREST actually returns rather than to `any`.
- * Without it `select('gear_items(name)')` infers an array for a to-one embed and
- * `data.gear_items.name` is a compile error against a runtime value that is exactly
- * what it looks like — the reason a hand-written `toOne()` cast used to live here.
+ * Re-exported so the fixtures and the tests have one name to reach for. The type itself
+ * lives in src/lib/, not here: the schema and the PostgREST version it carries are facts
+ * about the database, and will be just as true for the query code Refs 4 and 37 write.
+ * Declaring it in tests/ would guarantee a second, hand-written copy later — and a
+ * hand-written copy is the one thing the drift check cannot see.
  */
-export type PacksheetClient = SupabaseClient<Database>;
+export type { PacksheetClient };
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -230,7 +231,11 @@ const clientOptions = (accessToken?: string, fetchImpl?: typeof fetch) => ({
 /** A stranger: exactly what a browser loading a share page has. */
 export function anonClient(fetchImpl?: typeof fetch): PacksheetClient {
   const { apiUrl, anonKey } = localDatabase();
-  return createClient<Database>(apiUrl, anonKey, clientOptions(undefined, fetchImpl));
+  return createClient<Database, { PostgrestVersion: typeof POSTGREST_MAJOR }>(
+    apiUrl,
+    anonKey,
+    clientOptions(undefined, fetchImpl),
+  );
 }
 
 /**
@@ -273,7 +278,11 @@ export async function createUser(label = 'user'): Promise<TestUser> {
   return {
     id,
     email,
-    client: createClient<Database>(apiUrl, anonKey, clientOptions(mintAccessToken(id, jwtSecret))),
+    client: createClient<Database, { PostgrestVersion: typeof POSTGREST_MAJOR }>(
+      apiUrl,
+      anonKey,
+      clientOptions(mintAccessToken(id, jwtSecret)),
+    ),
   };
 }
 

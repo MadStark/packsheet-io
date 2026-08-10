@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { adminSql, adminSqlWith, createUser, type TestUser } from './support/local-database';
+import type { TablesInsert } from '../src/lib/database.types';
 import { anonClient, packTreeQuery } from './support/local-database';
 import { createPack } from './support/fixtures';
 
@@ -30,15 +31,25 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
       .update({ name: 'Renamed tent', weight: 999 })
       .eq('id', pack.gearItemIds[0]);
 
-    const { data } = await owner.client
+    const { data, error } = await owner.client
       .from('pack_items')
       .select('gear_items(name, weight)')
       .eq('id', pack.itemIds[0])
       .single();
 
-    // `gear_items` is a to-one embed and the generated types say so, so this is an
-    // object rather than the array an untyped client would infer. `weight` is
-    // `numeric(12,3)`, which PostgREST serialises as an unquoted JSON number.
+    // Asserted before the values, because without it a `.single()` that errored and an
+    // embed that changed arity produce the identical `expected undefined to be …`. The
+    // deleted toOne() cast used to tell those apart by throwing; this is what replaces
+    // that, one line at the site rather than a helper wrapping every read.
+    expect(error).toBeNull();
+
+    // `gear_items` is a to-one embed, and the generated types say so from a COMPOSITE
+    // foreign key — pack_items(user_id, gear_item_id) → gear_items(user_id, id) — which
+    // is the least-travelled path in supabase-js's inference. Pinned once, here, against
+    // the actual wire format, so the type and the response cannot diverge in silence.
+    expect(Array.isArray(data?.gear_items), 'the to-one embed came back as an array').toBe(false);
+
+    // `weight` is `numeric(12,3)`, which PostgREST serialises as an unquoted JSON number.
     expect(data?.gear_items?.name).toBe('Renamed tent');
     expect(data?.gear_items?.weight).toBe(999);
   });
@@ -57,6 +68,7 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
       .eq('id', pack.itemIds[0])
       .single();
 
+    expect(item.error).toBeNull();
     expect(item.data?.overrides).toEqual({ weight: 450 });
     // The closet is untouched: the divergence belongs to this list only.
     expect(item.data?.gear_items?.weight).toBe(100);
@@ -88,7 +100,9 @@ describe('rule 2 — locking a pack freezes it', () => {
       expect(item.snapshot).not.toBeNull();
       expect(item.snapshot).toMatchObject({
         name: expect.stringMatching(/^Gear \d+$/),
-        captured_at: expect.any(String),
+        // Not `expect.any(String)`: that passes on `''`, where the `toBeTruthy()` this
+        // replaced did not. A snapshot carrying an empty timestamp renders as nothing.
+        captured_at: expect.stringMatching(/^\d{4}-/),
       });
     }
   });
@@ -391,6 +405,24 @@ describe('timestamps are the server’s to set', () => {
 });
 
 /**
+ * A weight that only exists as a string.
+ *
+ * Postgres accepts `'NaN'` and `'Infinity'` as `numeric` values, and JSON cannot carry
+ * either as a number — `JSON.stringify(NaN)` is `null`, which is a different insert
+ * testing a different thing. The generated `Insert` type says `number`, correctly, for
+ * every value the Data API can express; these two are the exception.
+ *
+ * Returned as the insert fragment rather than as a bare `number`, for two reasons. The
+ * fake value cannot escape into arithmetic or a comparison, because it only ever exists
+ * spread into a payload. And it is typed through `TablesInsert<'gear_items'>`, so the one
+ * helper here whose whole reason for existing is "the generated type says `number`" names
+ * the table and the column it is lying about — rename either and this stops compiling,
+ * which is the guarantee the rest of this ticket is about.
+ */
+const weightLiteral = (literal: 'NaN' | 'Infinity') =>
+  ({ weight: literal }) as unknown as Pick<TablesInsert<'gear_items'>, 'weight'>;
+
+/**
  * The CHECK constraints.
  *
  * Every one of these except pack_items_reference_or_snapshot could be dropped without
@@ -398,24 +430,13 @@ describe('timestamps are the server’s to set', () => {
  * the column every read policy keys off, and the NaN bound below closes a hole that a
  * plain `>= 0` leaves wide open.
  */
-/**
- * A numeric literal that only exists as a string.
- *
- * Postgres accepts `'NaN'` and `'Infinity'` as `numeric` values, and JSON cannot carry
- * either as a number — `JSON.stringify(NaN)` is `null`, which is a different insert
- * testing a different thing. The generated `Insert` type says `number`, correctly, for
- * every value the Data API can express; these two are the exception, and the cast is
- * named and kept in one place rather than spelled out at each call site.
- */
-const numericLiteral = (literal: 'NaN' | 'Infinity'): number => literal as unknown as number;
-
 describe('the constrained columns refuse values outside their domain', () => {
   it('refuses NaN and Infinity where a plain >= 0 would let them through', async () => {
     // Postgres orders NaN above every numeric value, so 'NaN' >= 0 is TRUE. Without the
     // upper bound this insert succeeds and poisons every total that touches the row.
     const nan = await owner.client
       .from('gear_items')
-      .insert({ name: 'Weight NaN', weight: numericLiteral('NaN') })
+      .insert({ name: 'Weight NaN', ...weightLiteral('NaN') })
       .select('id');
     expect(nan.error?.code, 'NaN was accepted as a weight').toBe('23514');
 
@@ -426,7 +447,7 @@ describe('the constrained columns refuse values outside their domain', () => {
     // accepted everywhere the precision happens to be wider.
     const infinity = await owner.client
       .from('gear_items')
-      .insert({ name: 'Weight Infinity', weight: numericLiteral('Infinity') })
+      .insert({ name: 'Weight Infinity', ...weightLiteral('Infinity') })
       .select('id');
     expect(infinity.error?.code, 'Infinity was accepted as a weight').toBe('22003');
   });
