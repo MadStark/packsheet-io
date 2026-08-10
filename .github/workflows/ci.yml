@@ -26,7 +26,7 @@ jobs:
 
       # Read from .nvmrc rather than pinned inline, so CI and a contributor's local
       # runtime cannot drift apart silently — there is one place to change the Node
-      # version, and every workflow follows it. The same applies to the three deploy
+      # version, and every workflow follows it. The same applies to the two deploy
       # workflows, which build the artifacts that actually ship.
       - uses: actions/setup-node@v4
         with:
@@ -71,9 +71,9 @@ jobs:
         with:
           version: 2.113.0
 
-      # Starts the stack and waits for it. Shared with pr-preview.yml and both deploy
-      # workflows, because all four run `npm test` and the suite refuses to skip its
-      # row-level-security tests when there is no database.
+      # Starts the stack and waits for it. Shared with both deploy workflows, because all
+      # three run `npm test` and the suite refuses to skip its row-level-security tests
+      # when there is no database.
       - uses: ./.github/actions/local-database
 
       # Vitest, kept as its own step rather than folded into `npm run check` so the

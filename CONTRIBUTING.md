@@ -65,9 +65,12 @@ This is also why linear history is deliberately **not** required on `main`: requ
 would leave only the two rewriting strategies and guarantee the fault comes back. To read
 `main` as a release log, use `git log main --first-parent` — one entry per release.
 
-So: branch from `staging`, and target `staging` in your pull request. Opening a PR builds
-an ephemeral preview environment and comments the URL on the PR; closing or merging the PR
-tears it down.
+So: branch from `staging`, and target `staging` in your pull request.
+
+There are **no per-pull-request preview deployments** — a PR runs CI and nothing is
+deployed. Review a change by running it locally: `npm run db:start && npm run dev` gives
+you the site against your own Postgres, and `npm test` runs the full suite against it.
+`staging.packsheet.io` deploys from the `staging` branch once your PR merges.
 
 Both branches require their CI check to pass before merging.
 

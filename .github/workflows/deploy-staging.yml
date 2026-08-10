@@ -85,10 +85,16 @@ jobs:
           # because `name: staging` on the production workflow is a one-word edit that
           # migrates the wrong database.
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        # Through scripts/supabase.sh, not `supabase` directly. This job never starts a
+        # local stack, but `link` and `db push` still PARSE supabase/config.toml, and
+        # that file reads its project name and ports from the environment so each git
+        # worktree gets its own Docker containers. Unset, they make the whole file fail
+        # to parse with "ProjectConfigParseError" — a release broken by a local-dev
+        # convenience, with an error naming neither.
         run: |
           set -euo pipefail
-          supabase link --project-ref "$PROJECT_REF"
-          supabase db push
+          scripts/supabase.sh link --project-ref "$PROJECT_REF"
+          scripts/supabase.sh db push
 
       - name: Build
         env:
