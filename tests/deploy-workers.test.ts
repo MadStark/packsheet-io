@@ -48,6 +48,29 @@ import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 
 const repoPath = (p: string) => fileURLToPath(new URL(`../${p}`, import.meta.url));
 
+/**
+ * Every workflow AND every composite action, recursively.
+ *
+ * Both text scans below use this. `.github/actions` is included because a composite
+ * action is a step like any other — the bare-`supabase` bug this file now catches lived
+ * in one, invisible to a scan of `.github/workflows` alone.
+ */
+function workflowAndActionFiles(): string[] {
+  const files: string[] = [];
+  for (const root of ['.github/workflows', '.github/actions']) {
+    const dir = repoPath(root);
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue;
+      files.push(join(entry.parentPath, entry.name));
+    }
+  }
+  // Guarded, not assumed: every assertion over this list is `toEqual([])`, so an empty
+  // list passes each of them having read nothing at all.
+  if (files.length === 0) throw new Error('No workflow or action files found');
+  return files;
+}
+
 interface Step {
   name?: string;
   run?: string;
@@ -532,19 +555,7 @@ describe('the Supabase CLI is always called through the wrapper', () => {
    * know how to classify, and the rule holds for all of them.
    */
   it('no workflow or action calls bare `supabase`', () => {
-    const roots = ['.github/workflows', '.github/actions'];
-    const files: string[] = [];
-    for (const root of roots) {
-      const dir = repoPath(root);
-      if (!existsSync(dir)) continue;
-      for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
-        if (!entry.isFile()) continue;
-        if (!/\.ya?ml$/.test(entry.name)) continue;
-        files.push(join(entry.parentPath, entry.name));
-      }
-    }
-    expect(files.length, 'no workflow or action files found').toBeGreaterThan(0);
-
+    const files = workflowAndActionFiles();
     const offenders: string[] = [];
     for (const file of files) {
       readFileSync(file, 'utf8')
@@ -556,7 +567,16 @@ describe('the Supabase CLI is always called through the wrapper', () => {
           // `scripts/supabase.sh start` is the correct form and `run: supabase start` is
           // not, and both contain the word. `uses: supabase/setup-cli@v3` is excluded for
           // free, because there the word is followed by `/` rather than a space.
-          if (!/(?<!\/)\bsupabase\s/.test(code)) return;
+          // `supabase` in COMMAND position: at the start of the line, or straight after
+          // `run:`, a pipe, `&&`, `;`, `(` or `$(`. Not preceded by a slash, which is what
+          // separates `scripts/supabase.sh start` (correct) from `run: supabase start`
+          // (not). `uses: supabase/setup-cli@v3` is excluded for free — there the word is
+          // followed by `/`, not whitespace.
+          //
+          // The position requirement is what keeps prose out: `- name: Start supabase
+          // stack` and `run: cd supabase && ls` both contain the word and neither is an
+          // invocation.
+          if (!/(?:^|run:\s*|[|;(]\s*|&&\s*|\$\(\s*)(?<!\/)supabase\s/m.test(code)) return;
           offenders.push(`${file.replace(repoPath('.'), '')}:${index + 1}: ${code.trim()}`);
         });
     }
@@ -575,8 +595,8 @@ describe('per-pull-request previews are gone, not half-removed', () => {
   });
 
   it('no workflow uploads a Worker version', () => {
-    const offenders = readdirSync(repoPath('.github/workflows')).filter((f) =>
-      /versions upload/.test(readFileSync(repoPath(`.github/workflows/${f}`), 'utf8')),
+    const offenders = workflowAndActionFiles().filter((f) =>
+      /versions upload/.test(readFileSync(f, 'utf8')),
     );
     expect(offenders).toEqual([]);
   });

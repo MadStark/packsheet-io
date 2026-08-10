@@ -40,7 +40,7 @@
  * tests the boundary, not the door.
  */
 
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHmac, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -72,28 +72,39 @@ const START_HINT =
  * fails to parse the config at all — `ProjectConfigParseError`, naming neither cause nor
  * fix.
  *
- * The `existsSync` fallback to `supabase --workdir` is kept for the case where this file
- * is used from a checkout predating the wrapper; `--workdir` matters there so the command
- * reads THIS worktree's supabase/ directory rather than whichever one it was invoked
- * from.
+ * There is no fallback to a bare `supabase`, and that is deliberate. This file ships in
+ * the same checkout as the wrapper, so a missing wrapper is not an older layout to be
+ * tolerated — it is a broken tree, and falling back would run a command that cannot parse
+ * the config and then report it as "the stack is not running", which is advice that sends
+ * the reader in the wrong direction.
  */
 function readStatusEnv(): Record<string, string> {
   const script = `${repoRoot}scripts/supabase.sh`;
-  const [command, ...leading] = existsSync(script) ? [script] : ['supabase', '--workdir', repoRoot];
-
-  let raw: string;
-  try {
-    raw = execFileSync(command, [...leading, 'status', '-o', 'env'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (cause) {
+  if (!existsSync(script)) {
     throw new Error(
-      `Could not reach the local Supabase stack: \`${command} status\` failed. ${START_HINT}`,
-      { cause },
+      `scripts/supabase.sh is missing from this checkout. It is the only thing that knows this worktree's ports; the CLI cannot read supabase/config.toml without it.`,
     );
   }
+  const [command, ...leading] = [script];
+
+  // spawnSync, and BOTH streams. This used to be execFileSync reading stdout only, and
+  // that quietly disabled the partial-stack check below: the CLI prints its settings on
+  // stdout but the `Stopped services: [...]` notice on STDERR, so the scan for it never
+  // matched and the throw was unreachable. The guard existed, read convincingly, and
+  // could not fire.
+  const result = spawnSync(command, [...leading, 'status', '-o', 'env'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Could not reach the local Supabase stack: \`${command} status\` failed. ${START_HINT}`,
+      { cause: result.error ?? new Error(result.stderr || `exit ${result.status}`) },
+    );
+  }
+
+  const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
 
   // KEY="value" lines, interleaved with human-readable notices that must not be parsed
   // as settings — but one of those notices is load-bearing and used to be thrown away.

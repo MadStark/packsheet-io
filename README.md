@@ -158,9 +158,10 @@ Two settings in that file are load-bearing:
   `*.packsheet-io.workers.dev`. Azure's equivalent hostname could not be turned off and
   cost four releases, two shell scripts and a `forwardingGateway` header dance to work
   around; here it is one boolean, and a test fails if it flips.
-- **`preview_urls`** — off on production, on for staging. Preview URLs are how a pull
-  request gets a reviewable build; on production they would be an unlisted copy of the
-  live site.
+- **`preview_urls: false`** on both Workers. A version preview URL is an unlisted copy of
+  the site on a `workers.dev` hostname — outside the zone, past the WAF, past the Access
+  policy that gates staging. It was on for staging while per-PR previews existed; those
+  are gone, so the exception went with them.
 
 ### Database
 

@@ -5,7 +5,7 @@ description: >
 
 # WHY THIS EXISTS AS AN ACTION RATHER THAN A COPIED BLOCK
 #
-# Four workflows run `npm test` — ci.yml, pr-preview.yml and the two deploys — and part
+# Three workflows run `npm test` — ci.yml and the two deploys — and part
 # of that suite exercises row-level security by querying the database as the `anon` and
 # `authenticated` roles. Nothing can stand in for that: a policy is a SQL expression, and
 # only Postgres can say what it does. Those tests fail rather than skip when there is no

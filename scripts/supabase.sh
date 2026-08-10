@@ -33,10 +33,23 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The stack name becomes the Docker container prefix (supabase_db_<name>) and the
-# volume names, which is what actually separates one worktree's data from another's.
-# Derived from the directory name so it is stable across restarts and legible in
-# `docker ps` — a hash would isolate just as well and tell you nothing.
+# One checksum of the ABSOLUTE path, used for both the stack name and the ports.
+#
+# It has to be the absolute path, and the stack name has to use it too. An earlier
+# version keyed the ports on the absolute path and the stack NAME on the basename alone,
+# which quietly undid the isolation the name is responsible for: the name becomes the
+# Docker container prefix (supabase_db_<name>) and the volume names, so two checkouts
+# whose directories share a basename — `~/Dev/packsheet-io/worktrees/fix-1` and
+# `~/review/packsheet-io/worktrees/fix-1` — got *the same containers and the same
+# volumes* while believing they were isolated. Reproduced: with the port bases also
+# colliding (1 in 25, since the base is a modulo of the same class of checksum), the
+# second checkout resolved cleanly onto the first one's database and `db reset` would
+# have replayed its migrations there.
+root_sum="$(printf '%s' "$root" | cksum | awk '{print $1}')"
+
+# Legible first, unique second: the directory name is what makes `docker ps` readable, and
+# the checksum suffix is what makes it correct. A bare hash would isolate just as well and
+# tell you nothing.
 if [ -z "${PACKSHEET_STACK:-}" ]; then
   slug="$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')"
   slug="${slug:-default}"
@@ -46,6 +59,7 @@ if [ -z "${PACKSHEET_STACK:-}" ]; then
     packsheet*) PACKSHEET_STACK="$slug" ;;
     *) PACKSHEET_STACK="packsheet-$slug" ;;
   esac
+  PACKSHEET_STACK="$PACKSHEET_STACK-$(printf '%x' "$root_sum")"
 fi
 export PACKSHEET_STACK
 
@@ -53,14 +67,13 @@ export PACKSHEET_STACK
 # and keeping the offsets between them makes a running stack readable: whatever the
 # base, the API is always base+1 and Studio always base+3.
 #
-# Keyed on the absolute path rather than the directory name, so two worktrees that
-# happen to share a basename still get different ports. Collisions are possible —
-# it is a modulo of a checksum, not a registry — and they surface immediately and
-# loudly as "port is already allocated" when the second stack starts. Export
-# PACKSHEET_PORT_BASE to step around one.
+# From the same absolute-path checksum as the stack name, so the two cannot disagree
+# about which checkout they belong to. Collisions are possible — it is a modulo, not a
+# registry — but now they are only PORT collisions, which surface immediately and loudly
+# as "port is already allocated" when the second stack starts, rather than two checkouts
+# silently sharing one database. Export PACKSHEET_PORT_BASE to step around one.
 if [ -z "${PACKSHEET_PORT_BASE:-}" ]; then
-  sum="$(printf '%s' "$root" | cksum | awk '{print $1}')"
-  PACKSHEET_PORT_BASE=$(( 54320 + (sum % 25) * 20 ))
+  PACKSHEET_PORT_BASE=$(( 54320 + (root_sum % 25) * 20 ))
 fi
 export PACKSHEET_PORT_BASE
 
