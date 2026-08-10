@@ -1,0 +1,9 @@
+---
+// Violation #7: imports a module inside the choke point that is NOT index.ts. A
+// checker that recognised only `src/lib/auth/index.ts` as the choke point would pass
+// this fixture unchanged while leaving every other file in that directory — including
+// whichever one ends up holding the actual Clerk client — completely unguarded.
+import { SESSION_COOKIE } from '../lib/auth/session';
+---
+
+<p>{SESSION_COOKIE}</p>

@@ -1,0 +1,9 @@
+---
+// Reaches auth only through a `client:only` island. See the component's own comment:
+// the import is not in the server module at all, so this page has no edge to the
+// island in the build graph, and a reachability-based check cannot see the
+// violation from here.
+import ClientOnlyAuth from '../components/ClientOnlyAuth.vue';
+---
+
+<ClientOnlyAuth client:only="vue" />

@@ -1,0 +1,9 @@
+---
+// Violation #2: reaches the choke point transitively, through a component, rather
+// than by importing it directly. This is the case that actually matters — a walker
+// that only checked each page's own imports would miss this, and detecting only
+// direct imports is not the claim the real test makes.
+import AuthGate from '../components/AuthGate.astro';
+---
+
+<AuthGate />

@@ -34,11 +34,13 @@ npm run dev
 
 ```bash
 npm run check
+npm test
 ```
 
-This runs `astro check`, `tsc --noEmit`, ESLint and Prettier. It is what CI runs, so a
-clean local run means no surprises. `npm run format` applies Prettier if formatting is the
-only thing failing.
+`npm run check` runs `astro check`, `tsc --noEmit`, ESLint and Prettier; `npm test` runs
+Vitest. CI runs both, in one required job that is confusingly also called `check` — so run
+the two commands, not just the one that shares its name. `npm run format` applies Prettier
+if formatting is the only thing failing.
 
 ## Branches
 
@@ -86,7 +88,15 @@ Two more that are less obvious:
 
 - **The public share page must not require authentication.** It is the most-visited surface
   and most of its visitors never sign in. Adding an auth check to that path is a
-  correctness _and_ a hosting-cost problem.
+  correctness _and_ a hosting-cost problem — auth providers price by monthly active user, and
+  every anonymous read counted as one would turn a compute bill of single-digit dollars into
+  one of several thousand. All auth is required to go through `src/lib/auth/`, and
+  `tests/anonymous-read-path.test.ts` builds the site and fails if **any** module outside
+  that directory imports into it, or imports `@clerk/*` directly — an edge rule, not a "can
+  an anonymous route reach it" rule, because a `client:only` island's import never appears
+  in the server module for a route-rooted walk to follow. It runs in the required CI job
+  named `check`, which runs the tests as well as the `npm run check` script of the same
+  name.
 - **No third-party CDN for fonts or assets on reader-facing pages.** Someone reading a
   shared pack list should not have their IP disclosed to a third party to do it.
 

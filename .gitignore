@@ -25,9 +25,19 @@ pnpm-debug.log*
 # jetbrains setting folder
 .idea/
 
-# A stray hand-run of scripts/write-origin-lock.sh leaves one of these at the repo root
-# carrying the origin-verify secret, and this repository is public. Anchored to the root
-# on purpose: dist/ is already ignored above, and an unanchored pattern would also make a
-# future *legitimate* staticwebapp.config.json — route rules, security headers — silently
-# un-addable and silently never deployed.
-/staticwebapp.config.json
+# wrangler's local state: build cache, the miniflare data directory used by
+# `wrangler dev`, and any temp config it writes. Machine-local and often large.
+.wrangler/
+
+# Supabase CLI local state. `supabase link` writes the linked project ref and a
+# temporary access token under supabase/.temp — which is why supabase/.gitignore
+# also excludes it, and why that file must not be deleted as redundant.
+supabase/.branches/
+supabase/.temp/
+
+# Throwaway build output from tests/anonymous-read-path.test.ts. That test builds the
+# real site (and its fixture) into a fresh directory and removes it in a `finally`;
+# one of these surviving means a run was killed mid-build. It has to live inside the
+# project rather than in tmpdir() because workerd prerendering cannot reach outside
+# the project root — see the comment at the mkdtempSync call.
+.astro-build-out-*/
