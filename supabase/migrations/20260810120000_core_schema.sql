@@ -153,14 +153,26 @@ create table public.packs (
   -- Default 'private'. A pack that becomes public does so because someone said so.
   visibility text not null default 'private' check (visibility in ('private', 'public')),
 
-  -- citext, so /p/Ultralight and /p/ultralight cannot become two different packs — the
-  -- reason the baseline migration installs the extension. NOT NULL and defaulted, so
+  -- SCHEMA-QUALIFIED, and it has to be. The baseline installs citext into `extensions`
+  -- rather than `public`, and `extra_search_path` in config.toml puts that schema on the
+  -- search_path of every API REQUEST — which is not the same thing as the search_path a
+  -- migration runs under. Locally the two coincide and `citext` resolves bare; against a
+  -- hosted project `supabase db push` connects with its own role and does not, so an
+  -- unqualified reference fails there and only there:
+  --
+  --     ERROR: type "citext" does not exist (SQLSTATE 42704)
+  --
+  -- which is a migration that passes every local check and breaks the deploy. Reproduce
+  -- it locally with `set search_path = 'public'` before the create.
+  --
+  -- citext itself, so /p/Ultralight and /p/ultralight cannot become two different packs —
+  -- the reason the baseline migration installs the extension. NOT NULL and defaulted, so
   -- there is no state in which a pack is made public and is then unreachable because
   -- nobody generated its slug. The default is deliberately opaque rather than derived
   -- from the name: a name-derived slug leaks the title of a pack that is still
   -- private. Clients are free to replace it with a readable one when the pack is
   -- published.
-  slug citext not null unique default substr(replace(gen_random_uuid()::text, '-', ''), 1, 12)
+  slug extensions.citext not null unique default substr(replace(gen_random_uuid()::text, '-', ''), 1, 12)
     check (length(slug) between 3 and 64 and slug ~ '^[A-Za-z0-9][A-Za-z0-9_-]*$'),
 
   -- Rule 2. Non-null means frozen; the write policies on pack_categories and
