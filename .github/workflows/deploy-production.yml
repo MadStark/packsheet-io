@@ -1,7 +1,7 @@
 name: Deploy production
 
 # main is only ever updated by merging staging through a pull request, so a push here
-# means a release. Production is the Standard-tier Static Web App.
+# means a release. It deploys to the packsheet-io Worker, which serves packsheet.io.
 #
 # That promotion uses a merge commit, deliberately. GitHub's other two strategies both
 # rewrite commits, which re-creates the change under a new SHA; the branches then
@@ -9,6 +9,14 @@ name: Deploy production
 # problem but is a history one. This happened once, during the PS-7 release. Linear
 # history is therefore NOT required on main — it would leave only the two rewriting
 # strategies and guarantee the fault returns.
+#
+# What used to live here and no longer needs to: the origin lock. Azure published every
+# Static Web App on a permanent *.azurestaticapps.net hostname that could not be turned
+# off, served the same build as the custom domain, and bypassed Cloudflare entirely —
+# so production had to write a forwardingGateway config demanding a header that a
+# Cloudflare transform rule set, then verify from both sides after every release. On
+# Workers, `workers_dev: false` in wrangler.jsonc means the second hostname is never
+# created. There is nothing to lock, so there is nothing to verify. See Ref 46.
 
 on:
   push:
@@ -17,9 +25,8 @@ on:
 concurrency:
   group: deploy-production
   # NOT cancel-in-progress. You cannot cancel an upload that has already happened: a run
-  # cancelled between the upload and the verify step leaves a live, unverified release,
-  # shown as a grey "cancelled" rather than a failure, with no notification. Queueing
-  # costs a few minutes; cancelling costs the only check that the release works.
+  # cancelled part-way leaves a live release nobody watched go out, shown as a grey
+  # "cancelled" rather than a failure, with no notification.
   cancel-in-progress: false
 
 permissions:
@@ -29,8 +36,8 @@ jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
-    # Scopes the deployment token to this environment rather than the whole repo,
-    # so a workflow running from a fork or a feature branch cannot reach it.
+    # Scopes the API token to this environment rather than the whole repo, so a
+    # workflow running from a fork or a feature branch cannot reach it.
     environment:
       name: production
       url: https://packsheet.io
@@ -48,72 +55,89 @@ jobs:
       # triggered by the same push and neither depends on the other, so a red CI does
       # not stop a deploy — it is not a race that usually resolves safely, it is no
       # gate at all. The required status check protects the merge button; this step is
-      # what protects the artifact. Costs ~25s and must stay ahead of the build.
+      # what protects the artifact.
       #
       # This is the last gate before production. Nothing downstream re-checks.
       - run: npm test
 
-      - name: Build
-        # PUBLIC_SITE_ENV drives robots.txt. Only the literal string "production"
-        # produces an indexable site — see src/pages/robots.txt.ts.
+      # Before the build and before the deploy, so the schema a release needs is in
+      # place by the time that release can serve a request against it. See the same
+      # step in deploy-staging.yml — which, because staging is always merged to main
+      # rather than the other way round, has already run every one of these
+      # migrations against a real Postgres before this workflow sees them.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      - name: Apply database migrations
         env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$PROJECT_REF"
+          supabase db push
+
+      - name: Build
+        env:
+          # PUBLIC_SITE_ENV drives robots.txt. Only the literal string "production"
+          # produces an indexable site — see src/pages/robots.txt.ts.
           PUBLIC_SITE_ENV: production
+
+          # Selects which block of wrangler.jsonc applies, at BUILD time. Dropping
+          # this line does not fail — wrangler.jsonc has a top level that would serve
+          # as a default — which is exactly why it is set explicitly and asserted in
+          # tests/deploy-workers.test.ts. The failure that costs something is the
+          # mirror image of it, in deploy-staging.yml.
+          CLOUDFLARE_ENV: production
         run: npm run build
 
-      # Makes the origin refuse anything that did not arrive through Cloudflare, so the
-      # permanent public *.azurestaticapps.net hostname stops serving the site. The why
-      # is in scripts/write-origin-lock.sh and the README; the constraints that bind
-      # THIS file are:
-      #
-      #   - it must run after Build (dist/ has to exist) and before Deploy (the file has
-      #     to be inside the artifact to be uploaded)
-      #   - its argument must equal app_location below, or the config is written
-      #     somewhere that never ships and the lock silently never applies
-      #   - the value reaches the script through the environment, never the script body
-      #
-      # Production-only on purpose: forwardingGateway requires the Standard plan and
-      # staging is deliberately Free, so staging gets no such file. That is the second
-      # environment-dependent behaviour in the project, and unlike PUBLIC_SITE_ENV it
-      # cannot be reproduced on staging. tests/deploy-origin-lock.test.ts pins all three
-      # constraints above.
-      - name: Write the production-only origin lock
-        env:
-          ORIGIN_VERIFY: ${{ secrets.SWA_ORIGIN_VERIFY }}
-          # Stamped into the artifact so the verify step can tell THIS release from the
-          # one before it. Without it, an edge still serving the previous (locked)
-          # deployment answers exactly like a correctly locked new one.
-          DEPLOY_SHA: ${{ github.sha }}
-        run: scripts/write-origin-lock.sh dist
-
-      - name: Deploy to Azure Static Web Apps
-        uses: Azure/static-web-apps-deploy@v1
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v4
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_DEPLOYMENT_TOKEN_PROD }}
-          action: upload
-          app_location: dist
-          # We build above with a pinned Node version rather than letting Oryx do it,
-          # so the deploy step only uploads. Oryx would otherwise re-run its own build
-          # on an unpinned toolchain, which can differ from what CI just verified.
-          skip_app_build: true
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Pinned to package-lock.json's wrangler. See deploy-staging.yml.
+          wranglerVersion: '4.120.0'
+          command: deploy -c dist/client/wrangler.json
 
-      # Without this the workflow ends at "upload succeeded" and nothing ever checks the
-      # site answers. The why, and the exit conditions, are in the script — which is a
-      # script precisely so the tests can drive it against a stub instead of asserting
-      # that this YAML mentions the right URLs. A review showed that inline, all three
-      # of its failure branches could be replaced with an echo and the suite stayed
-      # green: the detection mechanism itself was undetectably removable.
+      # The upload reporting success is not the same as the site answering, and this is
+      # the one deploy nobody gets to re-run casually. A release that builds, uploads
+      # and then serves a 500 would otherwise show as a green tick.
       #
-      # This step runs AFTER the upload, so a failure here does not prevent the release —
-      # the artifact is already live and this job cannot roll it back. That is deliberate:
-      # the lock can only be tested against the real Standard-tier origin, which no
-      # earlier stage has. Its job is to make a broken lock loud within a minute rather
-      # than silent forever, and to hand whoever reads the log the fast recovery path.
-      - name: Verify the lock from both sides
+      # After the deploy, so a failure here cannot roll anything back — the artifact is
+      # already live. Its job is to make a broken release loud within a minute rather
+      # than silent until someone visits. Kept to what is cheap and unambiguous: the
+      # home page is 200 and HTML, and robots.txt is the indexable one, which is the
+      # single build input that differs between this workflow and staging's and the
+      # one whose failure is slowest to notice.
+      - name: Verify the release answers
         env:
-          # Azure's permanent default hostname for swa-packsheet-prod. Public already, so
-          # not a secret. It only changes if the Static Web App itself is recreated.
-          AZURE_HOSTNAME: wonderful-island-05575f303.7.azurestaticapps.net
-        # Bounded: the retry policy can otherwise spend ~20 minutes going red, all of it
-        # after the release is already live.
-        timeout-minutes: 8
-        run: scripts/verify-origin-lock.sh https://packsheet.io "https://$AZURE_HOSTNAME" "$GITHUB_SHA"
+          SITE: https://packsheet.io
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+
+          status=$(curl -sS --retry 5 --retry-all-errors --retry-delay 5 \
+                        --max-time 20 -o /tmp/home.html -w '%{http_code}' "$SITE/")
+          if [ "$status" != "200" ]; then
+            echo "::error::$SITE/ answered $status, expected 200."
+            exit 1
+          fi
+          if ! grep -qi '<html' /tmp/home.html; then
+            echo "::error::$SITE/ answered 200 but the body is not HTML."
+            exit 1
+          fi
+
+          # Disallow here means a staging or preview build reached production. That is
+          # invisible from the outside and costs the site its search presence.
+          robots=$(curl -sS --retry 5 --retry-all-errors --retry-delay 5 \
+                        --max-time 20 "$SITE/robots.txt")
+          if printf '%s' "$robots" | grep -q '^Disallow: /$'; then
+            echo "::error::$SITE/robots.txt disallows crawling — a non-production build is live."
+            printf '%s\n' "$robots"
+            exit 1
+          fi
+
+          echo "Verified: $SITE serves 200 HTML and an indexable robots.txt."

@@ -40,17 +40,22 @@ Packsheet should require you to abandon a list you already have.
 - [Astro](https://astro.build) with [Vue](https://vuejs.org) islands
 - [Tailwind CSS](https://tailwindcss.com) v4, configured in CSS via `@theme`
 - TypeScript, strict
-- Azure Static Web Apps behind Cloudflare
-- PostgreSQL
+- Cloudflare Workers, with static assets served from the same Worker
+- Supabase (PostgreSQL, with row-level security as the authorization boundary)
+
+Everything the site needs at runtime lives at two vendors. Cloudflare already held the
+domain, DNS, TLS and WAF, so putting the origin there too makes the edge and the origin
+the same thing rather than adding a network hop. Static asset requests on Workers are
+free and unlimited, which is what lets the share page be as popular as it needs to be.
 
 The public share page is served without authentication by design. It is the most-visited
 surface by a wide margin — most visitors are strangers who never sign in — and keeping it
 free of an auth check is both a performance and a hosting-cost decision: auth providers price
 by monthly active user, and 250k of these anonymous reads counted as MAUs would cost
-thousands of dollars a month against a compute bill in the single digits. All Clerk usage is
+thousands of dollars a month against a compute bill in the single digits. All auth SDK usage is
 required to go through one choke point, `src/lib/auth/`, and `tests/anonymous-read-path.test.ts`
 builds the site and fails if **any** module outside that directory imports into it, or imports
-`@clerk/*` directly. It is an edge rule, not a "can an anonymous route reach it" rule: a
+an auth SDK directly. It is an edge rule, not a "can an anonymous route reach it" rule: a
 `client:only` island's import is stripped from the server module, so a route-rooted walk would
 miss the one case that costs the most. It runs in CI's required `check` job, which is a
 different thing from the `npm run check` script — the job runs the script _and_ the tests.
@@ -76,7 +81,7 @@ in CI, which is the slowest place to find out.
 Other scripts:
 
 ```bash
-npm run build    # static output to dist/
+npm run build    # static assets to dist/client, on-demand entry to dist/server
 npm run preview  # serve the built output
 npm run check    # astro check + tsc + eslint + prettier
 npm run format   # apply prettier
@@ -110,86 +115,81 @@ build produces, and CI does not yet assert it.
 ### The one thing staging cannot reproduce
 
 `PUBLIC_SITE_ENV` is the only environment-dependent behaviour in the **codebase**, and the
-local stage can reproduce all of it. There is one divergence that lives in the **deploy
-pipeline** instead, and it is deliberate:
+local stage can reproduce all of it. What the local stage cannot reproduce is the gate in
+front of staging itself:
 
-Azure gives every Static Web App a permanent, public `*.azurestaticapps.net` hostname. It
-cannot be turned off, it serves the same build, and it bypasses Cloudflare entirely — no
-edge cache, no WAF, no rate limiting, and a second crawlable copy of every page. Since
-`staticwebapp.config.json` route rules match on path and method but never on hostname,
-there is no way to noindex that hostname without also noindexing `packsheet.io`.
+**`staging.packsheet.io` sits behind Cloudflare Access.** An unlisted visitor is stopped at
+the edge and the Worker never executes — so staging is not "unindexed and hopefully
+unnoticed", it is closed. The allow-list lives in Cloudflare Zero Trust
+(`packsheet.cloudflareaccess.com`), not in this repository, which means nothing you can
+merge here weakens it and nothing here is evidence that it is still on. Pull request
+preview URLs are covered by a second Access application on the same allow-list.
 
-So production refuses any request that did not come through Cloudflare: a Cloudflare
-transform sets `X-Origin-Verify`, and `forwardingGateway.requiredHeaders` makes Azure
-demand it. `deploy-production.yml` writes that config at deploy time from a secret, rather
-than committing it, because this repository is public.
+Production is deliberately **not** behind Access. It is a public website.
 
-**Staging does not have it, and cannot.** `forwardingGateway` requires the Standard plan
-and staging is deliberately on Free to halve the hosting cost. This is the one change in
-the project that production receives untested — `tests/deploy-origin-lock.test.ts` runs
-`scripts/write-origin-lock.sh` and pins what can be checked without deploying, and the
-`Verify the lock from both sides` step checks the rest against the running site
-immediately after each release.
+### Where the deploy configuration lives
 
-#### If production returns 403, check Cloudflare first
+`wrangler.jsonc` is the source of truth for both Workers, and the environment is chosen at
+**build** time, not deploy time:
 
-The lock depends on a Cloudflare transform rule that lives outside this repository. If it
-is edited, disabled, narrowed, or a DNS record is switched to grey-cloud, Azure starts
-refusing every request and **nothing in this repo can tell you that** — the deploy was
-green, the code is fine.
+```bash
+CLOUDFLARE_ENV=staging npm run build     # resolves the staging block
+npx wrangler deploy -c dist/client/wrangler.json
+```
 
-Restoring the Cloudflare rule is the fast path: seconds, no build, no merge. Reverting the
-deploy is the slow one — a full `npm ci`, test, build and upload with the site down
-throughout, and it rests on the assumption that a deployment omitting the file clears a
-previously-applied `forwardingGateway`. **Reach for Cloudflare first.**
+`astro build` resolves one environment out of `wrangler.jsonc` and writes the result to
+`dist/client/wrangler.json`, which is the file `wrangler deploy` actually reads. That
+generated file has no environments left in it, so `wrangler deploy --env staging` reads
+plausibly and does nothing — the deploy would go to whichever Worker the build had already
+chosen. `tests/deploy-workers.test.ts` pins that each workflow sets `CLOUDFLARE_ENV`
+explicitly, in both directions, because the failure that costs something is a staging build
+landing on the Worker that serves `packsheet.io`.
 
-The rule must set `X-Origin-Verify` to exactly the value in the `SWA_ORIGIN_VERIFY` secret
-(production environment), and is scoped to `http.host eq "packsheet.io"` so the value is
-not broadcast to every other host on the zone.
+Two settings in that file are load-bearing:
 
-#### Rotating the secret: one deploy, and the header name alternates
+- **`workers_dev: false`** on both Workers. This is what keeps the site off
+  `*.packsheet-io.workers.dev`. Azure's equivalent hostname could not be turned off and
+  cost four releases, two shell scripts and a `forwardingGateway` header dance to work
+  around; here it is one boolean, and a test fails if it flips.
+- **`preview_urls`** — off on production, on for staging. Preview URLs are how a pull
+  request gets a reviewable build; on production they would be an unlisted copy of the
+  live site.
 
-`requiredHeaders` is conjunctive — Azure demands _all_ listed headers — so "old value OR
-new value" cannot be expressed on **one** header name. Changing either side alone is an
-outage: update the secret first and Cloudflare still sends the old value; update Cloudflare
-first and the deployed config still demands the old one.
+### Database
 
-The way through is to rotate the **name** as well as the value, alternating between two
-names forever: `X-Origin-Verify` → `X-Origin-Verify-Alt` → `X-Origin-Verify` → … Each
-rotation is a single deploy, and the name you end on is simply the other one.
+Schema lives in `supabase/migrations/` and is applied by the deploy workflows, before
+the Worker is deployed, so a release never serves code against a schema that has not
+caught up. `supabase db push` applies only what the target has not recorded, so
+re-running a release is a no-op rather than a replay.
 
-1. **Cloudflare only.** Add a second header — the _other_ name — carrying the new value,
-   leaving the current one in place. Production ignores it; it demands only the current
-   name, which is unchanged. Nothing has moved yet.
-2. **One deploy.** Update `SWA_ORIGIN_VERIFY` to the new value, and change `HEADER_NAME`
-   to the other name in **both** `scripts/write-origin-lock.sh` **and**
-   `tests/deploy-origin-lock.test.ts`. Both, or the suite goes red. The duplication is
-   deliberate: a test importing the constant from the script would pin nothing.
-   Deploy. Production now demands only the new header, which Cloudflare is already sending.
-3. **Cloudflare only.** Delete the old header.
+There are two hosted projects — production and staging — with separate keys and
+separate data. Neither ref appears in this repository; CI selects between them from an
+environment-scoped secret.
 
-Never skip to step 3.
+For local work you do not need either of them. `supabase start` runs the whole stack in
+Docker:
 
-**If you change `HEADER_NAME` in only one of the two files, nothing breaks in
-production.** `deploy-production.yml` runs `npm test` before the build and before the
-config is written, so the job fails at the test step: nothing is built, nothing is
-written, nothing is uploaded. The live deployment keeps the config it already had, which
-demands the old header — and step 1 left Cloudflare still sending it. **The site stays
-up.** Fix the second file and deploy again; there is no incident here, and no reason to
-reach for a revert.
+```bash
+supabase start                        # local Postgres, Auth, PostgREST, Studio
+supabase migration new <name>         # create the next migration
+supabase db reset                     # replay every migration from empty
+```
 
-The value itself must contain no whitespace — not even a trailing newline, which is easy
-to introduce by pasting into the GitHub secrets UI. `write-origin-lock.sh` refuses rather
-than trimming, so that mistake fails the build instead of silently deploying a header
-value Cloudflare can never match.
+`supabase db reset` is the check that matters before opening a pull request: it proves
+the migration runs from a clean database rather than only against the state your
+machine happens to be in. There are no down-migrations, and recovery from a bad
+migration is another migration.
 
 ### What still is not covered
 
-`Verify the lock from both sides` runs on every production deploy, so a lock that is
-already broken is caught within a minute of a release. Nothing checks **between**
-releases: if the Cloudflare rule is changed on a quiet Tuesday, the site starts refusing
-everyone and no deploy runs to notice. An external uptime monitor on `packsheet.io` is
-the missing third leg, and is not yet set up.
+The production deploy checks that `packsheet.io` answers 200 with HTML and an indexable
+`robots.txt` immediately after each release, so a broken release is loud within a minute.
+Nothing checks **between** releases: if something breaks on a quiet Tuesday, no deploy runs
+to notice. An external uptime monitor is the missing third leg, and is not yet set up.
+
+Pull request previews share the **staging** database rather than getting one of their own.
+A Supabase branch per pull request needs the Pro plan; the organisation is on Free. Nothing
+reads a database yet, so this costs nothing today, but it is a gap rather than a decision.
 
 ## Design system
 

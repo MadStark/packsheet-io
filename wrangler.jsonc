@@ -1,0 +1,113 @@
+/**
+ * Cloudflare Workers configuration.
+ *
+ * This file is the source of truth for both environments. `astro build` reads it
+ * through @astrojs/cloudflare, resolves ONE environment — selected by the
+ * CLOUDFLARE_ENV variable — and writes the resolved result to
+ * dist/client/wrangler.json. That generated file is what `wrangler deploy`
+ * consumes, and it carries no environments of its own, so `wrangler deploy
+ * --env staging` does nothing useful: by deploy time the choice has already been
+ * made. The environment is a BUILD input here, not a deploy flag.
+ *
+ * Both environments are named explicitly, including production. The top level
+ * would serve as production by default, but then "no CLOUDFLARE_ENV" would
+ * silently mean production, and the failure that costs something is a staging
+ * build reaching the production Worker. tests/deploy-workers.test.ts pins that
+ * each workflow sets the variable it means.
+ */
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+
+  "name": "packsheet-io",
+
+  // Pinned, not "today". Bumping it changes runtime semantics — an unpinned or
+  // silently-moving date means the runtime under a release differs from the one
+  // the tests ran against, which is the whole failure mode compatibility dates
+  // exist to prevent. Move it deliberately, in its own commit, with a build.
+  //
+  // The ceiling is the local workerd, not the calendar: `astro build`
+  // prerenders inside miniflare's workerd binary, and a date newer than that
+  // binary supports fails the BUILD with "newest date supported by this server
+  // binary is ...". So this can only move when wrangler is upgraded, which is
+  // the right coupling — it means the date is never ahead of a runtime that has
+  // actually run the site.
+  "compatibility_date": "2026-08-08",
+
+  // workerd is not Node. Every dependency in this project is Web-API clean
+  // today (astro, vue, tailwind), and @supabase/ssr is built on fetch/Request/
+  // Response rather than node sockets, so nothing needs this yet — but the flag
+  // is cheap, and the alternative is discovering a missing node: builtin at
+  // deploy time rather than at build time.
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Included on Workers Paid: 20M log events a month. The reason the Azure plan
+  // needed a daily cap on Application Insights on day one does not arise here.
+  "observability": { "enabled": true },
+
+  // Astro emits the static files here and the on-demand entry (when one exists)
+  // into dist/server. Every route is prerendered today, so this deploy is
+  // assets-only and there is no Worker script to run — static asset requests are
+  // free and unlimited, which is the reason the 100 GB Static Web Apps wall
+  // stops existing. The first `export const prerender = false` adds a script
+  // with no change needed here.
+  "assets": {
+    "directory": "./dist/client",
+
+    // 404s serve Astro's generated 404 page rather than the single-page-app
+    // fallback, which would answer 200 with the home page for every unknown
+    // URL — including, eventually, /p/<id> for a pack that does not exist. A
+    // share link that silently renders the landing page instead of "not found"
+    // is both a bad read and a search-indexable duplicate.
+    "not_found_handling": "404-page",
+  },
+
+  "env": {
+    "production": {
+      "name": "packsheet-io",
+
+      // The one line that makes Ref 46 stop existing.
+      //
+      // Azure's *.azurestaticapps.net hostname could not be turned off, served
+      // the same build as the custom domain, and bypassed Cloudflare entirely —
+      // which cost four releases, two shell scripts and a forwardingGateway
+      // header dance to work around. Workers simply does not publish the worker
+      // on packsheet-io.workers.dev when this is false, so there is no second
+      // hostname to lock. Setting it true re-creates that whole problem in one
+      // keystroke, which is why a test asserts it.
+      "workers_dev": false,
+
+      // Production must have exactly one URL. Version preview URLs are a per-PR
+      // review affordance and staging turns them on below; on production they
+      // would be an unlisted, unindexed, un-gated copy of the live site — the
+      // same shape of problem as the Azure hostname, self-inflicted.
+      "preview_urls": false,
+
+      "observability": { "enabled": true },
+      "assets": {
+        "directory": "./dist/client",
+        "not_found_handling": "404-page",
+      },
+    },
+
+    "staging": {
+      "name": "packsheet-io-staging",
+
+      // Same reasoning as production: staging.packsheet.io is the only hostname
+      // that should answer, and it is the one Cloudflare Access gates.
+      "workers_dev": false,
+
+      // The exception, and the reason previews live on staging rather than on
+      // production. `wrangler versions upload` mints
+      // <version>-packsheet-io-staging.packsheet-io.workers.dev for a pull
+      // request. Those URLs have their own Cloudflare Access application, so a
+      // preview is no more public than staging is.
+      "preview_urls": true,
+
+      "observability": { "enabled": true },
+      "assets": {
+        "directory": "./dist/client",
+        "not_found_handling": "404-page",
+      },
+    },
+  },
+}

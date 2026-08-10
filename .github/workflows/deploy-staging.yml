@@ -1,7 +1,14 @@
 name: Deploy staging
 
 # staging is the integration branch and always holds the latest in-progress work.
-# Staging is the Free-tier Static Web App.
+# It deploys to the packsheet-io-staging Worker, which is a separate script from
+# production with its own settings — not a "slot" or a preview of the same one.
+#
+# staging.packsheet.io sits behind Cloudflare Access, which stops an unlisted
+# visitor at the edge BEFORE the Worker executes. That gate lives in Cloudflare,
+# not in this repository, so nothing here can weaken it and nothing here can be
+# read as evidence it is still on. tests/deploy-workers.test.ts pins what this
+# file controls; the Access policy is verified against the running site.
 
 on:
   push:
@@ -38,17 +45,58 @@ jobs:
       # what protects the artifact. Costs ~25s and must stay ahead of the build.
       - run: npm test
 
-      - name: Build
-        # Deliberately not "production", so robots.txt emits Disallow: / and staging
-        # never competes with production in search results.
+      # Before the build and before the deploy, so the schema a release needs is in
+      # place by the time that release can serve a request against it. The reverse
+      # order is a window — however short — in which new code queries a column that
+      # does not exist yet.
+      #
+      # `db push` applies only migrations the target has not recorded, so re-running a
+      # release is a no-op rather than a replay. It has no down-migrations and no
+      # rollback: recovery from a bad migration is another migration.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      - name: Apply database migrations
         env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          # From a secret, not this file. The two project refs are the only thing
+          # standing between "migrate staging" and "migrate production", and this
+          # repository is public.
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$PROJECT_REF"
+          supabase db push
+
+      - name: Build
+        env:
+          # Deliberately not "production", so robots.txt emits Disallow: / and staging
+          # never competes with production in search results.
           PUBLIC_SITE_ENV: staging
+
+          # Selects which block of wrangler.jsonc applies. This is a BUILD-time
+          # choice, not a deploy-time one: @astrojs/cloudflare resolves the named
+          # environment and writes the result to dist/client/wrangler.json, which is
+          # the file the deploy step consumes. Passing `--env staging` to wrangler
+          # instead does nothing — the generated config has no environments left in
+          # it — and the deploy would silently go to the PRODUCTION Worker.
+          CLOUDFLARE_ENV: staging
         run: npm run build
 
-      - name: Deploy to Azure Static Web Apps
-        uses: Azure/static-web-apps-deploy@v1
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v4
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_SWA_DEPLOYMENT_TOKEN_STAGING }}
-          action: upload
-          app_location: dist
-          skip_app_build: true
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Pinned to the version in package-lock.json rather than left to float.
+          # The build and the deploy are two different wrangler invocations that must
+          # agree about the config format; letting the action pick its own latest is
+          # the same class of drift .nvmrc exists to prevent. deploy-workers.test.ts
+          # fails if this and the lockfile disagree.
+          wranglerVersion: '4.120.0'
+          # -c, not the action's `environment:` input. See the CLOUDFLARE_ENV comment
+          # above: by this point the environment is already baked into the generated
+          # config, and `--env` would look correct while doing nothing.
+          command: deploy -c dist/client/wrangler.json

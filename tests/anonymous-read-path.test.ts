@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, sep, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -176,7 +175,14 @@ async function loadAstroBuild(): Promise<typeof AstroBuild> {
  *  itself cannot pass one and fail the other for different reasons. */
 async function buildModuleGraph(root: string): Promise<BuildGraph> {
   const build = await loadAstroBuild();
-  const outDir = mkdtempSync(join(tmpdir(), 'anon-read-path-'));
+  // Inside `root`, NOT in tmpdir(). @astrojs/cloudflare prerenders static pages in
+  // workerd, and workerd cannot reach a path outside the project it was given: an
+  // outDir under /var/folders fails the build with "The Workers runtime failed to
+  // start … internal error", which reads as a broken toolchain rather than as a
+  // misplaced directory. Still a fresh directory per build, still removed in the
+  // `finally` below, so the property that matters — no build output left behind, and
+  // in particular dist/ never clobbered — is unchanged.
+  const outDir = mkdtempSync(join(root, '.astro-build-out-'));
   const passGraphs: PassGraph[] = [];
 
   // A minimal Rollup plugin: it doesn't transform anything, it just reads the
