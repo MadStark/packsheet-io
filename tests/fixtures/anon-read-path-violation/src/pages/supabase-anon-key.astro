@@ -1,0 +1,16 @@
+---
+// The control case for Invariant C, and an acceptance criterion of the rule rather than
+// a nicety: a page that uses Supabase, says so in its own copy, and reads the
+// publishable anon key must stay perfectly legal.
+//
+// The anon key is public by design — it ships in the browser bundle of every Supabase
+// site there is — and row-level security is what confines what it can read. This IS the
+// anonymous read path; it is how anonymous reads happen at all. A rule phrased as "no
+// Supabase outside the choke point" would fail this page, and the first person to hit
+// that would be right to delete the rule. Invariant C is about the key, not the package,
+// and this page is what holds it to that.
+const supabaseUrl = import.meta.env.PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.PUBLIC_SUPABASE_ANON_KEY;
+---
+
+<p>Supabase anonymous read: {supabaseUrl && supabaseAnonKey ? 'configured' : 'absent'}</p>

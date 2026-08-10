@@ -1,0 +1,14 @@
+---
+// Invariant C, shape #2: the same key through `process.env` instead of
+// `import.meta.env`. A separate fixture case rather than a variation on the one next
+// to it, because the two are read by different machinery — Vite rewrites
+// `import.meta.env.X` during transform, `process.env.X` it leaves alone — and a check
+// that happened to be looking at the rewritten form only would catch one and miss the
+// other while appearing to cover both.
+//
+// This is also the spelling a server-side snippet copied out of Supabase's own docs
+// arrives in.
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+---
+
+<p>{serviceRoleKey ? 'configured' : 'absent'}</p>

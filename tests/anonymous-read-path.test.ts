@@ -6,24 +6,33 @@ import { createRequire } from 'node:module';
 import type { build as AstroBuild } from 'astro';
 
 /**
- * The anonymous read path must never reach Clerk.
+ * Two things must never be reachable from the anonymous read path: an auth SDK that
+ * bills per user, and the database key that turns row-level security off.
  *
- * Auth providers price by monthly active user, not by request or by compute — and
- * this site's traffic is the opposite of what that pricing assumes. Most visitors
- * are strangers opening a shared pack list from a Reddit link; they never sign in.
- * If Clerk were invoked on that path, every one of those anonymous reads counts as
- * a MAU. At 250k monthly users that is roughly $6,000/month on Microsoft Entra
- * External ID, or $3,000-4,000/month on Clerk, against a compute bill of about
- * $9/month for serving the same traffic as static pages. One accidental import is
- * the entire gap between those numbers, and nothing about a stray `import { x } from
- * '@clerk/...'` looks dangerous in a code review — it type-checks, it builds, the
- * page still renders. The cost only shows up on an invoice, weeks later, from a
- * provider that cannot be un-billed retroactively.
+ * The first is a cost problem. Auth providers price by monthly active user, not by
+ * request or by compute — and this site's traffic is the opposite of what that pricing
+ * assumes. Most visitors are strangers opening a shared pack list from a Reddit link;
+ * they never sign in. If Clerk were invoked on that path, every one of those anonymous
+ * reads counts as a MAU. At 250k monthly users that is roughly $6,000/month on Microsoft
+ * Entra External ID, or $3,000-4,000/month on Clerk, against a compute bill of about
+ * $9/month for serving the same traffic as static pages. One accidental import is the
+ * entire gap between those numbers, and nothing about a stray `import { x } from
+ * '@clerk/...'` looks dangerous in a code review — it type-checks, it builds, the page
+ * still renders. The cost only shows up on an invoice, weeks later, from a provider that
+ * cannot be un-billed retroactively.
  *
- * So this file enforces two invariants at build time, by building the real site and
- * inspecting the actual Rollup module graph Astro produces — not by grep, which
- * cannot see through a re-export or an aliased import, and not by convention, which
- * relies on every future PR author having read this comment.
+ * The second is an authorization problem, and it is sharper. Anonymous reads go through
+ * Supabase with the publishable `anon` key, which is public by design and confined by
+ * row-level security to the rows meant to be public. `SUPABASE_SERVICE_ROLE_KEY` bypasses
+ * RLS entirely. It is not a stronger key; it is the absence of the authorization
+ * boundary. Reachable from a route an anonymous visitor can load, it makes every RLS
+ * policy in the database decorative — the database stops being the thing that says no,
+ * and the code has to remember again, on every query, forever.
+ *
+ * So this file enforces three invariants at build time, by building the real site and
+ * inspecting the actual Rollup module graph Astro produces — not by grep, which cannot
+ * see through a re-export or an aliased import, and not by convention, which relies on
+ * every future PR author having read this comment.
  *
  * Invariant A: no module outside src/lib/auth/ may import anything under
  * src/lib/auth/. Not "no anonymous route may transitively reach it" — an EDGE rule,
@@ -41,10 +50,39 @@ import type { build as AstroBuild } from 'astro';
  * file at all, and scoping this to first-party importers exempts precisely it. See
  * checkClerkChokePoint.
  *
- * What neither invariant can see, stated plainly because the rest of this file invites
- * the assumption that it is airtight: a module graph contains only what the bundler
- * resolved. `<script is:inline src="https://js.clerk.com/...">` in a .astro file, or a
- * vendored SDK dropped into public/, produce ZERO graph edges — and Clerk ships a
+ * Invariant C: NO module in the build graph outside src/lib/auth/ may reference the
+ * identifier `SUPABASE_SERVICE_ROLE_KEY`. This is not Invariant B with the package name
+ * swapped, and reading it that way would break the site. `@supabase/supabase-js` with the
+ * `anon` key BELONGS on the anonymous read path — it is how anonymous reads happen at
+ * all — so the package cannot be what is banned. The rule is about the KEY. It is scoped
+ * to the whole graph for the same reason Invariant B is, and that scoping is affordable
+ * because it was measured rather than hoped: neither @supabase/supabase-js@2.112.2 nor
+ * @supabase/ssr@0.12.4 contains the string SERVICE_ROLE anywhere, so this does not go red
+ * on contact when those land (Ref 49). See checkServiceRoleKey.
+ *
+ * A module graph tells you what SHIPS; it cannot tell you what a module says. So
+ * Invariant C needs source text, correlated with graph membership: the graph recorder
+ * below also carries a `transform` hook, so every module the build actually processed is
+ * scanned, and only modules that are in the graph are ever checked. Text is also where
+ * its limits come from, and they are worth stating before the code implies otherwise:
+ *
+ *   - A name assembled at runtime is invisible. `env[SEGMENTS.join('_')]` is not the
+ *     identifier and never will be to a scanner; the fixture's src/lib/runtime-named-key.ts
+ *     pins that as the documented boundary rather than leaving it to be discovered.
+ *     (`env['SUPABASE_' + 'SERVICE_ROLE_KEY']` is a different case and IS caught — esbuild
+ *     folds adjacent string literals during transform, so the scan sees the whole name.)
+ *   - A module with no file on disk that the transform hook never saw is a module this
+ *     check has no text for at all. Anything backed by a file is scanned from the file
+ *     regardless, so that gap is narrow, but it is not empty.
+ *   - A comment counts. The check cannot tell code from a comment or from a string, so a
+ *     comment naming the variable fails exactly as an assignment does — describe the key
+ *     instead of naming it. Deliberate: stripping comments means depending on a parser
+ *     being correct, and this guardrail has to stay simpler than the thing it guards.
+ *
+ * What none of the three invariants can see, stated plainly because the rest of this file
+ * invites the assumption that it is airtight: a module graph contains only what the
+ * bundler resolved. `<script is:inline src="https://js.clerk.com/...">` in a .astro file,
+ * or a vendored SDK dropped into public/, produce ZERO graph edges — and Clerk ships a
  * browser bundle meant to be used exactly that way. That is a real boundary of any
  * build-graph check, not a defect in this one. It is covered here by a separate,
  * independent assertion that scans the HTML the build actually emitted for known auth
@@ -60,11 +98,12 @@ import type { build as AstroBuild } from 'astro';
  * imports auth, so Invariant A's real-repo assertion passes trivially and proves
  * nothing about the checker on its own. Two things answer that. The self-test lower
  * down in this file runs the exact same functions against a fixture project that DOES
- * violate the invariant, in eight different ways, and asserts each is caught with the
- * right chain and the right message. And the real-site block opens with a tripwire
- * asserting its graph is genuinely populated, because every other assertion there is
- * "this derived list is empty" — which an empty graph satisfies just as well as a
- * clean one.
+ * violate the invariants, in eight ways for Invariant A and three more for Invariant C,
+ * and asserts each is caught with the right chain, the right lines and the right message.
+ * And the real-site block opens with a tripwire asserting its graph is genuinely
+ * populated and its transform hook genuinely fired, because every other assertion there
+ * is "this derived list is empty" — which an empty graph, and a transform hook that
+ * silently stopped running, satisfy just as well as a clean site does.
  *
  * Mechanism notes, from spiking this before writing it:
  *
@@ -88,6 +127,15 @@ import type { build as AstroBuild } from 'astro';
  *   here cannot drift from the routes the build actually produces. Under the
  *   edge-based rule they are no longer what the check is rooted at — they are used
  *   only to render a human-readable chain in a failure message.
+ * - The `transform` hook Invariant C rides on fires once per module PER PASS, so the
+ *   same module is scanned two or three times in one build; its records are deduped by
+ *   line and snippet, or a failure message would repeat itself two or three times over.
+ *   The code it is handed is also not the file on disk — it is what the plugin chain
+ *   produced, with comments stripped and, for a .astro file, the frontmatter relocated,
+ *   so its line numbers do not correspond to the file's. Measured against the fixture: a
+ *   reference on line 11 of a page is reported at line 3 of the transformed module. That
+ *   is why checkServiceRoleKey prefers the file's own text when there is a file; see
+ *   there.
  */
 
 const repoPath = (p: string) => fileURLToPath(new URL(`../${p}`, import.meta.url));
@@ -124,6 +172,13 @@ type PassGraph = Map<string, PassEntry>;
  *  paths where a pass did resolve them. */
 type ModuleGraph = Map<string, Set<string>>;
 
+/** One place a module names the service-role key: which line, and the line itself so a
+ *  failure message can show the reader what it found rather than only where. */
+interface ServiceRoleRef {
+  line: number;
+  snippet: string;
+}
+
 interface BuildGraph {
   graph: ModuleGraph;
   /** route name (e.g. "src/pages/index") -> absolute path of the real page file it
@@ -133,6 +188,17 @@ interface BuildGraph {
    *  because the module graph cannot see a `<script src="https://...">`; see
    *  checkEmittedHtmlForAuthCdn and the header comment. */
   emittedHtml: Map<string, string>;
+  /** module id -> every line of it that names SUPABASE_SERVICE_ROLE_KEY, as the
+   *  `transform` hook saw the module. Deduped across passes. Empty for a module the
+   *  hook saw and found clean AND for one it never saw — which is why `transformedIds`
+   *  exists next to it. */
+  serviceRoleRefs: Map<string, ServiceRoleRef[]>;
+  /** Every id the `transform` hook was called for, in any pass. The evidence that the
+   *  hook fired at all: without it, a hook that silently stopped running would leave
+   *  `serviceRoleRefs` empty, and "no module references the key" would be trivially,
+   *  permanently true. The real-site tripwire asserts this is non-empty for exactly
+   *  that reason. */
+  transformedIds: Set<string>;
 }
 
 /** Module ids sometimes carry a query suffix (e.g. a font imported as `...woff2?
@@ -142,6 +208,42 @@ interface BuildGraph {
 function stripQuery(id: string): string {
   const i = id.indexOf('?');
   return i === -1 ? id : id.slice(0, i);
+}
+
+/** The identifier Invariant C bans, word-bounded so `MY_SUPABASE_SERVICE_ROLE_KEY_NAME`
+ *  is not a match and `SUPABASE_SERVICE_ROLE_KEY` inside `env.SUPABASE_SERVICE_ROLE_KEY`
+ *  or `{ SUPABASE_SERVICE_ROLE_KEY }` is. */
+const SERVICE_ROLE_KEY_RE = /\bSUPABASE_SERVICE_ROLE_KEY\b/g;
+
+/** Longest snippet a failure message will print for one line. A bundled dependency can
+ *  be one line of several hundred kilobytes, and a guardrail whose failure output has to
+ *  be scrolled past is one people stop reading. */
+const SNIPPET_LIMIT = 120;
+
+/** Every line of `code` that names the key, one ref per line however many times it
+ *  appears there. `String.prototype.match` resets a global regex's `lastIndex`, so the
+ *  shared SERVICE_ROLE_KEY_RE carries no state between calls — `RegExp.test` would. */
+function scanForServiceRoleKey(code: string): ServiceRoleRef[] {
+  const refs: ServiceRoleRef[] = [];
+  code.split('\n').forEach((line, index) => {
+    if (line.match(SERVICE_ROLE_KEY_RE) === null) return;
+    const trimmed = line.trim();
+    refs.push({
+      line: index + 1,
+      snippet: trimmed.length > SNIPPET_LIMIT ? `${trimmed.slice(0, SNIPPET_LIMIT)}…` : trimmed,
+    });
+  });
+  return refs;
+}
+
+/** The file's own text, or null when the id is not a readable file — a virtual module, a
+ *  bare specifier a pass left unresolved, or a directory-shaped id. `throwIfNoEntry:
+ *  false` rather than a try/catch so a genuine read failure on something that IS a file
+ *  still throws instead of being quietly scanned as empty. */
+function readFileForId(id: string): string | null {
+  if (hasNoFileOnDisk(id)) return null;
+  if (statSync(id, { throwIfNoEntry: false })?.isFile() !== true) return null;
+  return readFileSync(id, 'utf8');
 }
 
 /** A page entry module imports exactly the real page file — see the mechanism
@@ -184,12 +286,38 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
   // in particular dist/ never clobbered — is unchanged.
   const outDir = mkdtempSync(join(root, '.astro-build-out-'));
   const passGraphs: PassGraph[] = [];
+  const serviceRoleRefs = new Map<string, ServiceRoleRef[]>();
+  const transformedIds = new Set<string>();
 
-  // A minimal Rollup plugin: it doesn't transform anything, it just reads the
-  // graph Rollup has already built and hands it to buildEnd, once per pass.
+  // A minimal Rollup plugin: it changes nothing. It reads the graph Rollup has already
+  // built and hands it to buildEnd once per pass, and it reads — without rewriting — the
+  // text of every module the build processes, because the graph alone says what ships
+  // and never says what a module contains.
   function graphRecorderPlugin() {
     return {
       name: 'anon-read-path-graph-recorder',
+
+      // Returning null leaves the module exactly as the previous plugin left it; this
+      // hook is here to observe, and a `transform` that returned a value would put this
+      // test file in the build's own critical path.
+      //
+      // Fires once per module per Rollup pass, so the same id arrives two or three times
+      // in one build with identical findings — deduped by line and snippet so a failure
+      // message names each line once.
+      transform(code: string, id: string): null {
+        const file = stripQuery(id);
+        transformedIds.add(file);
+        const found = scanForServiceRoleKey(code);
+        if (found.length === 0) return null;
+        const refs = serviceRoleRefs.get(file) ?? [];
+        for (const ref of found) {
+          if (refs.some((seen) => seen.line === ref.line && seen.snippet === ref.snippet)) continue;
+          refs.push(ref);
+        }
+        serviceRoleRefs.set(file, refs);
+        return null;
+      },
+
       buildEnd(this: {
         getModuleIds(): IterableIterator<string>;
         getModuleInfo(
@@ -250,7 +378,7 @@ async function buildModuleGraph(root: string): Promise<BuildGraph> {
     }
   }
 
-  return { graph, pageEntries, emittedHtml };
+  return { graph, pageEntries, emittedHtml, serviceRoleRefs, transformedIds };
 }
 
 /** Every .html file under `outDir`, keyed by its path relative to it. Astro's default
@@ -598,6 +726,143 @@ function checkClerkChokePoint(graph: ModuleGraph, root: string): ClerkViolation[
   );
 }
 
+interface ServiceRoleViolation {
+  /** The module outside src/lib/auth/ that names the key. */
+  module: string;
+  /** Every line of it that does, in file order. */
+  refs: ServiceRoleRef[];
+  message: string;
+}
+
+/** The consequence, in the words that make it act-on-able. Deliberately NOT "could allow
+ *  unauthorised access": that phrasing is vague enough to argue with ("nobody knows the
+ *  URL", "it's only on an admin page"), and an argument is what gets a check deleted to go
+ *  green. What is true is narrower and harder to dismiss. */
+const SERVICE_ROLE_ARGUMENT =
+  'RLS bypassed. `service_role` bypasses row-level security ENTIRELY — it is not a stronger ' +
+  'key, it is the absence of the authorization boundary. Reachable from a route an anonymous ' +
+  'visitor can load, every RLS policy in this database becomes decorative: the database stops ' +
+  'being the thing that says no, and the code has to remember again, on every query, forever. ' +
+  'Nothing about that shows up in the rendered page.';
+
+/** The half of the rule a reader will get wrong if only the ban is stated. Somebody who
+ *  concludes "Supabase is not allowed here" will go and remove the thing that makes the
+ *  anonymous read path work at all. */
+const ANON_KEY_IS_THE_RIGHT_KEY =
+  'This is a rule about the KEY, not about Supabase. `@supabase/supabase-js` with the ' +
+  'publishable `anon` key belongs on this path — it is how anonymous reads happen at all. ' +
+  'That key is public by design, safe to ship in a browser bundle, and confined by RLS to ' +
+  'the rows that are meant to be public. PUBLIC_SUPABASE_ANON_KEY is the correct key here and ' +
+  'this check has nothing to say about it.';
+
+const REACH_IT_THROUGH_THE_CHOKE_POINT =
+  'If something genuinely needs the privileged key, it belongs behind src/lib/auth/ — the one ' +
+  'directory this rule exempts, and where a service-role client would live — and is reached ' +
+  'from there rather than read here.';
+
+/** Said in the failure itself because the alternative is somebody spending an afternoon
+ *  concluding the check is broken. See the header comment for why it is not worth fixing. */
+const A_COMMENT_IS_A_REFERENCE =
+  'This check reads text and cannot tell code from a comment or from a string literal, so a ' +
+  'comment that spells the variable out fails exactly as an assignment does. Describe the key ' +
+  'instead of naming it. That is a deliberate choice rather than an oversight: not counting ' +
+  'comments means depending on a parser being correct, and this guardrail has to stay simpler ' +
+  'than the thing it guards.';
+
+/** The module with no file behind it, again the case whoever hits this is least equipped to
+ *  act on — and here it is worse than for Invariant B, because the message carries a line
+ *  number that points into text that exists nowhere on disk. */
+const GENERATED_MODULE_EXPLANATION =
+  'That module is not a file in this repository — it is one the build generates, so the line ' +
+  'number above refers to the generated text and there is nothing to open at it. Grepping ' +
+  'src/ will find nothing. Look at what injects that module (astro.config.mjs and the ' +
+  'integrations it lists are the usual source) rather than for a file.';
+
+function serviceRoleViolationMessage(root: string, module: string, refs: ServiceRoleRef[]): string {
+  const rel = renderId(root, module);
+  const lines = [
+    `${rel} references SUPABASE_SERVICE_ROLE_KEY, which no module outside src/lib/auth/ may do:`,
+    ...refs.map((ref) => `    ${rel}:${ref.line}\n        ${ref.snippet}`),
+    '',
+  ];
+  if (hasNoFileOnDisk(module)) lines.push(GENERATED_MODULE_EXPLANATION, '');
+  lines.push(
+    SERVICE_ROLE_ARGUMENT,
+    '',
+    ANON_KEY_IS_THE_RIGHT_KEY,
+    '',
+    REACH_IT_THROUGH_THE_CHOKE_POINT,
+    '',
+    A_COMMENT_IS_A_REFERENCE,
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Invariant C, as a pure function over an already-built graph: no module in the graph
+ * outside `<root>/src/lib/auth/` may reference the identifier SUPABASE_SERVICE_ROLE_KEY.
+ *
+ * The graph is what makes this different from `grep -r SUPABASE_SERVICE_ROLE_KEY src/`.
+ * Grep answers "does this string appear in the working tree", which is both too wide (a
+ * script under scripts/, a doc, a deleted-but-not-removed file) and too narrow (it never
+ * looks at the dependency that ships alongside your code). Iterating the graph answers
+ * the question that matters — does anything that SHIPS name this key — and it is the same
+ * union of the three Rollup passes both other invariants use, so a module that only the
+ * client pass resolves is in scope here too.
+ *
+ * The scoping is the whole graph rather than first-party src/, for Invariant B's reason
+ * restated: a dependency holding the key ships it exactly as first-party code would, and
+ * the fact that nobody here wrote the line makes it harder to notice, not cheaper. That is
+ * only affordable because it was measured — neither @supabase/supabase-js@2.112.2 nor
+ * @supabase/ssr@0.12.4 contains the string SERVICE_ROLE anywhere, so adding them (Ref 49)
+ * does not turn this red on contact and force somebody to gut it. If a future dependency
+ * legitimately names the key, exempt that package by name and say why here; do not narrow
+ * the rule to src/.
+ *
+ * Where the text comes from, and why it is not simply the transform record:
+ *
+ *   The `transform` hook is what proves a module was processed by this build, and it is
+ *   the only source of text for a module with no file on disk. But the code it is handed
+ *   is the plugin chain's output, not the file — comments are stripped and a .astro
+ *   file's frontmatter is relocated, so its line numbers are not the file's. Measured
+ *   against the fixture: a reference on line 11 of a page is reported at line 3. A
+ *   failure message that points at the wrong line is worse than one that points at none,
+ *   because the reader trusts it and goes looking. So when the id is backed by a file,
+ *   the file's own text is what gets scanned and reported.
+ *
+ *   That also subsumes the case where the hook never ran for a module — an externalised
+ *   or otherwise untransformed one. Its transform record is empty, which is
+ *   indistinguishable from "scanned and clean", and the file scan is what keeps that from
+ *   being a silent gap. What remains uncovered is a module with no file on disk that was
+ *   never transformed: there is no text for it anywhere. `transformedIds` is what makes
+ *   that set observable rather than imaginary.
+ *
+ *   The two sources are a union for DETECTION and a preference for DISPLAY: a module is
+ *   reported if either found something, and the file's lines are shown when the file has
+ *   any. A reference present only in the transformed text — an inlined define, a
+ *   generated wrapper — is still reported, with the caveat spelled out in the message.
+ */
+function checkServiceRoleKey(build: BuildGraph, root: string): ServiceRoleViolation[] {
+  const authDir = join(root, 'src', 'lib', 'auth') + sep;
+  const violations: ServiceRoleViolation[] = [];
+
+  for (const id of build.graph.keys()) {
+    if (id.startsWith(authDir)) continue;
+
+    const fileText = readFileForId(id);
+    const onDisk = fileText === null ? [] : scanForServiceRoleKey(fileText);
+    const refs = onDisk.length > 0 ? onDisk : (build.serviceRoleRefs.get(id) ?? []);
+    if (refs.length === 0) continue;
+
+    violations.push({ module: id, refs, message: serviceRoleViolationMessage(root, id, refs) });
+  }
+
+  // Sorted for the same reason the other two checkers sort: Map iteration order here is
+  // Rollup's module-discovery order, stable enough in practice to lull you and unstable
+  // enough to produce a diff nobody can review.
+  return violations.sort((a, b) => a.module.localeCompare(b.module));
+}
+
 interface CdnScriptViolation {
   /** outDir-relative path of the emitted HTML file. */
   file: string;
@@ -697,6 +962,13 @@ describe('the real site', () => {
     expect([...(realBuild.graph.get(indexEntry!) ?? [])].length).toBeGreaterThan(0);
     // The CDN scan below has the identical failure mode: nothing to scan passes it.
     expect(realBuild.emittedHtml.size).toBeGreaterThan(0);
+    // And so does Invariant C, through a different mechanism that the graph assertion
+    // above would not notice. The graph comes from `buildEnd`; the text Invariant C
+    // reads comes from `transform`. A hook renamed, mis-ordered, or dropped by a Vite
+    // version bump leaves the graph fully populated and `serviceRoleRefs` permanently
+    // empty — at which point "no module references the key" is true of nothing at all,
+    // forever, and stays green. This is the assertion that fails instead.
+    expect(realBuild.transformedIds.size).toBeGreaterThan(0);
   });
 
   it('nothing outside src/lib/auth/ imports the auth choke point', () => {
@@ -711,6 +983,16 @@ describe('the real site', () => {
   // `astro add @clerk/astro` produces has a virtual module as its importer.
   it('nothing outside src/lib/auth/ imports @clerk/* (dormant: Clerk is not yet a dependency)', () => {
     const violations = checkClerkChokePoint(realBuild.graph, repoRoot);
+    expect(violations.map((v) => v.message)).toEqual([]);
+  });
+
+  // Invariant C. Unlike the Clerk assertion this one is not dormant — Supabase is the
+  // decided auth and data provider, so the identifier it looks for is one somebody on
+  // this project will genuinely reach for. It is empty today and must stay empty: the
+  // only file in the repo that names the key is src/lib/auth/index.ts, which is inside
+  // the exempt directory and describes what may live there.
+  it('nothing outside src/lib/auth/ references SUPABASE_SERVICE_ROLE_KEY', () => {
+    const violations = checkServiceRoleKey(realBuild, repoRoot);
     expect(violations.map((v) => v.message)).toEqual([]);
   });
 
@@ -746,6 +1028,17 @@ const FIXTURE_VIOLATING_IMPORTERS = [
 const FIXTURE_IMPORTERS_WITH_NO_PAGE_CHAIN = [
   'src/components/ClientOnlyAuth.vue',
   'src/middleware/index.ts',
+];
+
+/** The three modules the fixture expects Invariant C to report, in the order the checker
+ *  sorts them. Everything else in that build — including the fixture's anon-key page, its
+ *  runtime-assembled name, the module inside its choke point, and every one of the ~200
+ *  node_modules modules the build pulls in — must stay off this list. None of these three
+ *  imports the choke point, which is what keeps FIXTURE_VIOLATING_IMPORTERS at eight. */
+const FIXTURE_SERVICE_ROLE_MODULES = [
+  'src/lib/service-role-config.ts',
+  'src/pages/service-role-import-meta.astro',
+  'src/pages/service-role-process-env.astro',
 ];
 
 describe('the checker, run against a fixture that actually violates Invariant A', () => {
@@ -973,6 +1266,178 @@ describe('the checker, run against a fixture that actually violates Invariant A'
       { file: join('cdn-script', 'index.html'), url: 'https://cdn.clerk.io/clerk.browser.js' },
     ]);
   });
+
+  /**
+   * Invariant C's self-test, nested inside this describe rather than standing next to it
+   * for one reason: `beforeAll` above runs a real `astro build`, and a sibling describe
+   * would need its own. One fixture project, extended, costs nothing per run; a second
+   * fixture project costs an entire build. That is also why none of the modules added for
+   * Invariant C imports the fixture's choke point — doing so would change the eight
+   * importers Invariant A's assertions above are pinned to.
+   */
+  describe('Invariant C, against the same fixture build', () => {
+    const findRef = (module: string) =>
+      checkServiceRoleKey(fixtureBuild, fixtureRoot).find((v) => rel(v.module) === module);
+    const id = (relPath: string) => join(fixtureRoot, relPath);
+
+    // Line numbers are computed from the fixture's own text rather than hardcoded. Not to
+    // avoid churn when a fixture comment is edited — that would be a fine reason on its
+    // own — but because hardcoding them proves nothing: the number this asserts has to be
+    // the line of THIS FILE ON DISK, and the only way to say that is to go and find it in
+    // the file. See the test below on why that distinction is load-bearing.
+    const sourceLineOf = (relPath: string, needle: string) =>
+      readFileSync(id(relPath), 'utf8')
+        .split('\n')
+        .findIndex((line) => line.includes(needle)) + 1;
+
+    it('flags a page that reads the key off import.meta.env', () => {
+      const page = 'src/pages/service-role-import-meta.astro';
+      const violation = findRef(page);
+
+      expect(violation).toBeDefined();
+      expect(violation!.refs).toEqual([
+        {
+          line: sourceLineOf(page, 'import.meta.env.SUPABASE_SERVICE_ROLE_KEY'),
+          snippet: 'const serviceRoleKey = import.meta.env.SUPABASE_SERVICE_ROLE_KEY;',
+        },
+      ]);
+    });
+
+    // The reported line has to be the line of the FILE, and for a .astro page it is not
+    // the line the transform hook saw: Astro's compiler strips the frontmatter comments
+    // and moves what is left, so the same reference lands many lines earlier in the text
+    // the plugin chain hands over. A message pointing at the wrong line is worse than one
+    // pointing at none, because the reader trusts it and goes looking at a comment.
+    //
+    // This asserts the two genuinely disagree, so the preference for the file's own text
+    // in checkServiceRoleKey is executed rather than merely intended. If a future Astro
+    // version starts preserving line numbers, this fails — and the right response is to
+    // delete this test, not to stop reading the file.
+    it('reports the line the file has, not the line the transformed module has', () => {
+      const page = 'src/pages/service-role-import-meta.astro';
+      const asTransformed = fixtureBuild.serviceRoleRefs.get(id(page));
+
+      expect(asTransformed).toBeDefined();
+      expect(asTransformed).toHaveLength(1);
+      expect(asTransformed![0].line).not.toBe(findRef(page)!.refs[0].line);
+    });
+
+    it('flags a page that reads the key off process.env', () => {
+      const page = 'src/pages/service-role-process-env.astro';
+      const violation = findRef(page);
+
+      expect(violation).toBeDefined();
+      expect(violation!.refs).toEqual([
+        {
+          line: sourceLineOf(page, 'process.env.SUPABASE_SERVICE_ROLE_KEY'),
+          snippet: 'const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;',
+        },
+      ]);
+    });
+
+    // A destructured binding in a library module: no member expression to spot, and not a
+    // page, so both the "look for property access" and the "check the routes" shortcuts
+    // fail here. The third ref is the comment at the bottom of that file, which is the
+    // documented behaviour rather than a miss — see A_COMMENT_IS_A_REFERENCE.
+    it('flags a destructured binding in a library module a page imports, comment line included', () => {
+      const module = 'src/lib/service-role-config.ts';
+      const violation = findRef(module);
+
+      expect(violation).toBeDefined();
+      expect(violation!.refs.map((ref) => ref.line)).toEqual([
+        sourceLineOf(module, 'const { SUPABASE_SERVICE_ROLE_KEY } = env;'),
+        sourceLineOf(module, 'return Boolean(SUPABASE_SERVICE_ROLE_KEY);'),
+        sourceLineOf(module, '// SUPABASE_SERVICE_ROLE_KEY'),
+      ]);
+      // Its page is clean and must stay unreported: the module is what holds the key.
+      expect(findRef('src/pages/service-role-config.astro')).toBeUndefined();
+    });
+
+    /**
+     * THE DOCUMENTED BOUNDARY, AND NOT A BUG. A name assembled at runtime is invisible to
+     * a text scan and always will be — catching it means evaluating the program.
+     *
+     * Two things are asserted here beyond "not flagged", because "not flagged" on its own
+     * is exactly what a module the checker never looked at also produces, and the two are
+     * indistinguishable without them: the module is in the build graph, and the transform
+     * hook actually ran for it. It is in scope, it was read, and it still comes out
+     * clean.
+     *
+     * Whoever narrows this boundary later: the case to beat is this file. Whoever widens
+     * it — a regex loose enough to match `SERVICE_ROLE` in fragments — should know that is
+     * how a guardrail starts failing on prose and gets deleted.
+     */
+    it('does NOT flag a key name assembled at runtime, which is the documented boundary', () => {
+      const module = 'src/lib/runtime-named-key.ts';
+
+      expect(fixtureBuild.graph.has(id(module))).toBe(true);
+      expect(fixtureBuild.transformedIds.has(id(module))).toBe(true);
+      expect(findRef(module)).toBeUndefined();
+    });
+
+    // The acceptance criterion the rule would be wrong without. A page that uses Supabase,
+    // says so in its copy, and reads the publishable anon key is the anonymous read path
+    // working as designed. A rule that failed this page would be deleted by the first
+    // person who hit it, and they would be right.
+    it('does NOT flag a page using the publishable anon key and naming Supabase', () => {
+      const page = 'src/pages/supabase-anon-key.astro';
+
+      expect(fixtureBuild.pageEntries.has('src/pages/supabase-anon-key')).toBe(true);
+      expect(readFileSync(id(page), 'utf8')).toContain('PUBLIC_SUPABASE_ANON_KEY');
+      expect(findRef(page)).toBeUndefined();
+    });
+
+    // The exemption, and it is the exemption doing the work rather than absence: the
+    // transform record shows this module really does name the key, and it is still not
+    // reported. Delete the `startsWith(authDir)` skip and this goes red.
+    it('does NOT flag a module inside src/lib/auth/ that references the key', () => {
+      const module = 'src/lib/auth/service-role.ts';
+
+      expect(fixtureBuild.graph.has(id(module))).toBe(true);
+      expect(fixtureBuild.serviceRoleRefs.get(id(module))?.length).toBeGreaterThan(0);
+      expect(findRef(module)).toBeUndefined();
+    });
+
+    // The other half of "not vacuous", and the assertion that fails if the scan ever
+    // starts matching something it should not — a fragment, a comment in a dependency, a
+    // page that merely imports a module holding the key. Note this covers the whole
+    // graph, node_modules included, so it is also the measurement behind the claim that
+    // the broad scoping costs nothing.
+    it('reports exactly those three modules, no more and no fewer', () => {
+      const violations = checkServiceRoleKey(fixtureBuild, fixtureRoot);
+      expect(violations.map((v) => rel(v.module))).toEqual(FIXTURE_SERVICE_ROLE_MODULES);
+    });
+
+    /**
+     * The message is the whole deliverable of a guardrail like this: it is read once, by
+     * somebody who did not write the rule, at the moment they most want to make it stop.
+     * So its content is pinned rather than left to whoever edits the strings next.
+     *
+     * The negative assertion is the important one. "Could allow unauthorised access" is
+     * the phrasing this message must never use — it is vague enough to argue with, and an
+     * argument is what turns a red build into a deleted check. What is true is narrower:
+     * RLS is bypassed, and every policy in the database becomes decorative.
+     */
+    it('the message says RLS is bypassed, that the anon key is fine, and what to do instead', () => {
+      const page = 'src/pages/service-role-import-meta.astro';
+      const message = findRef(page)!.message;
+
+      expect(message).toContain(
+        `${page}:${sourceLineOf(page, 'import.meta.env.SUPABASE_SERVICE_ROLE_KEY')}`,
+      );
+      expect(message).toContain('RLS bypassed');
+      expect(message).toContain('row-level security ENTIRELY');
+      expect(message).toContain('absence of the authorization boundary');
+      expect(message).toContain('decorative');
+      expect(message).not.toContain('unauthorised access');
+      expect(message).not.toContain('unauthorized access');
+
+      expect(message).toContain('PUBLIC_SUPABASE_ANON_KEY');
+      expect(message).toContain('public by design');
+      expect(message).toContain('src/lib/auth/');
+      expect(message).toContain('cannot tell code from a comment');
+    });
+  });
 });
 
 describe('findPageChain, on graphs whose insertion order disagrees with their sorted order', () => {
@@ -996,6 +1461,8 @@ describe('findPageChain, on graphs whose insertion order disagrees with their so
         ['src/pages/alpha', page('alpha')],
       ]),
       emittedHtml: new Map(),
+      serviceRoleRefs: new Map(),
+      transformedIds: new Set(),
     };
 
     expect(findPageChain(build, target)).toEqual([page('alpha'), target]);
@@ -1014,6 +1481,8 @@ describe('findPageChain, on graphs whose insertion order disagrees with their so
         ['src/pages/zebra', page('zebra')],
       ]),
       emittedHtml: new Map(),
+      serviceRoleRefs: new Map(),
+      transformedIds: new Set(),
     };
 
     expect(findPageChain(build, target)).toEqual([page('zebra'), target]);

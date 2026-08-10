@@ -1,0 +1,9 @@
+---
+// Here so src/lib/runtime-named-key.ts is genuinely in the build graph and genuinely
+// transformed. Without that this fixture would prove nothing: "not flagged" is exactly
+// what a module the checker never looked at also produces, and the two are
+// indistinguishable unless the module is demonstrably in scope.
+import { assembledPrivilegedKey } from '../lib/runtime-named-key';
+---
+
+<p>{assembledPrivilegedKey() ? 'configured' : 'absent'}</p>

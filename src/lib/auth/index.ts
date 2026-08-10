@@ -31,7 +31,7 @@
  * make a build go green; read the comment at the top of the test first.
  *
  * ---------------------------------------------------------------------------
- * WHAT CHANGED WITH SUPABASE, AND WHAT THIS FILE DOES NOT YET GUARD (Ref 48)
+ * WHAT CHANGED WITH SUPABASE (Ref 48), AND WHAT NOW GUARDS THE KEY (Ref 55)
  * ---------------------------------------------------------------------------
  *
  * Authentication is Supabase Auth, not Clerk. Clerk was never installed, and the
@@ -53,12 +53,25 @@
  *     boundary. It must never be reachable from a route an anonymous visitor can
  *     load, because there the database stops being the thing that says no.
  *
- * **That service_role rule is not enforced yet.** It is Ref 30's rewrite, and it is
- * the same shape as the import rule above: one more assertion in the same test,
- * failing the build if `SUPABASE_SERVICE_ROLE_KEY` appears anywhere in the share-page
- * route tree. Until it lands, this file's guarantee covers who may import auth code,
- * not which key that code holds. Do not read the green build as coverage of the
- * second thing.
+ * That second rule is now enforced, in the same test, as Invariant C: the build fails
+ * if ANY module in the graph outside this directory so much as names the identifier
+ * `SUPABASE_SERVICE_ROLE_KEY`. It is a rule about the key and not about the package —
+ * a page using `@supabase/supabase-js` with `PUBLIC_SUPABASE_ANON_KEY` is legal, and
+ * the fixture asserts that it stays legal. The whole build graph is in scope, not just
+ * first-party code, for the same reason Invariant B is: a dependency holding the key
+ * ships it exactly as our own code would.
+ *
+ * This directory is the one exemption, which makes it the only place a service-role
+ * client may live. It does not hold one today; when it does, it goes here, and every
+ * route that needs privileged data reaches it through this module rather than reading
+ * the key itself.
+ *
+ * Two limits of that check, so the green build is not read as more than it is. It reads
+ * source text, so a name assembled at runtime (`env[segments.join('_')]`) is invisible
+ * to it — closing that means evaluating the program. And for the same reason it cannot
+ * tell code from a comment: naming the variable in a comment fails the build exactly as
+ * an assignment does. This file may spell it out because this directory is exempt;
+ * anywhere else, describe the key rather than naming it.
  *
  * The corollary of an edge rule, and the thing to get right when adding files here:
  * this directory must contain NOTHING that an anonymous route could legitimately
@@ -67,8 +80,8 @@
  * with a $6,000 message — the kind of false positive that gets a guardrail weakened
  * or deleted rather than obeyed. Shared auth-adjacent *types* and *constants* belong
  * somewhere an anonymous route may import from (src/lib/, or the consuming module
- * itself). What lives here is only what must never be reachable: the SDK and the
- * code that calls it — and, once Ref 30 lands, the service-role client.
+ * itself). What lives here is only what must never be reachable: the SDK, the code
+ * that calls it, and the service-role client if one is ever needed.
  *
  * No auth SDK is installed yet (there are no consumers of this module today), so this
  * file currently exports nothing. It exists so the choke point — and the test that

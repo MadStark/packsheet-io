@@ -97,6 +97,13 @@ Two more that are less obvious:
   in the server module for a route-rooted walk to follow. It runs in the required CI job
   named `check`, which runs the tests as well as the `npm run check` script of the same
   name.
+- **The Supabase service-role key must never be reachable from that path either**, and the
+  same test fails if any module in the build graph outside `src/lib/auth/` so much as names
+  it. That one is not about cost: `service_role` bypasses row-level security entirely, so
+  every RLS policy in the database becomes decorative. Supabase itself is welcome here —
+  the publishable `anon` key is public by design and is how anonymous reads work at all.
+  The rule is about the key, not the package. The check reads source text and cannot tell
+  code from a comment, so describe the key rather than naming it.
 - **No third-party CDN for fonts or assets on reader-facing pages.** Someone reading a
   shared pack list should not have their IP disclosed to a third party to do it.
 
