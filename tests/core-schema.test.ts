@@ -318,7 +318,7 @@ describe('the public lookup', () => {
   it('can answer the slug lookup from that index', async () => {
     const plan = await adminSqlWith<{ 'QUERY PLAN': string }>(
       ['set enable_seqscan = off'],
-      `explain (costs off) select id from public.packs where slug = 'anything'::citext`,
+      `explain (costs off) select id from public.packs where slug = 'anything'::extensions.citext`,
     );
     const text = plan.map((row) => row['QUERY PLAN']).join('\n');
     expect(text).toMatch(/Index (Only )?Scan/);
