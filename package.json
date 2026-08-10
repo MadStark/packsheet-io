@@ -22,7 +22,7 @@
     "check": "astro check && tsc --noEmit && eslint . && prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:types": "scripts/database-types.sh",
+    "db:types": "scripts/database-types.sh write",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write ."

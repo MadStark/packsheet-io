@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,6 +117,26 @@ describe('the committed database types', () => {
     // through an assertion-free test. So the script says what it did, and this asserts
     // it — including that the schema it compared had tables in it.
     expect(stdout, 'the check exited 0 without reporting a comparison').toMatch(COMPARED);
+  });
+});
+
+describe('npm run db:types', () => {
+  /**
+   * The remedy every failure message names has to be the one that writes.
+   *
+   * Comparing is the script's default, deliberately — a mode that can damage the
+   * artefact is not one to arrive at by omission. The cost of that choice is that
+   * `db:types` must now pass `write` explicitly, and it did not: the first version of
+   * this change flipped the default and left the npm script bare, so the documented fix
+   * for a failing check quietly re-ran the check. Nothing broke, and nothing would have,
+   * until somebody followed the instructions and watched them do nothing.
+   */
+  it('runs the script in the mode that regenerates the file', async () => {
+    const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(pkg.scripts['db:types']).toBe('scripts/database-types.sh write');
   });
 });
 
