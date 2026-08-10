@@ -105,8 +105,18 @@ fi
 # about the schema means anything.
 # ---------------------------------------------------------------------------
 assert_migrations_applied() {
+  # `--output-format json` explicitly, never the default. The CLI DETECTS whether an
+  # agent is running it (`--agent`, default `auto`) and changes its output accordingly:
+  # under an agent `migration list` answers in JSON, and under a human or a CI runner it
+  # draws an ASCII table. So the default is not one format, it is two, chosen by who is
+  # watching — which meant this parsed perfectly on the machine it was written on and
+  # failed in CI on the same CLI version. Reproduce that locally with `--agent no`.
+  #
+  # `gen types` is not affected: its output is byte-identical either way, checked rather
+  # than assumed, which is the only reason the committed file is not also a function of
+  # who ran the generator.
   local list
-  if ! list="$("${supabase_cli[@]}" migration list --local 2>&1)"; then
+  if ! list="$("${supabase_cli[@]}" migration list --local --output-format json 2>&1)"; then
     cat >&2 <<EOF
 error: could not list migrations against the local database.
 

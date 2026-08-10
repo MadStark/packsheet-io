@@ -205,7 +205,12 @@ function sandbox(options: { migrations?: string; types?: string; genExit?: numbe
     `#!/usr/bin/env bash
 here="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 case "$*" in
-  *"migration list"*) printf '%s\\n' '${migrations}' ;;
+  # Answers JSON only when the format is pinned. The real CLI picks its format from
+  # agent detection, so a call that leaves it to the default gets the ASCII table in CI
+  # and JSON on a developer's machine — which is how this shipped broken once. If the
+  # script stops passing the flag, every case below fails on the table instead.
+  *"migration list"*"--output-format json"*) printf '%s\\n' '${migrations}' ;;
+  *"migration list"*) printf '%s\\n' '  Local | Remote | Time (UTC)' ;;
   *"gen types"*) cat "$here/stub-types.txt"; exit ${options.genExit ?? 0} ;;
   *) echo "stub: unexpected $*" >&2; exit 64 ;;
 esac
