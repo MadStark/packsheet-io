@@ -1,0 +1,14 @@
+---
+// Invariant C, shape #1: the service-role key read straight off `import.meta.env` in
+// a page's own frontmatter. The most direct spelling there is, and the one that looks
+// most innocuous in review — it is one property access on an object every Astro page
+// already touches, and it type-checks, builds and renders exactly like the anon key
+// next to it does.
+//
+// Nothing here imports the choke point, so Invariant A has nothing to say about this
+// page. That is the point: the two rules answer different questions, and this page is
+// only caught by the one that reads source text.
+const serviceRoleKey = import.meta.env.SUPABASE_SERVICE_ROLE_KEY;
+---
+
+<p>{serviceRoleKey ? 'configured' : 'absent'}</p>

@@ -1,0 +1,10 @@
+---
+// Here only so src/lib/generated-only-key.ts is genuinely in the build graph and genuinely
+// transformed — the injecting plugin never fires for a module Rollup does not load.
+//
+// This page is itself clean and must not be flagged. The module it imports is the one that
+// acquires a reference during the build.
+import { describeGeneratedOnly } from '../lib/generated-only-key';
+---
+
+<p>{describeGeneratedOnly()}</p>

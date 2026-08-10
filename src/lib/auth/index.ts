@@ -31,7 +31,7 @@
  * make a build go green; read the comment at the top of the test first.
  *
  * ---------------------------------------------------------------------------
- * WHAT CHANGED WITH SUPABASE, AND WHAT THIS FILE DOES NOT YET GUARD (Ref 48)
+ * WHAT CHANGED WITH SUPABASE (Ref 48), AND WHAT NOW GUARDS THE KEY (Ref 55)
  * ---------------------------------------------------------------------------
  *
  * Authentication is Supabase Auth, not Clerk. Clerk was never installed, and the
@@ -53,12 +53,49 @@
  *     boundary. It must never be reachable from a route an anonymous visitor can
  *     load, because there the database stops being the thing that says no.
  *
- * **That service_role rule is not enforced yet.** It is Ref 30's rewrite, and it is
- * the same shape as the import rule above: one more assertion in the same test,
- * failing the build if `SUPABASE_SERVICE_ROLE_KEY` appears anywhere in the share-page
- * route tree. Until it lands, this file's guarantee covers who may import auth code,
- * not which key that code holds. Do not read the green build as coverage of the
- * second thing.
+ * That second rule is now enforced, in the same test, as Invariant C: the build fails
+ * if ANY module in the graph outside this directory so much as names a privileged key —
+ * `SUPABASE_SERVICE_ROLE_KEY`, the same name without its prefix, `SUPABASE_SECRET_KEY`,
+ * or a pasted `sb_secret_…` value. It is a rule about the key and not about the package.
+ * Neither Supabase package is installed yet (Ref 49 is what brings them), so what the
+ * fixture actually asserts is the narrower, testable half of that claim: a page that
+ * reads `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY` and names Supabase in its
+ * own copy is not flagged, and must never become flagged. When the packages do land,
+ * neither of them contains the string SERVICE_ROLE anywhere — measured at 2.112.2 and
+ * 0.12.4 — so nothing goes red on contact. The whole build graph is in scope, not just
+ * first-party code, for the same reason Invariant B is: a dependency holding the key
+ * ships it exactly as our own code would.
+ *
+ * This directory is the one exemption, which makes it the only place a service-role
+ * client may live. It does not hold one today; when it does, it goes here, and every
+ * route that needs privileged data reaches it through this module rather than reading
+ * the key itself.
+ *
+ * READ THIS BEFORE ACTING ON THE PARAGRAPH ABOVE. "Reach it through this module" is
+ * where this is going, and it is not currently possible: Invariant A is an unconditional
+ * edge rule, so a route importing this directory is itself a build failure — reported
+ * with a message about a $6,000/month auth bill that has nothing to do with the key.
+ * That is deliberate. There is no privileged consumer in this codebase yet, and the first
+ * genuine one is the trigger for revisiting Invariant A rather than for quietly widening
+ * it. Whoever has that first consumer should start from the all-caps paragraph on
+ * `checkAnonymousReadPath` in tests/anonymous-read-path.test.ts, which says what has to be
+ * solved first (a reachability rule has to reconstruct the `client:only` edge the compiler
+ * drops) and what the acceptance test for that work is.
+ *
+ * Three limits of that check, so the green build is not read as more than it is.
+ *
+ * It reads source text, so a name assembled at runtime (`env[segments.join('_')]`) is
+ * invisible to it — closing that means evaluating the program. And for the same reason it
+ * cannot tell code from a comment: naming the variable in a comment fails the build
+ * exactly as an assignment does. This file may spell it out because this directory is
+ * exempt; anywhere else, describe the key rather than naming it.
+ *
+ * And it is NAME-BOUND. It knows the spellings listed in PRIVILEGED_KEY_PATTERNS in that
+ * test file and no others, and this project has not yet chosen the name its secret will
+ * ship under — there is no Supabase entry in .env.example and no such secret in
+ * wrangler.jsonc. Whoever adds one must check the name against that list and add it if it
+ * is missing. A name-bound rule that does not know the name in use is not a weaker
+ * guardrail; it is a permanently green one, while the key ships.
  *
  * The corollary of an edge rule, and the thing to get right when adding files here:
  * this directory must contain NOTHING that an anonymous route could legitimately
@@ -67,8 +104,8 @@
  * with a $6,000 message — the kind of false positive that gets a guardrail weakened
  * or deleted rather than obeyed. Shared auth-adjacent *types* and *constants* belong
  * somewhere an anonymous route may import from (src/lib/, or the consuming module
- * itself). What lives here is only what must never be reachable: the SDK and the
- * code that calls it — and, once Ref 30 lands, the service-role client.
+ * itself). What lives here is only what must never be reachable: the SDK, the code
+ * that calls it, and the service-role client if one is ever needed.
  *
  * No auth SDK is installed yet (there are no consumers of this module today), so this
  * file currently exports nothing. It exists so the choke point — and the test that

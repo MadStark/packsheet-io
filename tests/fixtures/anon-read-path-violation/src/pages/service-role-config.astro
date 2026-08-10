@@ -1,0 +1,11 @@
+---
+// Here only so src/lib/service-role-config.ts is genuinely in the build graph — an
+// unimported module is one Rollup never loads, never transforms and never records, and a
+// fixture case that never enters the graph proves nothing about a checker that reads it.
+//
+// This page is itself clean: it never names the key, and it must not be flagged. The
+// module it imports is what holds the reference, and only that module is reported.
+import { hasPrivilegedKey } from '../lib/service-role-config';
+---
+
+<p>{hasPrivilegedKey() ? 'configured' : 'absent'}</p>
