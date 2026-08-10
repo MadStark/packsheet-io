@@ -56,6 +56,20 @@ jobs:
 
       - run: npm ci
 
+      # `npm test` includes tests that query a real database as the `anon` and
+      # `authenticated` roles and fail rather than skip when there is not one, so this
+      # job needs a stack like every other job that runs the suite.
+      #
+      # Note for whoever merges the branch that removes per-PR previews (Ref 54): this
+      # whole file goes away there, so these two steps go with it. They are here because
+      # this workflow exists today and was red without them, not because previews
+      # themselves need a database.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      - uses: ./.github/actions/local-database
+
       # Same reasoning as the deploy workflows: ci.yml runs on this event too, but
       # nothing makes this job wait for it.
       - run: npm test

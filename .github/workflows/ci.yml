@@ -71,36 +71,10 @@ jobs:
         with:
           version: 2.113.0
 
-      # `supabase start` applies every migration in order against an empty database on
-      # the way up, which makes this step the same check as `supabase db reset` locally:
-      # it proves the migrations run from clean, not merely against whatever state a
-      # machine happens to be in.
-      - name: Start the local database
-        run: supabase start
-
-      # `supabase start` is not a readiness check, and its exit code is not evidence.
-      # Verified locally: with the PostgREST and Auth containers stopped it prints the
-      # full env block, exits 0, and does NOT bring them back. The tests would then die
-      # on hook timeouts in two files while a third passed, and the summary would read
-      # "18 skipped" — the exact reporting shape this suite exists to eliminate.
-      #
-      # So the readiness assertion is explicit and fails at the step that caused it,
-      # with a name attached, instead of surfacing three jobs later as a test failure.
-      # `--fail` matters: curl exits 0 on a 4xx/5xx body without it.
-      - name: Wait for the database and the Data API
-        run: |
-          set -euo pipefail
-          eval "$(supabase status -o env)"
-          for attempt in $(seq 1 60); do
-            if curl -fsS -o /dev/null "$API_URL/rest/v1/" -H "apikey: $ANON_KEY"; then
-              echo "Data API ready after ${attempt}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::The Supabase Data API never became ready; the RLS tests cannot run."
-          supabase status
-          exit 1
+      # Starts the stack and waits for it. Shared with pr-preview.yml and both deploy
+      # workflows, because all four run `npm test` and the suite refuses to skip its
+      # row-level-security tests when there is no database.
+      - uses: ./.github/actions/local-database
 
       # Vitest, kept as its own step rather than folded into `npm run check` so the
       # static checks and the tests fail distinguishably in the log. Both run in this

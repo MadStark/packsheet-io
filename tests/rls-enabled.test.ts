@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { adminSql } from './support/local-database';
@@ -212,19 +212,22 @@ describe('no function in public is callable by anon', () => {
 });
 
 /**
- * The step that makes all of the above run in CI.
+ * The step that makes all of the above run in CI — in EVERY workflow that runs the suite.
  *
- * Everything in this file is worthless if the job never starts a database: the tests
- * would fail, someone would remove the step or the tests to get a merge through, and
- * the schema would ship unguarded. Pinning it here means deleting the step turns a
- * test red with an explanation attached, rather than turning the whole suite red with
- * a connection error.
+ * The first version of this guard checked ci.yml and only ci.yml, and that is precisely
+ * how the gap it was meant to prevent got shipped: three other workflows run `npm test`
+ * — pr-preview.yml and both deploys — and none of them started a database. The suite
+ * refuses to skip its row-level-security tests without one, so all three went red.
  *
- * Asserted against the parsed workflow, in the same spirit as
- * tests/deploy-workers.test.ts: the ORDER is the property, not the presence of a string
- * somewhere in the file.
+ * The deploy workflows are the serious half. They run `npm test` BEFORE pushing
+ * migrations and before building, so the effect was not a broken site but a frozen
+ * pipeline: no release could ship at all.
+ *
+ * So the assertion is written over whatever workflows exist, keyed on the thing that
+ * actually creates the requirement — a step that runs `npm test` — rather than on a
+ * list of filenames somebody has to remember to extend.
  */
-describe('CI runs these tests against a real database', () => {
+describe('every workflow that runs the suite starts a database first', () => {
   interface Step {
     name?: string;
     run?: string;
@@ -233,47 +236,74 @@ describe('CI runs these tests against a real database', () => {
     'continue-on-error'?: boolean;
     with?: { version?: string };
   }
-  const workflow = (file: string) =>
-    parse(
-      readFileSync(fileURLToPath(new URL(`../.github/workflows/${file}`, import.meta.url)), 'utf8'),
-    ) as { jobs: Record<string, { steps?: Step[] }> };
+  interface Workflow {
+    jobs: Record<string, { steps?: Step[] }>;
+  }
 
-  // By name. `check` is the required status check on main and staging, so a database
-  // started in some other job would not gate anything.
-  const steps = workflow('ci.yml').jobs?.check?.steps ?? [];
-  const startIndex = steps.findIndex((s) => /supabase\s+start/.test(s.run ?? ''));
-  const testIndex = steps.findIndex((s) => /^npm test\b/.test((s.run ?? '').trim()));
+  const workflowsDir = fileURLToPath(new URL('../.github/workflows', import.meta.url));
+  const files = readdirSync(workflowsDir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'));
 
-  it('starts the database before running the tests, in the check job', () => {
-    expect(startIndex, 'no `supabase start` step in the check job').toBeGreaterThanOrEqual(0);
-    expect(testIndex, 'no `npm test` step in the check job').toBeGreaterThanOrEqual(0);
-    expect(testIndex).toBeGreaterThan(startIndex);
+  const parsed = files.map((file) => ({
+    file,
+    workflow: parse(readFileSync(`${workflowsDir}/${file}`, 'utf8')) as Workflow,
+  }));
+
+  const isTest = (s: Step) => (s.run ?? '').trim() === 'npm test';
+  const isDatabase = (s: Step) => (s.uses ?? '') === './.github/actions/local-database';
+
+  /** Every (workflow, job) pair that runs the suite. */
+  const suiteJobs = parsed.flatMap(({ file, workflow }) =>
+    Object.entries(workflow.jobs ?? {})
+      .filter(([, job]) => (job.steps ?? []).some(isTest))
+      .map(([jobName, job]) => ({ file, jobName, steps: job.steps ?? [] })),
+  );
+
+  // Without this the whole describe passes over an empty list — the same vacuum the
+  // catalogue sweeps above are guarded against.
+  it('finds the jobs that run npm test', () => {
+    expect(files.length, 'no workflow files found').toBeGreaterThan(0);
+    expect(suiteJobs.length, 'no job runs `npm test`').toBeGreaterThan(0);
   });
+
+  it.each(suiteJobs.map((j) => [`${j.file}:${j.jobName}`, j] as const))(
+    '%s starts the database before running the tests',
+    (_label, job) => {
+      const database = job.steps.findIndex(isDatabase);
+      const test = job.steps.findIndex(isTest);
+
+      expect(database, 'no local-database step in this job').toBeGreaterThanOrEqual(0);
+      expect(test).toBeGreaterThan(database);
+    },
+  );
 
   // Order is not enough. `continue-on-error: true` on either step leaves the sequence
   // intact and the guardrail reporting without blocking — the exact failure this file
   // exists to prevent, one line away from a green review.
-  it('lets neither step be skipped or excused from failing', () => {
-    for (const index of [startIndex, testIndex]) {
-      expect(steps[index]?.['continue-on-error']).toBeUndefined();
-      expect(steps[index]?.if).toBeUndefined();
-    }
-  });
+  it.each(suiteJobs.map((j) => [`${j.file}:${j.jobName}`, j] as const))(
+    '%s lets neither step be skipped or excused from failing',
+    (_label, job) => {
+      for (const step of job.steps.filter((s) => isDatabase(s) || isTest(s))) {
+        expect(step['continue-on-error']).toBeUndefined();
+        expect(step.if).toBeUndefined();
+      }
+    },
+  );
 
-  it('installs the same CLI version the deploy workflows use', () => {
-    const setup = steps.find((s) => s.uses?.startsWith('supabase/setup-cli'));
-    expect(setup).toBeDefined();
-
-    const deployVersions = ['deploy-staging.yml', 'deploy-production.yml'].map(
-      (file) =>
-        Object.values(workflow(file).jobs)
-          .flatMap((job) => job.steps ?? [])
-          .find((s) => s.uses?.startsWith('supabase/setup-cli'))?.with?.version,
+  // One CLI version across every workflow that installs it, including the two that
+  // `db push` to a hosted project: the migrations replayed locally and the migrations
+  // pushed to production must be applied by the same tool.
+  it('pins one CLI version everywhere it is installed', () => {
+    const versions = parsed.flatMap(({ file, workflow }) =>
+      Object.values(workflow.jobs ?? {})
+        .flatMap((job) => job.steps ?? [])
+        .filter((s) => (s.uses ?? '').startsWith('supabase/setup-cli'))
+        .map((s) => ({ file, version: s.with?.version })),
     );
 
-    for (const version of deployVersions) {
-      expect(version).toBeDefined();
-      expect(setup?.with?.version).toBe(version);
+    expect(versions.length, 'no workflow installs the Supabase CLI').toBeGreaterThan(0);
+    for (const { file, version } of versions) {
+      expect(version, `${file} does not pin a CLI version`).toBeDefined();
+      expect(version, `${file} pins a different CLI version`).toBe(versions[0].version);
     }
   });
 });
