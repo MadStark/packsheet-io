@@ -53,6 +53,12 @@ jobs:
       # `db push` applies only migrations the target has not recorded, so re-running a
       # release is a no-op rather than a replay. It has no down-migrations and no
       # rollback: recovery from a bad migration is another migration.
+      #
+      # No SUPABASE_DB_PASSWORD. The CLI provisions its own login role through the
+      # Management API from the access token — verified by running this against both
+      # projects with no password set at all. Referencing a secret that does not exist
+      # would expand to an empty string and connect, or fail to, for reasons nobody
+      # could read off the log.
       - uses: supabase/setup-cli@v3
         with:
           version: 2.113.0
@@ -60,10 +66,12 @@ jobs:
       - name: Apply database migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           # From a secret, not this file. The two project refs are the only thing
           # standing between "migrate staging" and "migrate production", and this
-          # repository is public.
+          # repository is public. Which one a run resolves is decided by the GitHub
+          # environment on this job — asserted by name in deploy-workers.test.ts,
+          # because `name: staging` on the production workflow is a one-word edit that
+          # migrates the wrong database.
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
