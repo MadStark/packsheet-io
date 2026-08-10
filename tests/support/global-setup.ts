@@ -81,6 +81,6 @@ export default async function setup(): Promise<void> {
 
   throw new Error(
     `The local Supabase stack did not become ready within ${READY_TIMEOUT_MS / 1000}s: ${reason}. ` +
-      'Start it with `supabase start`, then `supabase db reset` to replay the migrations.',
+      'Start it with `npm run db:start`, then `npm run db:reset` to replay the migrations.',
   );
 }

@@ -36,8 +36,8 @@
 # `gen types typescript --local` reads the schema that is in the running local stack.
 # It does not replay anything. An earlier version of this comment claimed it compared
 # against "the migrations replayed from empty", which is true only immediately after a
-# `supabase db reset` and in CI, where `.github/actions/local-database` starts a stack
-# on a fresh runner and `supabase start` applies every migration on the way up.
+# `npm run db:reset` and in CI, where `.github/actions/local-database` starts a stack on
+# a fresh runner and `supabase start` applies every migration on the way up.
 #
 # Locally that gap is the difference between a guardrail and a green tick: add a
 # migration, forget to reset, and the stack, the committed types and every schema test
@@ -112,7 +112,7 @@ error: could not list migrations against the local database.
 
 $(printf '%s' "$list" | sed 's/^/  /')
 
-Start the stack with \`${supabase_cli[*]} start\`.
+Start the stack with \`npm run db:start\`.
 EOF
     exit 1
   fi
@@ -153,7 +153,7 @@ error: the local database is not level with supabase/migrations/.
 Nothing generated from this stack describes the schema on this branch, so the comparison
 would certify the wrong thing. Replay the migrations from empty:
 
-    ${supabase_cli[*]} db reset
+    npm run db:reset
 EOF
     exit 1
   fi
@@ -198,7 +198,7 @@ error: the generator described no tables at all.
 It exited successfully, so the database answered — it simply has no tables in it. That is
 a stack whose migrations did not apply, not a schema. Replay them from empty:
 
-    ${supabase_cli[*]} db reset
+    npm run db:reset
 EOF
   exit 1
 fi

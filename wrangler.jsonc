@@ -108,12 +108,17 @@
       // that should answer, and it is the one Cloudflare Access gates.
       "workers_dev": false,
 
-      // The exception, and the reason previews live on staging rather than on
-      // production. `wrangler versions upload` mints
-      // <version>-packsheet-io-staging.packsheet-io.workers.dev for a pull
-      // request. Those URLs have their own Cloudflare Access application, so a
-      // preview is no more public than staging is.
-      "preview_urls": true,
+      // Off, like production. Per-pull-request preview deployments were removed
+      // deliberately: they were a whole moving part — a workflow, a fork guard, a
+      // second Cloudflare Access application, and a third hostname to reason about —
+      // in exchange for a URL that was rarely opened. staging.packsheet.io auto-deploys
+      // from the staging branch and that is the shared environment; anything needing a
+      // closer look is run locally, against this worktree's own Supabase stack.
+      //
+      // Turning this back on republishes every uploaded version at
+      // <version>-packsheet-io-staging.packsheet-io.workers.dev, which is a public
+      // hostname unless an Access application covers it. There is no longer one.
+      "preview_urls": false,
 
       // Cloudflare Access sits in front of this hostname. The Access application is
       // account configuration, not repository configuration, so nothing here proves

@@ -215,9 +215,9 @@ describe('no function in public is callable by anon', () => {
  * The step that makes all of the above run in CI — in EVERY workflow that runs the suite.
  *
  * The first version of this guard checked ci.yml and only ci.yml, and that is precisely
- * how the gap it was meant to prevent got shipped: three other workflows run `npm test`
- * — pr-preview.yml and both deploys — and none of them started a database. The suite
- * refuses to skip its row-level-security tests without one, so all three went red.
+ * how the gap it was meant to prevent got shipped: the other workflows that run
+ * `npm test` — at the time pr-preview.yml and both deploys — started no database. The
+ * suite refuses to skip its row-level-security tests without one, so all three went red.
  *
  * The deploy workflows are the serious half. They run `npm test` BEFORE pushing
  * migrations and before building, so the effect was not a broken site but a frozen

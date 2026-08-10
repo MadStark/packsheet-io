@@ -5,7 +5,7 @@ description: >
 
 # WHY THIS EXISTS AS AN ACTION RATHER THAN A COPIED BLOCK
 #
-# Four workflows run `npm test` — ci.yml, pr-preview.yml and the two deploys — and part
+# Three workflows run `npm test` — ci.yml and the two deploys — and part
 # of that suite exercises row-level security by querying the database as the `anon` and
 # `authenticated` roles. Nothing can stand in for that: a policy is a SQL expression, and
 # only Postgres can say what it does. Those tests fail rather than skip when there is no
@@ -20,13 +20,23 @@ description: >
 #
 # `supabase start` applies every migration in order against an empty database on the way
 # up, so this doubles as the from-clean replay check on every workflow that uses it.
+#
+# Every call goes through scripts/supabase.sh rather than `supabase`. That wrapper is not
+# a convenience: supabase/config.toml reads its project name and all seven ports from the
+# environment so each git worktree gets its own stack, and the CLI cannot default an
+# `env(...)` — so a bare `supabase start` does not fail with a port clash, it fails to
+# parse the config at all:
+#
+#     failed to read config: ProjectConfigParseError
+#
+# which names neither the cause nor the fix.
 
 runs:
   using: composite
   steps:
     - name: Start the local database
       shell: bash
-      run: supabase start
+      run: scripts/supabase.sh start
 
     # `supabase start` is not a readiness check and its exit code is not evidence.
     # Verified locally: with the PostgREST and Auth containers stopped it prints the full
@@ -41,7 +51,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        eval "$(supabase status -o env)"
+        eval "$(scripts/supabase.sh status -o env)"
         for attempt in $(seq 1 60); do
           if curl -fsS -o /dev/null "$API_URL/rest/v1/" -H "apikey: $ANON_KEY"; then
             echo "Data API ready after ${attempt}s"
@@ -50,5 +60,5 @@ runs:
           sleep 1
         done
         echo "::error::The Supabase Data API never became ready; the row-level-security tests cannot run."
-        supabase status
+        scripts/supabase.sh status
         exit 1

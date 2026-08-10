@@ -29,13 +29,13 @@ import { localDatabase } from './support/local-database';
  * WHY THIS IS A TEST RATHER THAN A STEP IN ci.yml
  * ---------------------------------------------------------------------------
  *
- * Four workflows run `npm test` and only one of them is `ci.yml`. The two deploys run
+ * Three workflows run `npm test` and only one of them is `ci.yml`. The two deploys run
  * it before they push migrations and before they build — the last point at which a
  * schema that has moved past the types the site was compiled against can still be
  * stopped, and stopped for free.
  *
  * A workflow step would also never run on a contributor's machine, and this is a check
- * whose value is almost entirely in being told BEFORE pushing. `supabase start && npm
+ * whose value is almost entirely in being told BEFORE pushing. `npm run db:start && npm
  * test` is already the documented loop for anything touching the database; putting the
  * check inside it costs a second and closes the gap between "my call sites compile" and
  * "my call sites compile against the schema I actually wrote".
