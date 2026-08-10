@@ -54,10 +54,15 @@
  *     load, because there the database stops being the thing that says no.
  *
  * That second rule is now enforced, in the same test, as Invariant C: the build fails
- * if ANY module in the graph outside this directory so much as names the identifier
- * `SUPABASE_SERVICE_ROLE_KEY`. It is a rule about the key and not about the package —
- * a page using `@supabase/supabase-js` with `PUBLIC_SUPABASE_ANON_KEY` is legal, and
- * the fixture asserts that it stays legal. The whole build graph is in scope, not just
+ * if ANY module in the graph outside this directory so much as names a privileged key —
+ * `SUPABASE_SERVICE_ROLE_KEY`, the same name without its prefix, `SUPABASE_SECRET_KEY`,
+ * or a pasted `sb_secret_…` value. It is a rule about the key and not about the package.
+ * Neither Supabase package is installed yet (Ref 49 is what brings them), so what the
+ * fixture actually asserts is the narrower, testable half of that claim: a page that
+ * reads `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY` and names Supabase in its
+ * own copy is not flagged, and must never become flagged. When the packages do land,
+ * neither of them contains the string SERVICE_ROLE anywhere — measured at 2.112.2 and
+ * 0.12.4 — so nothing goes red on contact. The whole build graph is in scope, not just
  * first-party code, for the same reason Invariant B is: a dependency holding the key
  * ships it exactly as our own code would.
  *
@@ -66,12 +71,31 @@
  * route that needs privileged data reaches it through this module rather than reading
  * the key itself.
  *
- * Two limits of that check, so the green build is not read as more than it is. It reads
- * source text, so a name assembled at runtime (`env[segments.join('_')]`) is invisible
- * to it — closing that means evaluating the program. And for the same reason it cannot
- * tell code from a comment: naming the variable in a comment fails the build exactly as
- * an assignment does. This file may spell it out because this directory is exempt;
- * anywhere else, describe the key rather than naming it.
+ * READ THIS BEFORE ACTING ON THE PARAGRAPH ABOVE. "Reach it through this module" is
+ * where this is going, and it is not currently possible: Invariant A is an unconditional
+ * edge rule, so a route importing this directory is itself a build failure — reported
+ * with a message about a $6,000/month auth bill that has nothing to do with the key.
+ * That is deliberate. There is no privileged consumer in this codebase yet, and the first
+ * genuine one is the trigger for revisiting Invariant A rather than for quietly widening
+ * it. Whoever has that first consumer should start from the all-caps paragraph on
+ * `checkAnonymousReadPath` in tests/anonymous-read-path.test.ts, which says what has to be
+ * solved first (a reachability rule has to reconstruct the `client:only` edge the compiler
+ * drops) and what the acceptance test for that work is.
+ *
+ * Three limits of that check, so the green build is not read as more than it is.
+ *
+ * It reads source text, so a name assembled at runtime (`env[segments.join('_')]`) is
+ * invisible to it — closing that means evaluating the program. And for the same reason it
+ * cannot tell code from a comment: naming the variable in a comment fails the build
+ * exactly as an assignment does. This file may spell it out because this directory is
+ * exempt; anywhere else, describe the key rather than naming it.
+ *
+ * And it is NAME-BOUND. It knows the spellings listed in PRIVILEGED_KEY_PATTERNS in that
+ * test file and no others, and this project has not yet chosen the name its secret will
+ * ship under — there is no Supabase entry in .env.example and no such secret in
+ * wrangler.jsonc. Whoever adds one must check the name against that list and add it if it
+ * is missing. A name-bound rule that does not know the name in use is not a weaker
+ * guardrail; it is a permanently green one, while the key ships.
  *
  * The corollary of an edge rule, and the thing to get right when adding files here:
  * this directory must contain NOTHING that an anonymous route could legitimately
