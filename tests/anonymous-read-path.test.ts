@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, sep, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -176,7 +175,14 @@ async function loadAstroBuild(): Promise<typeof AstroBuild> {
  *  itself cannot pass one and fail the other for different reasons. */
 async function buildModuleGraph(root: string): Promise<BuildGraph> {
   const build = await loadAstroBuild();
-  const outDir = mkdtempSync(join(tmpdir(), 'anon-read-path-'));
+  // Inside `root`, NOT in tmpdir(). @astrojs/cloudflare prerenders static pages in
+  // workerd, and workerd cannot reach a path outside the project it was given: an
+  // outDir under /var/folders fails the build with "The Workers runtime failed to
+  // start … internal error", which reads as a broken toolchain rather than as a
+  // misplaced directory. Still a fresh directory per build, still removed in the
+  // `finally` below, so the property that matters — no build output left behind, and
+  // in particular dist/ never clobbered — is unchanged.
+  const outDir = mkdtempSync(join(root, '.astro-build-out-'));
   const passGraphs: PassGraph[] = [];
 
   // A minimal Rollup plugin: it doesn't transform anything, it just reads the
@@ -633,12 +639,32 @@ function checkEmittedHtmlForAuthCdn(build: BuildGraph): CdnScriptViolation[] {
 
 describe('the real site', () => {
   let realBuild: BuildGraph;
+  let buildFailure: unknown;
 
   // One real `astro build` (~well under a second per the pre-implementation spike),
   // shared by both invariants below so the suite pays for it once, not twice.
+  //
+  // The failure is CAPTURED rather than allowed to propagate, because a throwing
+  // beforeAll makes vitest report every test in this describe as `skipped`. The run
+  // still exits non-zero, so CI blocks — but the summary line a human reads says
+  // "22 passed | 5 skipped", which looks like a suite with some optional cases in it
+  // rather than one where the entire MAU guard did not execute. That distinction
+  // matters most in exactly the situation that produces it: a toolchain change (the
+  // Cloudflare adapter moved prerendering into workerd, which is fussier about where
+  // it may write) breaking the build in a way unrelated to auth.
   beforeAll(async () => {
-    realBuild = await buildModuleGraph(repoRoot);
+    try {
+      realBuild = await buildModuleGraph(repoRoot);
+    } catch (error) {
+      buildFailure = error;
+    }
   }, 60_000);
+
+  // Turns that skip into one unmissable failure that names the cause.
+  it('built the real site, so the invariants below actually ran', () => {
+    expect(buildFailure).toBeUndefined();
+    expect(realBuild).toBeDefined();
+  });
 
   // Both invariants are anchored on the string "<root>/src/lib/auth/", and neither
   // would notice if that directory stopped existing: the edge check would match no
