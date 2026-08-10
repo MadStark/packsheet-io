@@ -1,0 +1,64 @@
+name: Local database
+description: >
+  Start this repository's Supabase stack and wait until the database and the Data API
+  actually answer. Required by any job that runs `npm test`.
+
+# WHY THIS EXISTS AS AN ACTION RATHER THAN A COPIED BLOCK
+#
+# Four workflows run `npm test` — ci.yml, pr-preview.yml and the two deploys — and part
+# of that suite exercises row-level security by querying the database as the `anon` and
+# `authenticated` roles. Nothing can stand in for that: a policy is a SQL expression, and
+# only Postgres can say what it does. Those tests fail rather than skip when there is no
+# database, deliberately, because a guardrail that reports green while not running is
+# worse than no guardrail.
+#
+# The consequence is that every one of those four jobs needs a stack, and the first
+# version of this change wired up only ci.yml. The others went red — and the deploy
+# workflows run `npm test` BEFORE they push migrations and build, so the effect was not a
+# broken site but a frozen pipeline: no release could ship at all. Copying the block four
+# times would have fixed that and left four copies to drift.
+#
+# `supabase start` applies every migration in order against an empty database on the way
+# up, so this doubles as the from-clean replay check on every workflow that uses it.
+#
+# Every call goes through scripts/supabase.sh rather than `supabase`. That wrapper is not
+# a convenience: supabase/config.toml reads its project name and all seven ports from the
+# environment so each git worktree gets its own stack, and the CLI cannot default an
+# `env(...)` — so a bare `supabase start` does not fail with a port clash, it fails to
+# parse the config at all:
+#
+#     failed to read config: ProjectConfigParseError
+#
+# which names neither the cause nor the fix.
+
+runs:
+  using: composite
+  steps:
+    - name: Start the local database
+      shell: bash
+      run: scripts/supabase.sh start
+
+    # `supabase start` is not a readiness check and its exit code is not evidence.
+    # Verified locally: with the PostgREST and Auth containers stopped it prints the full
+    # env block, exits 0, and does NOT bring them back. The tests would then die on hook
+    # timeouts in two files while a third passed, and the summary would read "18 skipped"
+    # — the exact reporting shape this suite exists to eliminate.
+    #
+    # So readiness is asserted explicitly, and fails at the step that caused it with a
+    # name attached rather than surfacing later as an unexplained test failure.
+    # `--fail` matters: curl exits 0 on a 4xx/5xx body without it.
+    - name: Wait for the database and the Data API
+      shell: bash
+      run: |
+        set -euo pipefail
+        eval "$(scripts/supabase.sh status -o env)"
+        for attempt in $(seq 1 60); do
+          if curl -fsS -o /dev/null "$API_URL/rest/v1/" -H "apikey: $ANON_KEY"; then
+            echo "Data API ready after ${attempt}s"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "::error::The Supabase Data API never became ready; the row-level-security tests cannot run."
+        scripts/supabase.sh status
+        exit 1

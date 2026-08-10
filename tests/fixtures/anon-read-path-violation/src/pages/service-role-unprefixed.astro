@@ -1,0 +1,17 @@
+---
+// Invariant C, shape #4: the SAME key under its bare name, with no `SUPABASE_` prefix.
+//
+// The prefix is a convention about which service an environment variable belongs to, not
+// part of the key's identity. A module that destructures the value, re-exports it, or
+// reads it out of a config object under the short name holds exactly the same credential,
+// and a rule that only knew the prefixed spelling would read this page and find nothing.
+//
+// This spelling is also what decides whether a two-literal concatenation of the PREFIXED
+// name is caught: split it after the prefix and the second literal is exactly the name
+// below, so the scan matches that fragment — not because the build folded anything back
+// together, but because the fragment is itself banned. Split it anywhere else and nothing
+// matches; see src/lib/runtime-named-key.ts, which pins that half.
+const serviceRoleKey = import.meta.env.SERVICE_ROLE_KEY;
+---
+
+<p>{serviceRoleKey ? 'configured' : 'absent'}</p>

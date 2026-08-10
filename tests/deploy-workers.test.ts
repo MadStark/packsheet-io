@@ -517,6 +517,51 @@ describe('the Supabase CLI is always called through the wrapper', () => {
     const mode = statSync(repoPath('scripts/supabase.sh')).mode;
     expect(mode & 0o111).not.toBe(0);
   });
+
+  /**
+   * The same rule, over EVERY workflow and every composite action — not just the migrate
+   * step of the two deploys.
+   *
+   * The narrower assertion above missed a real case: the local-database composite action
+   * runs `start` and `status`, which parse the same config.toml, and it was written
+   * calling `supabase` directly. Nothing here was red. What would have gone red is CI,
+   * on every branch, with ProjectConfigParseError — and only after this branch merged.
+   *
+   * Scanned as text rather than parsed as steps, deliberately: an invocation can hide in
+   * a multi-line `run:` block, inside a composite action, or in a step this file does not
+   * know how to classify, and the rule holds for all of them.
+   */
+  it('no workflow or action calls bare `supabase`', () => {
+    const roots = ['.github/workflows', '.github/actions'];
+    const files: string[] = [];
+    for (const root of roots) {
+      const dir = repoPath(root);
+      if (!existsSync(dir)) continue;
+      for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        if (!/\.ya?ml$/.test(entry.name)) continue;
+        files.push(join(entry.parentPath, entry.name));
+      }
+    }
+    expect(files.length, 'no workflow or action files found').toBeGreaterThan(0);
+
+    const offenders: string[] = [];
+    for (const file of files) {
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, index) => {
+          const code = line.replace(/#.*$/, '');
+          // `supabase` as a COMMAND: the bare word followed by whitespace, not preceded
+          // by a slash. That one lookbehind is what separates the two cases that matter —
+          // `scripts/supabase.sh start` is the correct form and `run: supabase start` is
+          // not, and both contain the word. `uses: supabase/setup-cli@v3` is excluded for
+          // free, because there the word is followed by `/` rather than a space.
+          if (!/(?<!\/)\bsupabase\s/.test(code)) return;
+          offenders.push(`${file.replace(repoPath('.'), '')}:${index + 1}: ${code.trim()}`);
+        });
+    }
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe('per-pull-request previews are gone, not half-removed', () => {

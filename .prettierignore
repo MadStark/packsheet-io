@@ -1,6 +1,10 @@
 dist/
 .astro/
 node_modules/
+# Supabase CLI local state — written by `supabase start`, removed by `supabase stop`.
+# Gitignored as well; named here because Prettier does not read .gitignore either.
+supabase/.temp/
+supabase/.branches/
 src/assets/
 package-lock.json
 LICENSE

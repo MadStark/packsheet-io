@@ -16,18 +16,25 @@ export default [
     // `.astro/types.d.ts` cache one level down, which would otherwise be linted as
     // if it were source. `node_modules/**` doesn't need the same treatment: ESLint
     // ignores every `node_modules` directory by default, at any depth.
-    // `supabase/.temp/**` is the local Docker stack's scratch directory. `npm run
-    // db:start` writes a bundled edge-runtime `index.ts` into it — one 30 KB minified
-    // line that produces ~190 lint errors about code nobody here wrote. It is
-    // gitignored, but ESLint's flat config does not read .gitignore, so merely
-    // starting a database made `npm run check` fail. `.wrangler/**` is the same story
-    // for `wrangler dev`.
+    //
+    // `supabase/.temp/**` is the local Docker stack's scratch directory. Starting a
+    // stack writes a bundled edge-runtime `index.ts` into it — one 30 KB minified line
+    // producing ~190 lint errors about code nobody here wrote. `.wrangler/**` is the
+    // same story for `wrangler dev`, and `.astro-build-out-*` is what a killed test run
+    // leaves behind.
+    //
+    // All of them are gitignored, and ESLint's flat config does not read .gitignore, so
+    // each has to be named here as well. Without that, `npm run lint` passes or fails
+    // according to whether a database happens to be running — and CI only escapes it by
+    // an accident of step ordering (`npm run check` runs before the stack starts), which
+    // stops being true the moment somebody reorders a workflow.
     ignores: [
       'dist/**',
       '**/.astro/**',
       'node_modules/**',
       'src/assets/**',
       '**/supabase/.temp/**',
+      '**/supabase/.branches/**',
       '**/.wrangler/**',
       '.astro-build-out-*/**',
     ],

@@ -9,6 +9,15 @@
 // changes nothing that any test can see.
 import { SESSION_COOKIE } from './session';
 
+// The second intra-directory edge, and the one Invariant C's exemption rides on: it is
+// what puts src/lib/auth/service-role.ts — the only module in this fixture that names the
+// service-role key and must NOT be reported — into the build graph. See that file.
+import { PRIVILEGED_KEY_NAME } from './service-role';
+
 export function sessionCookieName(): string {
   return SESSION_COOKIE;
+}
+
+export function privilegedKeyName(): string {
+  return PRIVILEGED_KEY_NAME;
 }
