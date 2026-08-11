@@ -123,6 +123,45 @@ describe('makeMoney', () => {
   it('does not reject ordinary finite values, including zero', () => {
     expect(() => makeMoney(0, GBP)).not.toThrow();
   });
+
+  /**
+   * THE DECIMAL/MINOR-UNIT CONFUSION, ARRIVING THROUGH THE CONSTRUCTOR MEANT TO BE SAFE.
+   * `makeMoney(42.50, GBP)` reads as "forty-two pounds fifty" to anybody writing it and
+   * renders as £0.43 — the same 100× error `fromDecimal` exists to prevent, made one
+   * function to the left. Every value here is finite and non-negative, so none of them is
+   * caught by either of the other two guards; deleting only the integer check turns this
+   * block red and leaves the rest of the file green.
+   *
+   * It also makes true two claims that were previously only asserted in prose: that a
+   * line price needs no rounding of its own (`computeItemTotals` in src/lib/totals.ts)
+   * and that `sumByCurrency`'s addition is exact and order-independent. Both hold because
+   * minor units are integers, and until this check existed nothing made them so.
+   */
+  it.each([
+    ['a decimal major-unit amount', 42.5],
+    // The smallest fraction that still looks like money, and the one a sub-unit
+    // calculation (a per-day cost, a share of a set) actually produces.
+    ['a fraction of a penny', 0.5],
+    // Negative and fractional at once, so this row cannot be the one keeping the sign
+    // check honest — see the table below for that.
+    ['a negative decimal', -1.5],
+  ])('throws for %s (%s)', (_label, value) => {
+    expect(() => makeMoney(value, GBP)).toThrow(RangeError);
+    expect(() => makeMoney(value, GBP)).toThrow(/whole number of minor units/);
+  });
+
+  /**
+   * Mirrors `gear_items.price check (price >= 0 and price < 'Infinity'::numeric)` the way
+   * `isCurrencyCode` mirrors that column's regexp. Both values are integers and finite,
+   * so the two guards above pass them: only the sign check refuses these.
+   */
+  it.each([
+    ['a negative amount', -1],
+    ['a large negative amount', -4250],
+  ])('throws for %s (%s)', (_label, value) => {
+    expect(() => makeMoney(value, GBP)).toThrow(RangeError);
+    expect(() => makeMoney(value, GBP)).toThrow(/must not be negative/);
+  });
 });
 
 describe('fromDecimal', () => {
@@ -135,6 +174,15 @@ describe('fromDecimal', () => {
     ['USD', USD, 1, 100],
     ['EUR', EUR, 0.01, 1],
     ['JPY (zero-decimal)', JPY, 1050, 1050],
+    // THE ROW THAT EXERCISES `Math.round`. Every other decimal in this repository —
+    // 12.5, 1, 0.01, 42.5, 10, 99.99, 500 — happens to be exactly representable once
+    // multiplied by 100, so the rounding could be deleted and the suite stayed green.
+    // 1.10 is the smallest realistic price that is not: `1.1 * 100` is
+    // `110.00000000000001`, which makeMoney's integrality check refuses outright, and
+    // which times a quantity of 3 would be `330.00000000000006` — breaking the two
+    // comments that reason FROM minor units being integers (a line price needing no
+    // rounding of its own, sumByCurrency being exact and order-independent).
+    ['GBP, not exact in binary', GBP, 1.1, 110],
   ])(
     'converts a %s decimal amount to minor units using the currency’s own scale',
     (_label, currency, decimal, expectedMinorUnits) => {
@@ -236,8 +284,31 @@ describe('sumByCurrency', () => {
 
   it('sums same-currency amounts into a single entry', () => {
     const totals = sumByCurrency([makeMoney(1000, GBP), makeMoney(500, GBP)]);
-    expect(totals.get(GBP)).toBe(1500);
+    expect(totals.get(GBP)).toEqual<Money>({ amountMinorUnits: 1500, currency: GBP });
     expect(totals.size).toBe(1);
+  });
+
+  /**
+   * THE VALUES ARE `Money`, NOT BARE NUMBERS, and this is the assertion that says so
+   * rather than leaving it to the shape of the two above. The module spends sixty lines
+   * making an amount unconstructable without its currency; returning a map of numbers
+   * would give that back at the exit, where the currency survives as the key and the
+   * SCALE survives only in a doc comment — so a caller writing the obvious
+   * `£{{ total }}` over the entries renders £4250 for £42.50.
+   *
+   * Checked by formatting rather than by inspecting the object, because rendering is
+   * where the 100× error would actually have been paid, and a `Money` is the only thing
+   * `formatMoney` will accept.
+   */
+  it('returns Money values that a formatter can render at the right scale', () => {
+    const totals = sumByCurrency([makeMoney(4000, GBP), makeMoney(250, GBP)]);
+
+    const total = totals.get(GBP);
+    expect(total).toBeDefined();
+    expectFormatted(formatMoney(total!), '£42.50');
+    // And the currency of the value agrees with the key it was filed under, which is the
+    // pairing invariant the map would otherwise only imply.
+    expect(total!.currency).toBe(GBP);
   });
 
   // The load-bearing case: a genuinely mixed-currency list. Nothing here collapses to
@@ -252,9 +323,9 @@ describe('sumByCurrency', () => {
       makeMoney(750, EUR),
       makeMoney(500, USD),
     ]);
-    expect(totals.get(GBP)).toBe(2000);
-    expect(totals.get(USD)).toBe(3000);
-    expect(totals.get(EUR)).toBe(750);
+    expect(totals.get(GBP)).toEqual<Money>({ amountMinorUnits: 2000, currency: GBP });
+    expect(totals.get(USD)).toEqual<Money>({ amountMinorUnits: 3000, currency: USD });
+    expect(totals.get(EUR)).toEqual<Money>({ amountMinorUnits: 750, currency: EUR });
     expect(totals.size).toBe(3);
   });
 
@@ -262,7 +333,7 @@ describe('sumByCurrency', () => {
   // away with — pinned here so it stays correct, not as evidence the shortcut is safe.
   it('handles a single-currency list', () => {
     const totals = sumByCurrency([makeMoney(100, JPY)]);
-    expect(totals.get(JPY)).toBe(100);
+    expect(totals.get(JPY)).toEqual<Money>({ amountMinorUnits: 100, currency: JPY });
     expect(totals.size).toBe(1);
   });
 });

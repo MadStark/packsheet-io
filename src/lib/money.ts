@@ -18,8 +18,21 @@
  * is no function anywhere below that takes an `amount: number` and a `currency:
  * string` as two loose, independently-omittable arguments, because two arguments that
  * must agree are a standing invitation for a call site to pass one without the other
- * and have the compiler wave it through. `Money` bundles them into one value, and the
- * only way to make one is `makeMoney`, which cannot be handed half a pair.
+ * and have the compiler wave it through. `Money` bundles them into one value.
+ *
+ * WHAT ACTUALLY DOES THE ENFORCING IS THE `CurrencyCode` BRAND, not the number of
+ * constructors — and that is worth being exact about, because the tempting claim ("the
+ * only way to make a `Money` is `makeMoney`") is not true and would mislead anyone
+ * relying on it. `fromDecimal` returns one too, and `Money` is an ordinary exported
+ * interface, so an object literal with the right two fields satisfies it structurally
+ * and no amount of constructor discipline can stop that. What such a literal CANNOT do
+ * is name a currency: `currency` is `CurrencyCode`, a branded string, so the only route
+ * from a database `string | null` to something that type-checks runs through
+ * `isCurrencyCode`. An `as CurrencyCode` cast still gets past it — nothing in
+ * TypeScript can stop that — but a cast is a deliberate act sitting in the diff, which
+ * is exactly what an accidentally-omitted currency is not. A half-pair is
+ * unrepresentable because the currency half cannot be arrived at by accident, not
+ * because the pair has one door.
  *
  * ---------------------------------------------------------------------------
  * WHY A CURRENCY-CODE GUARD, GIVEN THAT THE DATABASE ALREADY CHECKS IT
@@ -53,13 +66,14 @@
  * currency and silently mislabel the rest, pick the most common one, or throw on sight
  * of a second currency and take away the ability to even inspect a mixed pack's costs.
  * All three are worse than the truth. `sumByCurrency` instead returns a map keyed by
- * currency code, one total per currency actually present, so a pack with two GBP items
- * and one USD item yields `{ GBP: …, USD: … }` — a correct answer to the question that
+ * currency code, one `Money` total per currency actually present, so a pack with two GBP
+ * items and one USD item yields `{ GBP: …, USD: … }` — a correct answer to the question that
  * was actually asked, rather than a single plausible-looking number that answers a
  * question nobody could have posed correctly in the first place. `src/lib/totals.ts`
- * is expected to render that map as several lines (or an explicit "mixed currencies"
- * notice) rather than collapsing it — but that rendering choice belongs to that module,
- * not to this one, which only has to make the wrong shortcut impossible to reach for.
+ * renders nothing at all: it carries that map through to its own `PackTotals` and
+ * leaves the choice between several lines and an explicit "mixed currencies" notice to
+ * whatever eventually shows a pack's cost. This module only has to make the wrong
+ * shortcut impossible to reach for.
  *
  * A later contributor WILL look at this and be tempted to "simplify" it into a single
  * total, especially once every pack in a test fixture happens to hold one currency.
@@ -149,17 +163,59 @@ export interface Money {
 
 /**
  * Builds a `Money` from an amount already expressed in minor units (pence, cents — the
- * integer a formatter divides by 10^fractionDigits) and a `CurrencyCode`. This is the
- * ONLY constructor this module exports for a reason: `Money` is meant to be
- * unconstructable except as a matched pair, and a second entry point would just be a
- * second place that pairing could be gotten wrong. `amount` is validated the same way
+ * integer a formatter divides by 10^fractionDigits) and a `CurrencyCode`.
+ *
+ * `fromDecimal` is the other exported constructor — this module has two, one per scale —
+ * and it does not build a `Money` of its own: it converts and then calls this function,
+ * so everything guarded below is guarded on both entry paths. Adding a third constructor
+ * that assembles the object literal directly is the thing to refuse, not a second name.
+ * What makes the PAIRING safe is neither of them but the `CurrencyCode` parameter type;
+ * see the module comment's first section. `amount` is validated the same way
  * `units.ts` validates a weight — see that file's "THROW, NOT RETURN" section, which
  * applies here unchanged: 0 is not a safe stand-in for "unknown", and a NaN or
  * Infinity price would poison every rollup it touches exactly as a NaN weight would.
+ *
+ * MINOR UNITS ARE INTEGERS, AND THAT IS ENFORCED HERE RATHER THAN ASSUMED. Two doc
+ * comments in this codebase already REASON FROM the integrality of a `Money` amount:
+ * `computeItemTotals` in `src/lib/totals.ts` says a line price "needs no rounding of
+ * its own" because an integer times an integer quantity stays one, and `sumByCurrency`
+ * below is described as exact and order-independent for the same reason. Neither claim
+ * survives a fractional amount, and until this check existed nothing made either true.
+ *
+ * The failure it stops is the decimal/minor-unit confusion arriving through the
+ * constructor meant to be the safe one: `makeMoney(42.50, GBP)` reads as "forty-two
+ * pounds fifty" to anybody writing it, and renders as `£0.43` — the same 100× error
+ * `fromDecimal` exists to prevent, entered one function to the left. A decimal amount
+ * has a constructor of its own; this one takes the integer.
+ *
+ * NEGATIVE AMOUNTS ARE REFUSED, mirroring `gear_items.price check (price >= 0 and price
+ * < 'Infinity'::numeric)` the way `isCurrencyCode` mirrors that column's regexp. This
+ * product prices gear; it has no refunds, no credits and no liabilities, so there is no
+ * legitimate negative `Money` for it to construct today. If one ever exists — a
+ * discount line, say — it should arrive as a deliberate change to this guard and to the
+ * column it mirrors, not as a value that slipped past both.
  */
 export function makeMoney(amountMinorUnits: number, currency: CurrencyCode): Money {
   if (!Number.isFinite(amountMinorUnits)) {
     throw new RangeError(`amountMinorUnits must be a finite number, got ${amountMinorUnits}`);
+  }
+  // `Number.isFinite` above would be redundant under `Number.isInteger` alone, which is
+  // false for NaN and both infinities too. It is kept because it is the check that
+  // produces the RIGHT MESSAGE for those three: "42.5 is not a whole number of minor
+  // units" would be a confusing thing to be told about NaN.
+  if (!Number.isInteger(amountMinorUnits)) {
+    throw new RangeError(
+      `amountMinorUnits must be a whole number of minor units, got ${amountMinorUnits}. ` +
+        `A decimal major-unit amount such as 42.50 goes through fromDecimal, which asks Intl ` +
+        `how many minor units the currency actually has; passing it here would render as £0.43.`,
+    );
+  }
+  if (amountMinorUnits < 0) {
+    throw new RangeError(
+      `amountMinorUnits must not be negative, got ${amountMinorUnits}. ` +
+        `gear_items.price carries check (price >= 0), and this product has no refunds, ` +
+        `credits or liabilities for a negative price to mean.`,
+    );
   }
   return { amountMinorUnits, currency };
 }
@@ -177,27 +233,49 @@ export function makeMoney(amountMinorUnits: number, currency: CurrencyCode): Mon
  * time a JPY gear item was priced.
  *
  * The fix is to ask `Intl.NumberFormat` how many fraction digits the currency actually
- * uses — the same source of truth `formatMoney` renders with — rather than hardcoding
- * 2 here and being wrong for the currencies that are not GBP, USD or EUR. See the
- * zero-decimal-currency test for the case this exists to get right.
+ * uses — through `currencyFormat`, literally the same call `formatMoney` renders with —
+ * rather than hardcoding 2 here and being wrong for the currencies that are not GBP, USD
+ * or EUR. See the zero-decimal-currency test for the case this exists to get right.
+ *
+ * `Math.round` is what makes the result an INTEGER, and it is load-bearing rather than
+ * defensive tidying: `1.10 * 100` is `110.00000000000001` in binary floating point, which
+ * `makeMoney`'s integrality check would refuse outright — and, if it did not, would break
+ * the two comments that reason from minor units being integers (a line price needing no
+ * rounding of its own, and `sumByCurrency` being exact and order-independent). Prices
+ * arrive from `numeric(12, 2)`, so the rounding never has more than a representation
+ * error to absorb; tests/money.test.ts pins `1.1` for exactly that reason.
  */
 export function fromDecimal(amount: number, currency: CurrencyCode): Money {
   if (!Number.isFinite(amount)) {
     throw new RangeError(`amount must be a finite number, got ${amount}`);
   }
   return makeMoney(
-    Math.round(amount * 10 ** currencyFractionDigits(currency, DEFAULT_LOCALE)),
+    Math.round(amount * 10 ** currencyFormat(currency, DEFAULT_LOCALE).fractionDigits),
     currency,
   );
 }
 
 /**
- * How many fraction digits `Intl.NumberFormat` uses for `currency` — 2 for GBP/USD/EUR,
- * 0 for JPY/KRW, and so on, read from `Intl` itself rather than a table this module
- * would have to keep in step with ISO 4217's own minor-unit assignments. Both
- * `fromDecimal` and `formatMoney` go through this one function so the two agree with
- * each other about what a currency's minor unit is, by construction, rather than by
- * each separately calling `Intl.NumberFormat` and hoping the results line up.
+ * A currency-style `Intl.NumberFormat` and the number of fraction digits it resolved to,
+ * built together and returned together — 2 for GBP/USD/EUR, 0 for JPY/KRW, 3 for BHD,
+ * read from `Intl` itself rather than from a table this module would have to keep in step
+ * with ISO 4217's own minor-unit assignments.
+ *
+ * THE TWO ARE RETURNED TOGETHER BECAUSE THE SCALE MUST BE THE ONE THE FORMATTER ITSELF
+ * WILL USE. `fromDecimal` multiplies a major-unit decimal UP by 10^n on the way in and
+ * `formatMoney` divides a minor-unit integer back DOWN by 10^n on the way out, so the two
+ * are inverses only while they agree about n. This function is the single place n is ever
+ * decided; the alternative it replaces had `formatMoney` construct its own
+ * `Intl.NumberFormat` and read `resolvedOptions().maximumFractionDigits` itself, which
+ * was two independent resolutions of the same question and a 100× error the day they
+ * answered it differently.
+ *
+ * The locale is a parameter but does not change the answer: a currency's minor-unit count
+ * comes from the currency, not from the reader — GBP resolves to 2 and JPY to 0 under
+ * `en-GB`, `de-DE`, `ja-JP`, `ar-EG` and `en-US` alike. That is what lets `fromDecimal`
+ * resolve under `DEFAULT_LOCALE` and still be the exact inverse of a `formatMoney` call
+ * made for some other locale. It is passed rather than hardcoded because it is the
+ * formatter's locale that must be right for the SYMBOL and the separators.
  *
  * `maximumFractionDigits` is typed as optional on `resolvedOptions()` because the
  * underlying type is shared with `style: 'decimal'` and `style: 'percent'`, where a
@@ -208,34 +286,36 @@ export function fromDecimal(amount: number, currency: CurrencyCode): Money {
  * accepts that names no real currency (see the module comment), which still resolves
  * to `2`, `Intl`'s fallback for a currency it has no minor-unit data for. The `?? 2`
  * below exists only to satisfy that wider type, not because a currency-style format
- * has been observed to omit it.
+ * has been observed to omit it — and it is written once, here, so the fallback cannot
+ * differ between the two sides either.
  */
-function currencyFractionDigits(currency: CurrencyCode, locale: string): number {
-  return (
-    new Intl.NumberFormat(locale, { style: 'currency', currency }).resolvedOptions()
-      .maximumFractionDigits ?? 2
-  );
+function currencyFormat(
+  currency: CurrencyCode,
+  locale: string,
+): { readonly format: Intl.NumberFormat; readonly fractionDigits: number } {
+  const format = new Intl.NumberFormat(locale, { style: 'currency', currency });
+  return { format, fractionDigits: format.resolvedOptions().maximumFractionDigits ?? 2 };
 }
 
 /**
  * The locale `formatMoney` uses when no locale is passed explicitly.
  *
  * WHY AN EXPLICIT DEFAULT RATHER THAN LETTING THE RUNTIME DECIDE. This app
- * server-renders on Cloudflare Workers, and the public share page — where a pack's
- * gear prices are rendered for anyone holding the link, no sign-in required — is its
- * most-visited surface. `Intl.NumberFormat` called with `undefined` as its locale
- * argument does not mean "no formatting preference"; it means "use the JavaScript
- * runtime's default locale", which is read from the operating environment
- * (`ICU_DEFAULT_LOCALE`, container locale settings, or the Worker runtime's own
- * default) rather than from anything about the visitor or the request. That default is
- * NOT guaranteed identical between `astro dev` on a developer's own machine, a CI
- * runner, and the actual Cloudflare Workers production environment — so the exact same
- * `Money` value could render as `£1,234.50` in one place and `£1.234,50` in another,
- * and because the divergence lives in environment configuration rather than in code or
- * data, it would never reproduce locally: a developer investigating a bug report of
- * "the wrong decimal separator" would run the same function against the same `Money`
- * value on their own machine, see the correct output, and conclude the report was
- * mistaken.
+ * server-renders on Cloudflare Workers, and the public share page (Ref 26, not written
+ * yet) — where a pack's gear prices will be rendered for anyone holding the link, no
+ * sign-in required — will be its most-visited surface. `Intl.NumberFormat` called with
+ * `undefined` as its locale argument does not mean "no formatting preference"; it
+ * means "use the JavaScript runtime's default locale", which is read from the
+ * operating environment (`ICU_DEFAULT_LOCALE`, container locale settings, or the Worker
+ * runtime's own default) rather than from anything about the visitor or the request.
+ * That default is NOT guaranteed identical between `astro dev` on a developer's own
+ * machine, a CI runner, and the actual Cloudflare Workers production environment — so
+ * the exact same `Money` value could render as `£1,234.50` in one place and `£1.234,50`
+ * in another, and because the divergence lives in environment configuration rather than
+ * in code or data, it would never reproduce locally: a developer investigating a bug
+ * report of "the wrong decimal separator" would run the same function against the same
+ * `Money` value on their own machine, see the correct output, and conclude the report
+ * was mistaken.
  *
  * `en-GB` rather than `en-US` because this product is a UK-registered outfit
  * (Queensway Studios Limited, per package.json) and `en-GB`'s number formatting — comma
@@ -258,46 +338,58 @@ export const DEFAULT_LOCALE = 'en-GB';
  * The currency code alone drives both the symbol and the number of fraction digits —
  * never a hardcoded table of this module's own. That is what makes this "multi-currency":
  * `formatMoney(makeMoney(1050, 'GBP'))` and `formatMoney(makeMoney(1050, 'JPY'))` take
- * the same code path and the same two-decimal-stored value, and come out as `£10.50`
- * and `¥1,050` respectively, because `Intl` — not this function — knows JPY has no
- * minor unit. See `fromDecimal` for the corresponding entry-side half of that fact.
+ * the same code path and the same stored integer, and come out as `£10.50` and
+ * `JP¥1,050` respectively, because `Intl` — not this function — knows JPY has no minor
+ * unit. The `JP` prefix is not a typo: under `en-GB` the reader's own currency is GBP, so
+ * `Intl` qualifies a foreign yen rather than leaving a bare `¥` to be guessed at, and
+ * tests/money.test.ts pins that exact string. See `fromDecimal` for the corresponding
+ * entry-side half of the scale.
  *
  * `amountMinorUnits` is converted to the currency's major unit before formatting
  * (`Intl.NumberFormat`'s `style: 'currency'` expects a major-unit number and applies
- * its own fraction-digit rounding — it does not take a minor-unit integer), reading
- * `resolvedOptions().maximumFractionDigits` the same way `currencyFractionDigits`
- * (which `fromDecimal` calls) does, so the two functions agree on what "minor unit"
- * means for any given currency without this module maintaining a currency-to-scale
- * table of its own.
+ * its own fraction-digit rounding — it does not take a minor-unit integer), by the same
+ * `currencyFormat` call `fromDecimal` multiplied up with, so the two cannot disagree
+ * about what "minor unit" means for any given currency.
  */
 export function formatMoney(money: Money, locale: string = DEFAULT_LOCALE): string {
-  const formatter = new Intl.NumberFormat(locale, {
-    style: 'currency',
-    currency: money.currency,
-  });
-  // `?? 2` here for the same reason as in currencyFractionDigits above — this is a
-  // second, separately-configured formatter (locale can differ from DEFAULT_LOCALE),
-  // so its own resolvedOptions() is read directly rather than reusing that helper,
-  // which would otherwise construct a third Intl.NumberFormat for no benefit.
-  const fractionDigits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
-  return formatter.format(money.amountMinorUnits / 10 ** fractionDigits);
+  const { format, fractionDigits } = currencyFormat(money.currency, locale);
+  return format.format(money.amountMinorUnits / 10 ** fractionDigits);
 }
 
 /**
- * A per-currency rollup: sums a list of `Money` into a map from currency code to total
- * minor units for that currency. See the module comment, "CROSS-CURRENCY SUMMING IS
+ * A per-currency rollup: sums a list of `Money` into a map from currency code to the
+ * total `Money` for that currency. See the module comment, "CROSS-CURRENCY SUMMING IS
  * IMPOSSIBLE, NOT MERELY DISCOURAGED", for why this is the only summing function this
  * module offers and why a `sum(): Money` collapsing every currency into one must never
  * be added beside it.
+ *
+ * THE VALUES ARE `Money`, NOT BARE NUMBERS, and that is the point of the map rather than
+ * an incidental convenience. Everything above spends sixty lines making an amount
+ * unconstructable without its currency, precisely so no call site can hold one half of
+ * the pair — and a `ReadonlyMap<CurrencyCode, number>` would give that away again at the
+ * exit: the currency survives as the KEY, but the scale survives only in a doc comment,
+ * so `£{{ total }}` over the entries of such a map renders £4250 for £42.50. That is the
+ * identical 100× error `fromDecimal` and `makeMoney`'s integrality check refuse on the
+ * way in, reintroduced on the way out, and a caller cannot even be blamed for it: the
+ * value they were handed was an ordinary number that looked ready to print.
+ *
+ * Every total is built through `makeMoney`, not assembled as an object literal, so the
+ * accumulator cannot outgrow the constructor's guards — and the addition itself needs no
+ * rounding: minor units are integers (`makeMoney` enforces it), so summing them is exact
+ * and independent of the order the list happens to arrive in.
  *
  * An empty list returns an empty map rather than, say, a zero `Money` in some assumed
  * currency — there is no currency to assume, and an empty pack legitimately has no
  * total to report in any currency at all.
  */
-export function sumByCurrency(monies: readonly Money[]): ReadonlyMap<CurrencyCode, number> {
-  const totals = new Map<CurrencyCode, number>();
+export function sumByCurrency(monies: readonly Money[]): ReadonlyMap<CurrencyCode, Money> {
+  const totals = new Map<CurrencyCode, Money>();
   for (const money of monies) {
-    totals.set(money.currency, (totals.get(money.currency) ?? 0) + money.amountMinorUnits);
+    const running = totals.get(money.currency);
+    totals.set(
+      money.currency,
+      makeMoney((running?.amountMinorUnits ?? 0) + money.amountMinorUnits, money.currency),
+    );
   }
   return totals;
 }

@@ -7,12 +7,14 @@
 -- a winner; see "THREE BUCKETS THAT PARTITION" in that module's comment for the full
 -- argument against a precedence rule.
 --
--- That module comment also says the database permits the combination TODAY, and that
--- this migration is the fix: until now `worn` and `consumable` were two independent
--- booleans with nothing coupling them, so a row with both true was one PATCH away
--- through the ordinary Data API, defended against only by the application throwing on
--- read. This constraint closes that gap so the schema and the engine agree, rather than
--- the engine standing alone against rows the database was happy to store.
+-- This constraint and that refusal ship in the same commit, and each covers what the
+-- other cannot. Until now `worn` and `consumable` were two independent booleans with
+-- nothing coupling them, so a row with both true was one PATCH away through the ordinary
+-- Data API and the application throwing on read was the only defence — which does
+-- nothing for a row written by psql, by a restore, or by a later import path that never
+-- calls the engine. The engine's refusal stays for the converse reason: it is a pure
+-- function over a shape, and it is handed objects that never came from this table at
+-- all. Neither makes the other redundant, and removing either one leaves a real gap.
 --
 -- THIS IS NOT A STRUCTURAL IMPOSSIBILITY, and it is worth being honest about that: two
 -- independent booleans can always be true together as far as Postgres's type system is

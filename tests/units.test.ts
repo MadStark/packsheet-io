@@ -110,13 +110,18 @@ describe('known-value anchors', () => {
     expect(fromGrams(1000, 'kg')).toBe(1);
   });
 
-  // Crosses two imperial factors via grams (16 * 28.349523125 g, divided back down by
-  // 453.59237), so floating-point division does not guarantee bit-exact 1 — this is
-  // the anchor from the ticket, verified to full double precision rather than only
-  // after rounding, so it also proves the two imperial constants agree with each other
-  // and not only with their own definitions.
-  it('16 oz is 1 lb', () => {
-    expect(convertWeight(16, 'oz', 'lb')).toBeCloseTo(1, 12);
+  // The anchor from the ticket, and the one that crosses two imperial factors: 16 oz
+  // into grams, then back down by 453.59237. It holds by EXACT equality, and that is a
+  // property worth pinning rather than a tolerance worth choosing. 16 is a power of two,
+  // so multiplying by it only shifts the exponent of whatever double `28.349523125` is
+  // stored as — no bits are lost — and the product lands on precisely the double stored
+  // for `453.59237` (`16 * 28.349523125 === 453.59237` is `true`). The division is then
+  // x / x. A tolerance here would pass just as happily against two imperial constants
+  // that agreed with their own definitions to nine decimal places and with each other
+  // not at all, which is the thing this anchor is for.
+  it('16 oz is exactly 1 lb', () => {
+    expect(16 * FACTORS.oz).toBe(FACTORS.lb);
+    expect(convertWeight(16, 'oz', 'lb')).toBe(1);
   });
 });
 
@@ -141,7 +146,11 @@ describe('round-trip identity', () => {
   // WEIGHT_DECIMALS, not merely close at some arbitrary tolerance. Floating-point
   // division and multiplication by the imperial factors do not perfectly undo each
   // other bit-for-bit, which is exactly what roundWeight exists to absorb.
-  it.each(UNIT_PAIRS)('round-trips %s -> %s -> %s back to the original value', (from, to) => {
+  // Two placeholders, because a UNIT_PAIRS row is two units. The title used to carry a
+  // third for the return leg and vitest filled it with `undefined` — sixteen titles
+  // reading "round-trips g -> kg -> undefined", which nobody had cause to read closely
+  // while they were green.
+  it.each(UNIT_PAIRS)('round-trips %s -> %s and back to the original value', (from, to) => {
     for (const value of WEIGHT_VALUES) {
       const there = convertWeight(value, from, to);
       const back = convertWeight(there, to, from);
@@ -182,6 +191,77 @@ describe('NaN and Infinity are rejected, not propagated', () => {
   it('does not reject ordinary finite values, including zero', () => {
     expect(() => toGrams(0, 'g')).not.toThrow();
     expect(() => toGrams(999_999_999.999, 'lb')).not.toThrow();
+  });
+});
+
+/**
+ * THE OTHER HALF OF THE CHECK CONSTRAINT. `gear_items.weight` is `check (weight >= 0 and
+ * weight < 'Infinity'::numeric)`, and the block above only pins the upper half. Every
+ * value here is perfectly finite, so none of them is caught by the finiteness guard —
+ * delete the sign check and this block goes red on its own, which is the property
+ * tests/safe-next-path.test.ts's trap demands and the reason these are not folded into
+ * the table above as three more rows.
+ *
+ * The reachability is not hypothetical: `pack_items.overrides` is constrained only to be
+ * a JSON object, and its owner may PATCH it on any unlocked pack item.
+ */
+describe('negative weights are rejected, not silently subtracted', () => {
+  const negatives: [label: string, value: number][] = [
+    ['a whole negative value', -400],
+    // -0.001 is the smallest magnitude `numeric(12, 3)` can even express, so a guard
+    // written as `value < -1` or with any tolerance at all would let it through.
+    ['the smallest storable negative value', -0.001],
+  ];
+
+  it.each(negatives)('toGrams throws for %s', (_label, value) => {
+    expect(() => toGrams(value, 'g')).toThrow(RangeError);
+    expect(() => toGrams(value, 'g')).toThrow(/must not be negative/);
+  });
+
+  it.each(negatives)('fromGrams throws for %s', (_label, value) => {
+    expect(() => fromGrams(value, 'kg')).toThrow(/must not be negative/);
+  });
+
+  it.each(negatives)('convertWeight throws for %s', (_label, value) => {
+    expect(() => convertWeight(value, 'oz', 'lb')).toThrow(/must not be negative/);
+  });
+
+  it.each(negatives)('roundWeight throws for %s', (_label, value) => {
+    expect(() => roundWeight(value)).toThrow(/must not be negative/);
+  });
+
+  // Negative ZERO is not a negative weight. `-0 < 0` is false in IEEE 754, and it can
+  // arrive from an ordinary `0 * -1` upstream; refusing it would be refusing zero.
+  it('accepts negative zero, which is zero', () => {
+    expect(toGrams(-0, 'kg')).toBe(-0);
+  });
+});
+
+/**
+ * A conversion can leave the finite range its own argument sat well inside, and this is
+ * the only block where the value being refused is one this module MANUFACTURED rather
+ * than one it was handed. Every argument below passes the input guard: it is the product
+ * that is checked.
+ *
+ * Why it matters more than its reachability suggests: `Infinity` is the one bad value
+ * that makes tests/totals.test.ts's partition assertion pass VACUOUSLY, because
+ * `Infinity === Infinity` — a pack whose every line is Infinity satisfies
+ * `base + worn + consumable === total` and reports green while meaning nothing. NaN at
+ * least fails that identity.
+ */
+describe('a conversion that overflows is refused rather than returned', () => {
+  it('throws when multiplying into grams overflows to Infinity', () => {
+    // Finite argument, finite factor, infinite product: 1e308 * 1000.
+    expect(Number.isFinite(1e308)).toBe(true);
+    expect(() => toGrams(1e308, 'kg')).toThrow(RangeError);
+    expect(() => toGrams(1e308, 'kg')).toThrow(/converted to grams must be a finite number/);
+  });
+
+  // The argument itself is still accepted at that magnitude when the factor is 1, so the
+  // test above is about the PRODUCT and not about a size limit on the input.
+  it('still accepts the same magnitude where the conversion does not overflow', () => {
+    expect(toGrams(1e308, 'g')).toBe(1e308);
+    expect(fromGrams(1e308, 'kg')).toBe(1e305);
   });
 });
 

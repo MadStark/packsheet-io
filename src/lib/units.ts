@@ -34,7 +34,7 @@
  * memory, during arithmetic, never at rest.
  *
  * ---------------------------------------------------------------------------
- * THROW, NOT RETURN, ON NaN AND INFINITY
+ * THROW, NOT RETURN, ON NaN, INFINITY AND NEGATIVES
  * ---------------------------------------------------------------------------
  *
  * `gear_items.weight` carries `check (weight >= 0 and weight < 'Infinity'::numeric)`,
@@ -57,6 +57,31 @@
  * something weighs, and it would sum into a pack total looking exactly as valid as
  * every honest figure next to it. A bad weight has to stop the computation that
  * produced it, loudly, at the point where it first becomes a weight — which is here.
+ *
+ * BOTH HALVES OF THAT CHECK CONSTRAINT, not only the upper one. `weight >= 0` is the
+ * half that is easy to skip here because it looks like a data-entry concern the database
+ * has already handled — and it has, for `gear_items.weight`. It has NOT handled
+ * `pack_items.overrides`, which is constrained only to `jsonb_typeof(overrides) =
+ * 'object'` with its contents unconstrained, and which the owner may PATCH on any
+ * unlocked pack item through the ordinary Data API. An override of `{"weight": -400}` is
+ * therefore an ordinary, reachable value, and a negative gram figure is worse than a NaN
+ * one: NaN poisons every total it touches and is at least visible as "NaN" to anything
+ * that looks, whereas -400 g subtracts from a pack total, leaves it a perfectly ordinary
+ * finite number, and — because the buckets partition and each line lands in exactly one
+ * of them — keeps `base + worn + consumable === total` true while every number in the
+ * identity is wrong. There is no structural assertion downstream that can catch it. It
+ * has to be refused at entry, which is here.
+ *
+ * THE PRODUCT IS CHECKED AS WELL AS THE ARGUMENT. A conversion can leave the finite
+ * range that its own input sat comfortably inside: `toGrams(1e308, 'kg')` is `Infinity`
+ * built out of two entirely finite numbers. `numeric(12, 3)` caps a stored weight near
+ * 1e9, so this needs an override or a hand-written snapshot to reach — but those are
+ * exactly the values this module exists to defend against, being the ones that never
+ * went through the database at all. Checking only the argument would let this module
+ * MANUFACTURE the poison it was written to keep out, and the resulting `Infinity` is the
+ * one value that defeats the totals engine's structural guarantee rather than tripping
+ * it: `Infinity === Infinity`, so a pack whose every line is Infinity satisfies
+ * `base + worn + consumable === total` and reports green while meaning nothing.
  */
 
 /**
@@ -112,15 +137,28 @@ export const WEIGHT_DECIMALS = 3;
 const WEIGHT_ROUNDING_FACTOR = 10 ** WEIGHT_DECIMALS;
 
 /**
- * A value that is not a finite number cannot mean anything as a weight — see "THROW,
- * NOT RETURN" above for why that is treated as a defect at the boundary rather than
- * quietly repaired or passed through. `Number.isFinite` alone covers both guard rails
- * this module promises: it is `false` for `NaN` and for both signed infinities, so one
- * check does the work of two.
+ * The two things a number has to be to mean anything as a weight, mirroring
+ * `gear_items.weight`'s own `check (weight >= 0 and weight < 'Infinity'::numeric)`
+ * clause for clause — see "THROW, NOT RETURN" above for why either failure is treated
+ * as a defect at the boundary rather than quietly repaired or passed through.
+ *
+ * `Number.isFinite` covers the constraint's upper half on its own: it is `false` for
+ * `NaN` and for both signed infinities, so one check does the work of two — and the
+ * NaN case is the reason the constraint needs an upper bound at all, since Postgres
+ * orders NaN above every numeric value and `'NaN'::numeric >= 0` is TRUE.
+ *
+ * The two are separate `if`s with separate messages rather than one combined
+ * condition, because `-400` and `NaN` are different mistakes made by different people:
+ * one is a value somebody typed or computed with a sign error, the other is a parse or
+ * a division that failed upstream and never announced itself. A single "invalid weight"
+ * message would make the reader work out which they were looking at.
  */
-function assertFiniteWeight(value: number, label: string): void {
+function assertWeight(value: number, label: string): void {
   if (!Number.isFinite(value)) {
     throw new RangeError(`${label} must be a finite number, got ${value}`);
+  }
+  if (value < 0) {
+    throw new RangeError(`${label} must not be negative, got ${value}`);
   }
 }
 
@@ -128,20 +166,41 @@ function assertFiniteWeight(value: number, label: string): void {
  * Converts a value entered in `unit` into grams — the one conversion every weight in
  * this product passes through exactly once, at entry. See the module comment for why
  * nothing downstream of this call ever holds a non-gram number.
+ *
+ * The RESULT is asserted as well as the argument, and the second call is not
+ * redundant: multiplying a finite value by a finite factor can still overflow to
+ * `Infinity` (`1e308 * 1000`), which would hand a caller the exact value this module
+ * exists to keep out of a total — see "THE PRODUCT IS CHECKED AS WELL AS THE ARGUMENT"
+ * in the module comment. Sign cannot change under a positive factor, so it is only the
+ * finiteness half that this second call can actually catch; it goes through the same
+ * helper anyway rather than a bare `Number.isFinite`, so a fifth unit with a negative
+ * or zero factor could not quietly make that reasoning false.
  */
 export function toGrams(value: number, unit: WeightUnit): number {
-  assertFiniteWeight(value, 'value');
-  return value * GRAMS_PER_UNIT[unit];
+  assertWeight(value, 'value');
+  const grams = value * GRAMS_PER_UNIT[unit];
+  assertWeight(grams, `${value} ${unit} converted to grams`);
+  return grams;
 }
 
 /**
  * Converts a canonical gram figure back out to `unit` for entry or display. The
  * inverse of `toGrams`, and the ONLY place a gram figure is allowed to stop being one
  * — never a silent side effect of some other computation.
+ *
+ * The result is asserted for the same reason as in `toGrams`, and here the check is
+ * genuinely unreachable TODAY rather than merely hard to reach: every factor in
+ * `GRAMS_PER_UNIT` is at least 1, so dividing a finite gram figure by one of them can
+ * only move it towards zero. It is written anyway because that is a property of the
+ * table's current contents, not of this function — a sub-gram unit (`mg`, at 0.001)
+ * would make this division the overflow path the multiplication is in `toGrams`, and
+ * the person adding that row should not also have to notice this line was missing.
  */
 export function fromGrams(grams: number, unit: WeightUnit): number {
-  assertFiniteWeight(grams, 'grams');
-  return grams / GRAMS_PER_UNIT[unit];
+  assertWeight(grams, 'grams');
+  const value = grams / GRAMS_PER_UNIT[unit];
+  assertWeight(value, `${grams} g converted to ${unit}`);
+  return value;
 }
 
 /**
@@ -164,8 +223,19 @@ export function convertWeight(value: number, from: WeightUnit, to: WeightUnit): 
  * is the helper the round-trip guarantee needs: a value entered, converted for display
  * in another unit, and converted back must reproduce what the database would have
  * stored, not merely something close to it at the seventeenth decimal digit.
+ *
+ * IT ROUNDS WHATEVER UNIT IT IS HANDED, and the unit is the caller's business, because
+ * `numeric(12, 3)` is three decimals OF THE ENTERED UNIT — `gear_items.weight` is stored
+ * as entered, not canonicalised (see "GRAMS IS THE CANONICAL UNIT"). Three decimals of a
+ * gram figure is not three decimals of a pound: 0.001 lb is 0.454 g, so rounding the gram
+ * figure keeps roughly four hundred and fifty times more precision than the column would
+ * for that row. Neither number is wrong; they are answers to different questions. A caller
+ * reproducing what the database stores rounds in the entered unit —
+ * `roundWeight(fromGrams(grams, unit))`, which is the order tests/units.test.ts's
+ * round-trip uses — while a caller rounding a gram figure for display is rounding grams
+ * and should not read this scale as the column's.
  */
 export function roundWeight(value: number): number {
-  assertFiniteWeight(value, 'value');
+  assertWeight(value, 'value');
   return Math.round(value * WEIGHT_ROUNDING_FACTOR) / WEIGHT_ROUNDING_FACTOR;
 }

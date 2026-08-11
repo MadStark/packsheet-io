@@ -16,6 +16,9 @@ import {
 // state "the engine consumes what the application actually fetches".
 import type { packTreeQuery } from './support/local-database';
 import type { Json } from '../src/lib/database.types';
+// `money.ts` is pure too, so importing the formatter keeps this file's purity claim
+// intact — and the price rollup is only checkable end to end through it.
+import { formatMoney, type CurrencyCode } from '../src/lib/money';
 
 /**
  * `src/lib/totals.ts` — the third file of the Ref 23 engine, and the only place in the
@@ -42,15 +45,27 @@ import type { Json } from '../src/lib/database.types';
  *     decides the precedence. Every other resolution case here has exactly one of the two
  *     sources present, so an engine written the other way round — live gear preferred,
  *     the snapshot read only once the reference is gone — is a defensible-looking
- *     implementation that this file catches in exactly two places and nowhere else.
+ *     implementation, and this is the ONE case in this file that catches its arithmetic.
  *   - "merges overrides over the snapshot too" is the only case where an override sits on
- *     a frozen item, and is the second of those two places. An engine that applied
- *     overrides only on the live-gear path passes every other override case here.
+ *     a frozen item. An engine that applied overrides only on the live-gear path passes
+ *     every other override case here and fails this one alone.
  *
  * Both were confirmed the way that comment demands, rather than reasoned about: each rule
- * was actually broken in src/lib/totals.ts — the precedence inverted, then the merge
- * skipped on the frozen path — the suite run, exactly the named cases seen to go red (2
- * failed, 50 passed; then 1 failed, 51 passed), and the change reverted.
+ * was actually broken in src/lib/totals.ts, the suite run, and the change reverted. What
+ * that showed, exactly, and it is worth recording precisely because the obvious summary
+ * is wrong:
+ *
+ *   - Inverting the base selection alone — `gear ?? snapshot` instead of
+ *     `snapshot ?? gear` — turns exactly ONE case red, the precedence case (1 failed, 56
+ *     passed as this file stands). Not two. "merges overrides over the snapshot too"
+ *     survives it, because the override it applies (450 g) wins over whichever base was
+ *     chosen, so the number it asserts is right for the wrong reason.
+ *   - That second case only joins it when `source` is inverted too (2 failed, 55 passed).
+ *     It is load-bearing for the `source` FIELD, not for the arithmetic — which is a
+ *     genuine thing to pin, since `source` is what tells a reader a row is frozen, but it
+ *     is not a second guard on the total.
+ *   - Skipping the merge on the frozen path turns exactly that one case red (1 failed, 56
+ *     passed) and nothing else, as claimed.
  */
 
 // ---------------------------------------------------------------------------
@@ -61,22 +76,37 @@ import type { Json } from '../src/lib/database.types';
  * A gear row as the query embeds it. 100 g by default — the same weight
  * tests/support/fixtures.ts gives its first gear item, so a number seen in both files
  * means the same thing.
+ *
+ * `price` and `currency` are stated as an explicit null pair rather than left out. They
+ * are required-but-nullable on `PackTreeGearItem`, so this fixture could not omit them
+ * even if it wanted to — which is the property being relied on: a fixture that cannot
+ * accidentally represent "the query forgot to fetch this" cannot accidentally assert
+ * what the engine does with such a row either.
  */
 function gear(overrides: Partial<PackTreeGearItem> = {}): PackTreeGearItem {
-  return { name: 'Gear 1', weight: 100, weight_unit: 'g', ...overrides };
+  return {
+    name: 'Gear 1',
+    weight: 100,
+    weight_unit: 'g',
+    price: null,
+    currency: null,
+    ...overrides,
+  };
 }
 
 /**
- * A pack item, defaulted to the shape today's share-page select actually returns:
- * `consumable` and `packed` absent rather than `false`, because that is what a row looks
- * like when the column was not selected, and the engine's reading of an absent flag is a
- * decision this suite should be exercising by default rather than in one special case.
+ * A pack item, defaulted to the shape PACK_TREE_SELECT returns: every flag present and
+ * false, because `worn`, `consumable` and `packed` are all `boolean not null default
+ * false` columns and that select fetches all three. There is no "absent flag" case
+ * to default here any more — the type has no room for one.
  */
 function packItem(overrides: Partial<PackTreeItem> = {}): PackTreeItem {
   return {
     id: 'item-1',
     quantity: 1,
     worn: false,
+    consumable: false,
+    packed: false,
     overrides: {},
     gear_items: gear(),
     ...overrides,
@@ -212,13 +242,11 @@ describe('resolvePackItem', () => {
   });
 
   /**
-   * And overrides still apply on the frozen path. The snapshot captures the GEAR row, not
-   * the pack item, so an engine that skipped the merge here would make a pack change its
-   * own total at the moment it was locked — 450 g jumping back to the closet's 100 g as a
-   * side effect of being frozen for posterity.
-   *
-   * Only this case catches that: "merges overrides over the live gear row" above passes
-   * happily against an implementation that merges on one path only.
+   * And overrides still apply on the frozen path — the argument for why is in
+   * src/lib/totals.ts under "OVERRIDES ARE MERGED OVER THE SNAPSHOT TOO" and is not
+   * restated here. What belongs here is what is specific to the case: it is the ONLY one
+   * that catches a merge applied on the live-gear path alone, because "merges overrides
+   * over the live gear row" above passes happily against exactly that implementation.
    */
   it('merges overrides over the snapshot too', () => {
     const resolved = resolvePackItem(
@@ -258,9 +286,17 @@ describe('resolvePackItem', () => {
 
 /**
  * "ABSENT IS A VALUE; MALFORMED IS A DEFECT" — the module comment's narrowing rule, case
- * by case. Every row here gets PAST the precedence rules above (there is a base to
- * resolve from) and is refused only by the narrowing, which is the property the
- * safe-next-path trap demands: none of these is caught by an earlier check.
+ * by case, and the property the safe-next-path trap demands is that each row is refused
+ * by a DIFFERENT clause rather than all of them piling onto the first.
+ *
+ * That is what the regexes are for: each names the message its own clause produces, so a
+ * row that started failing somewhere earlier would fail this table rather than pass it
+ * quietly. Two rows are refused before the merge happens at all — the non-object
+ * snapshot and the array overrides, caught by the first and second statements of
+ * `resolvePackItem` — and that is where they belong, since there is no merged record to
+ * read a weight out of when the thing being merged is a number. Every other row gets past
+ * the precedence rules with a perfectly good base to resolve from and is stopped only by
+ * the narrowing of the field it names.
  */
 describe('resolvePackItem refuses malformed overrides and snapshots', () => {
   const malformed: [label: string, item: PackTreeItem, expected: RegExp][] = [
@@ -316,12 +352,41 @@ describe('resolvePackItem refuses malformed overrides and snapshots', () => {
       /price of null/,
     ],
     [
+      // The price side of "NaN-shaped", and NOT the same clause as the row above: null
+      // is refused by `typeof price !== 'number'`, this one is a number and reaches
+      // `!Number.isFinite`. Without it that half of the disjunction was unexercised —
+      // delete it and NaN sails through to `fromDecimal`, which does throw, but with a
+      // message that names no row at all. The weight side has had this case all along.
+      'a price that is a number but not a finite one',
+      packItem({ gear_items: gear({ price: Number.NaN, currency: 'GBP' }) }),
+      /price of NaN with a currency of "GBP", which is not a finite number/,
+    ],
+    [
       'an override that removes only the currency',
       packItem({
         gear_items: gear({ price: 42.5, currency: 'GBP' }),
         overrides: { currency: null },
       }),
       /not a three-letter ISO 4217 code/,
+    ],
+    [
+      // `gear_items.weight` is `check (weight >= 0 ...)`, but `overrides` is constrained
+      // only to be a JSON object, so this is one ordinary PATCH away for the owner of an
+      // unlocked pack. It passes every other rule in this function — finite, a number, a
+      // known unit, an object — and is refused only by the sign check.
+      'an override whose weight is negative',
+      packItem({ overrides: { weight: -400 } }),
+      /weight of -400, which is negative/,
+    ],
+    [
+      // The same hole on the price side, mirroring `check (price >= 0 ...)`. Reached only
+      // by the sign check: -1 is finite, is a number, and comes with a valid currency.
+      'an override whose price is negative',
+      packItem({
+        gear_items: gear({ price: 42.5, currency: 'GBP' }),
+        overrides: { price: -1 },
+      }),
+      /price of -1, which is negative/,
     ],
   ];
 
@@ -348,6 +413,59 @@ describe('resolvePackItem refuses malformed overrides and snapshots', () => {
   it('treats null overrides as no overrides rather than a defect', () => {
     expect(resolvePackItem(packItem({ overrides: null })).weightGrams).toBe(100);
   });
+
+  /**
+   * WHY THE SIGN CHECK LIVES HERE AND NOT ONLY IN units.ts. `toGrams` refuses a negative
+   * weight too, so deleting this module's check leaves the pack refused either way — and
+   * the difference, which is the whole reason for the duplication the module comment
+   * defends, is the message. `units.ts` can only say "value must not be negative, got
+   * -400"; a pack holds forty rows and that names none of them.
+   *
+   * Asserted as two separate expectations rather than one combined regexp so a failure
+   * says which half is missing: the refusal, or the row it happened on.
+   */
+  it('names the row a negative weight came from, not just the value', () => {
+    const item = packItem({
+      gear_items: gear({ name: 'Wool socks' }),
+      overrides: { weight: -400 },
+    });
+
+    expect(() => resolvePackItem(item)).toThrow(/negative/);
+    expect(() => resolvePackItem(item)).toThrow(/pack item item-1 \("Wool socks"\)/);
+  });
+
+  /**
+   * And a name that is PRESENT but blank falls back to the bare id, which is the half of
+   * `describeItem` the type system cannot state: `typeof name === 'string'` is true of
+   * `'   '`, so without the `trim().length > 0` half the message reads
+   * `pack item item-1 ("   ")` — an item that looks as though it were named something
+   * invisible, in a message whose entire job is helping somebody find the row. `name text
+   * not null check (length(btrim(name)) > 0)` refuses a blank name on the gear row, but
+   * an override or a hand-written snapshot can carry one, which is how it arrives here.
+   *
+   * Asserted with an anchored regexp rather than a `not.toThrow`, so the test says which
+   * string it wants rather than merely which one it does not.
+   */
+  it('names a blank-named item by its id alone, not by an empty pair of quotes', () => {
+    const item = packItem({ gear_items: gear({ name: '   ' }), overrides: { weight: -400 } });
+
+    expect(() => resolvePackItem(item)).toThrow(/^pack item item-1 resolved to a weight of/);
+  });
+
+  /**
+   * The two failures that happen BEFORE there is a merged record to read a name out of.
+   * Both had `describeItem(item.id, undefined)` hardcoded and so could never name
+   * anything, while `item.gear_items.name` sat in scope one line above — which is the
+   * case `describeItem` exists for in the first place.
+   */
+  it.each([
+    ['a snapshot that is not an object', { snapshot: 5 as Json }],
+    ['overrides that are not an object', { overrides: [1, 2] as Json }],
+  ])('names the item from its live gear row when it has %s', (_label, broken) => {
+    const item = packItem({ gear_items: gear({ name: 'Wool socks' }), ...broken });
+
+    expect(() => resolvePackItem(item)).toThrow(/pack item item-1 \("Wool socks"\)/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -361,11 +479,11 @@ describe('bucket classification', () => {
   const cases: [label: string, bucket: WeightBucket, flags: Partial<PackTreeItem>][] = [
     ['an item that is neither worn nor consumable', 'base', { worn: false, consumable: false }],
     ['a worn item', 'worn', { worn: true, consumable: false }],
+    // There is no fourth row for "an item with no consumable flag at all". That case
+    // used to be here, and used to land in base — which was the defect, not the
+    // behaviour: `consumable` is a required boolean now, so a row that does not say is
+    // a compile error rather than a pack whose food silently weighs as base weight.
     ['a consumable item', 'consumable', { worn: false, consumable: true }],
-    // The share page's select does not fetch `consumable` at all, so "absent" is the
-    // everyday shape rather than an exotic one, and reading it as false is a decision
-    // rather than an accident. See the KNOWN GAP in the module comment.
-    ['an item with no consumable flag at all', 'base', { worn: false }],
   ];
 
   it.each(cases)('puts %s in the %s bucket', (_label, bucket, flags) => {
@@ -381,11 +499,14 @@ describe('bucket classification', () => {
   });
 
   /**
-   * The refusal. Two independent booleans with no CHECK constraint coupling them means
-   * the database permits this row today, and a precedence rule ("worn wins") would make
-   * the number silently disagree with what the user ticked. The message has to name the
-   * item and say what to do about it, because only the person who ticked both can decide
-   * which one they meant.
+   * The refusal, on the read side. `pack_items_worn_consumable_exclusive` (added in the
+   * same commit, and asserted in tests/core-schema.test.ts) stops this row existing at
+   * rest — but the engine is a pure function over a shape, and the item below never went
+   * near a database. That is the case this test is: input the constraint cannot reach.
+   *
+   * A precedence rule ("worn wins") would make the number silently disagree with what the
+   * user ticked, so the message has to name the item and say what to do about it, because
+   * only the person who ticked both can decide which one they meant.
    */
   it('refuses an item flagged both worn and consumable', () => {
     const both = packItem({
@@ -463,6 +584,43 @@ describe('base + worn + consumable === total', () => {
       const summed = totals.categories.reduce((sum, each) => sum + each[bucket], 0);
       expect(summed).toBe(totals[bucket]);
     }
+  });
+
+  /**
+   * THE CASE THE PARTITION CANNOT CATCH, which is why it is asserted here rather than
+   * left to the refusal table above. A negative line lands in exactly one bucket like any
+   * other, so `base + worn + consumable === total` stays TRUE while every number in it is
+   * wrong: two 1000 g items, one overridden to -400 g, and the pack claims 600 g — a
+   * plausible figure, adding up perfectly, with nothing on the page to distinguish it
+   * from the truth. The identity is asserted here too, to say plainly that it would have
+   * held; the refusal is what stops the number existing.
+   */
+  it('refuses a negative line rather than subtracting it from an otherwise valid pack', () => {
+    const withNegativeLine = packOf(
+      packItem({ id: 'tent', gear_items: gear({ weight: 1000 }) }),
+      packItem({
+        id: 'quilt',
+        gear_items: gear({ name: 'Quilt', weight: 1000 }),
+        overrides: { weight: -400 },
+      }),
+    );
+
+    expect(() => computeTotals(withNegativeLine)).toThrow(/negative/);
+    expect(() => computeTotals(withNegativeLine)).toThrow(/quilt.*Quilt/s);
+
+    // The same pack with the sign flipped is accepted and totals 1400 g, so what this
+    // test refuses is the SIGN and nothing else about the shape of the row — and it puts
+    // the two numbers side by side: 1400 g for `{"weight": 400}`, 600 g for
+    // `{"weight": -400}`, neither of which looks wrong on its own.
+    const positive = packOf(
+      packItem({ id: 'tent', gear_items: gear({ weight: 1000 }) }),
+      packItem({
+        id: 'quilt',
+        gear_items: gear({ name: 'Quilt', weight: 1000 }),
+        overrides: { weight: 400 },
+      }),
+    );
+    expect(computeTotals(positive).total).toBe(1400);
   });
 });
 
@@ -545,6 +703,33 @@ describe('category and per-item rollups', () => {
     ]);
   });
 
+  /**
+   * A ZERO-WEIGHT ITEM IS AN ITEM. `gear_items.weight` is `not null default 0`, so a row
+   * somebody has not weighed yet — or a stuff sack they genuinely count as nothing — is
+   * an ordinary, reachable value rather than a stand-in for "unknown", which is exactly
+   * the distinction units.ts's "THROW, NOT RETURN" section turns on.
+   *
+   * It is worth a case of its own because zero is the one weight a truthiness test would
+   * silently reclassify: a guard written `if (!weight) throw` instead of
+   * `!Number.isFinite(weight)`, or a filter dropping falsy lines, refuses or discards this
+   * item while every other assertion in this file stays green — and the item vanishes from
+   * `itemCount` too, so the pack quietly lists fewer things than it holds.
+   */
+  it('counts a zero-weight item rather than dropping it', () => {
+    const totals = computeTotals(
+      packOf(
+        packItem({ id: 'stuff-sack', quantity: 2, gear_items: gear({ weight: 0 }) }),
+        packItem({ id: 'tent', gear_items: gear({ weight: 1000 }) }),
+      ),
+    );
+
+    expect(totals.total).toBe(1000);
+    expect(totals.itemCount).toBe(3);
+    const [sack] = totals.categories[0].items;
+    expect(sack.unitWeightGrams).toBe(0);
+    expect(sack.lineWeightGrams).toBe(0);
+  });
+
   it('keeps a category with no items, rolled up to zeroes', () => {
     const totals = computeTotals(pack([category('empty', []), category('full', [packItem()])]));
 
@@ -621,9 +806,13 @@ describe('itemCount and packedCount', () => {
     expect(totals.categories.map((each) => each.packedCount)).toEqual([8, 2]);
   });
 
-  // Absent, like `consumable`, because the share page's select does not fetch it.
-  it('treats an absent packed flag as not packed', () => {
-    expect(computeTotals(packOf(packItem({ quantity: 4 }))).packedCount).toBe(0);
+  // An unpacked row contributes its quantity to itemCount and nothing to packedCount, so
+  // the two counts are genuinely independent rather than one being derived from the other.
+  it('counts an unpacked row’s quantity as items but not as packed', () => {
+    const totals = computeTotals(packOf(packItem({ quantity: 4, packed: false })));
+
+    expect(totals.itemCount).toBe(4);
+    expect(totals.packedCount).toBe(0);
   });
 
   /**
@@ -672,17 +861,86 @@ describe('price rollups', () => {
   it('keeps one total per currency and never adds two together', () => {
     const totals = computeTotals(priced);
 
+    // Each value is a `Money`, not a bare minor-unit number. The currency in the KEY is
+    // not enough: a caller iterating the entries holds the amount, and an amount whose
+    // scale lives only in a doc comment renders as £4250 for £42.50 the first time
+    // somebody writes `£{{ total }}`. See "THE VALUES ARE `Money`" in src/lib/money.ts.
     expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
-      GBP: 4250 + 2 * 1000,
-      USD: 9999,
-      JPY: 500,
+      GBP: { amountMinorUnits: 4250 + 2 * 1000, currency: 'GBP' },
+      USD: { amountMinorUnits: 9999, currency: 'USD' },
+      JPY: { amountMinorUnits: 500, currency: 'JPY' },
     });
+  });
+
+  /**
+   * The same fact from the rendering end, which is where it is actually paid for: a total
+   * taken straight out of this map and handed to `formatMoney` comes out at the right
+   * scale, with no call-site arithmetic in between. A map of bare numbers cannot even be
+   * passed to `formatMoney` — that is the point — so this is what a caller now does
+   * instead of dividing by a hundred it had to know about.
+   */
+  it('yields totals a formatter can render without the caller rescaling anything', () => {
+    const totals = computeTotals(priced);
+
+    const gbp = totals.pricesByCurrency.get('GBP' as CurrencyCode);
+    expect(gbp).toBeDefined();
+    // No whitespace normalisation needed: en-GB renders its own currency with the
+    // symbol adjacent to the digits, which money.test.ts's own GBP rows pin.
+    expect(formatMoney(gbp!)).toBe('£62.50');
   });
 
   it('multiplies price by quantity, exactly as weight is multiplied', () => {
     const [sleep] = computeTotals(priced).categories;
 
-    expect(Object.fromEntries(sleep.pricesByCurrency)).toEqual({ GBP: 4250 + 2000 });
+    expect(Object.fromEntries(sleep.pricesByCurrency)).toEqual({
+      GBP: { amountMinorUnits: 4250 + 2000, currency: 'GBP' },
+    });
+  });
+
+  /**
+   * The same separation ONE LEVEL DOWN. `sleep` above holds a single currency and the
+   * pack-level map is asserted elsewhere, so between them they leave a gap exactly the
+   * size of a bug that collapses currencies per category and not per pack: `cook` is the
+   * only mixed category in this file, and until this case nothing read its own map at all.
+   */
+  it('keeps a mixed-currency category’s own rollup separated, not only the pack’s', () => {
+    const [, cook] = computeTotals(priced).categories;
+
+    expect(Object.fromEntries(cook.pricesByCurrency)).toEqual({
+      USD: { amountMinorUnits: 9999, currency: 'USD' },
+      JPY: { amountMinorUnits: 500, currency: 'JPY' },
+    });
+  });
+
+  /**
+   * MINOR UNITS ARE INTEGERS ALL THE WAY OUT TO THE MAP, which two comments in
+   * src/lib/totals.ts already reason FROM: a line price "needs no rounding of its own"
+   * because an integer times an integer quantity stays one, and the per-currency addition
+   * is exact because integers add exactly.
+   *
+   * £1.10 is what makes this a test rather than a restatement. Every other price in this
+   * repository is exactly representable once multiplied by 100; `1.1 * 100` is
+   * `110.00000000000001`, and three of them come to `330.00000000000006`. `fromDecimal`
+   * rounds, so what reaches the map is 110 and 330 — and if it ever stopped rounding,
+   * `makeMoney` would refuse the amount outright rather than let a fractional "minor unit"
+   * into a total. Both halves are asserted: the value, and its integrality.
+   */
+  it('keeps minor units integral for a price that is not exact in binary', () => {
+    const totals = computeTotals(
+      packOf(
+        packItem({ id: 'gel', quantity: 3, gear_items: gear({ price: 1.1, currency: 'GBP' }) }),
+        packItem({ id: 'bar', quantity: 1, gear_items: gear({ price: 1.1, currency: 'GBP' }) }),
+      ),
+    );
+
+    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
+      GBP: { amountMinorUnits: 440, currency: 'GBP' },
+    });
+    for (const money of totals.pricesByCurrency.values()) {
+      expect(Number.isInteger(money.amountMinorUnits)).toBe(true);
+    }
+    // And it renders as the four pounds forty it is, rather than as £4.40000000000000x.
+    expect(formatMoney(totals.pricesByCurrency.get('GBP' as CurrencyCode)!)).toBe('£4.40');
   });
 
   it('leaves an unpriced item out of the rollup entirely', () => {
@@ -714,7 +972,50 @@ describe('price rollups', () => {
       ),
     );
 
-    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({ GBP: 8500 });
+    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
+      GBP: { amountMinorUnits: 8500, currency: 'GBP' },
+    });
+  });
+
+  /**
+   * THE MIXED PACK: most items live, one frozen, all of them priced. This is the shape a
+   * real pack takes the moment one gear item is deleted — the BEFORE DELETE trigger
+   * snapshots that row alone, and `private.gear_item_snapshot()` captures `price` and
+   * `currency` whether or not the select asked for them.
+   *
+   * It is the shape that produced the wrong number this suite previously had no case for.
+   * With `price` optional on the input type and unfetched by PACK_TREE_SELECT, the three
+   * live rows arrived with no price key at all and the frozen one arrived with £42.50, so
+   * the rollup reported `{ GBP: 4250 }` for a pack costing £142.50 — not a total that was
+   * missing, a total that was confidently wrong, and one no assertion in this file could
+   * have distinguished from a pack holding only that item.
+   *
+   * The fields are required now, so a fixture cannot express the broken half of that any
+   * more; what this pins is the arithmetic it should have produced all along, on both
+   * sources at once, with the per-item `source` asserted so the mixture is real rather
+   * than nominally so.
+   */
+  it('sums prices across live gear and frozen snapshots in the same pack', () => {
+    const totals = computeTotals(
+      packOf(
+        packItem({ id: 'tent', gear_items: gear({ price: 50, currency: 'GBP' }) }),
+        packItem({ id: 'mat', gear_items: gear({ price: 25, currency: 'GBP' }), quantity: 2 }),
+        packItem({
+          id: 'deleted-quilt',
+          gear_items: null,
+          snapshot: snapshot({ name: 'Deleted quilt', price: 42.5, currency: 'GBP' }),
+        }),
+      ),
+    );
+
+    expect(totals.categories[0].items.map((item) => item.source)).toEqual([
+      'gear_item',
+      'gear_item',
+      'snapshot',
+    ]);
+    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
+      GBP: { amountMinorUnits: 5000 + 2 * 2500 + 4250, currency: 'GBP' },
+    });
   });
 });
 
@@ -723,19 +1024,26 @@ describe('price rollups', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * The engine must consume what the application actually fetches, without a hand-written
- * reshaping step in between — that transcription is precisely where a `worn` flag gets
- * dropped on the way from the query to the arithmetic.
+ * The engine must consume what the one pack-tree select actually fetches, without a
+ * hand-written reshaping step in between — that transcription is precisely where a `worn`
+ * flag gets dropped on the way from the query to the arithmetic. (`PACK_TREE_SELECT`
+ * lives in tests/support/ for now, because the share page that will issue it is Ref 26
+ * and does not exist yet; this assertion moves with it when it moves.)
  *
- * Both halves are asserted. The compile-time half below is the load-bearing one: it fails
- * `tsc --noEmit` if `PACK_TREE_SELECT`'s inferred row type stops being assignable to
- * `PackTreePack`, which is what would happen the day somebody narrows the select. The
- * runtime half is a literal in the exact shape PostgREST returns — a to-one `gear_items`
- * embed as an OBJECT (core-schema.test.ts pins that against the wire format), embedded
- * arrays for the to-many ones, and no `consumable`, `packed`, `price` or `currency` keys,
- * because that select does not ask for them.
+ * Both halves are asserted. The compile-time half below is the load-bearing one, and it
+ * now fires in BOTH directions: with no optional properties left on the input types, it
+ * fails `tsc --noEmit` if `PACK_TREE_SELECT` is narrowed (a missing column is a missing
+ * required property) as well as if the engine grows a field the select does not fetch.
+ * Before the four flag and price fields were made required it could only catch the
+ * second, which is why a select that had never fetched `consumable` or `price` compiled
+ * happily for as long as it did.
+ *
+ * The runtime half is a literal in the exact shape PostgREST returns — a to-one
+ * `gear_items` embed as an OBJECT (core-schema.test.ts pins that against the wire
+ * format), embedded arrays for the to-many ones, and every column the select names,
+ * including the four whose absence used to be the interesting case.
  */
-describe('the shape the share page already fetches', () => {
+describe('the shape PACK_TREE_SELECT returns', () => {
   type PackTreeRow = NonNullable<Awaited<ReturnType<typeof packTreeQuery>>['data']>[number];
 
   // If this ever resolves to `never` or to a PostgREST parser error, the assignment below
@@ -764,6 +1072,8 @@ describe('the shape the share page already fetches', () => {
               id: 'item-1',
               quantity: 2,
               worn: false,
+              consumable: false,
+              packed: true,
               position: 0,
               overrides: {},
               snapshot: null,
@@ -773,6 +1083,27 @@ describe('the shape the share page already fetches', () => {
                 brand: 'Testbrand',
                 weight: 100,
                 weight_unit: 'g',
+                price: 42.5,
+                currency: 'GBP',
+              },
+            },
+            {
+              id: 'item-2',
+              quantity: 1,
+              worn: false,
+              consumable: true,
+              packed: false,
+              position: 1,
+              overrides: {},
+              snapshot: null,
+              gear_items: {
+                id: 'gear-2',
+                name: 'Oats',
+                brand: 'Testbrand',
+                weight: 4.4,
+                weight_unit: 'oz',
+                price: null,
+                currency: null,
               },
             },
           ],
@@ -782,13 +1113,17 @@ describe('the shape the share page already fetches', () => {
 
     const totals = computeTotals(row);
 
-    expect(totals.total).toBe(200);
     expect(totals.base).toBe(200);
-    expect(totals.itemCount).toBe(2);
-    // The consequence of that select, stated rather than left to be discovered: with no
-    // `consumable`, `packed`, `price` or `currency` column fetched, everything lands in
-    // base, nothing is packed, and there is no price rollup at all.
-    expect(totals.packedCount).toBe(0);
-    expect(totals.pricesByCurrency.size).toBe(0);
+    expect(totals.itemCount).toBe(3);
+    // The consequence of the widened select, stated rather than left to be discovered:
+    // the consumable item's weight lands in its own bucket instead of in base, the packed
+    // row is counted, and the pack has a price. Every one of these four numbers was the
+    // other answer — 0, 0, everything in base — while the select fetched five columns
+    // fewer, and none of them looked wrong.
+    expect(totals.consumable).toBeCloseTo(4.4 * GRAMS.oz, 9);
+    expect(totals.packedCount).toBe(2);
+    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
+      GBP: { amountMinorUnits: 8500, currency: 'GBP' },
+    });
   });
 });

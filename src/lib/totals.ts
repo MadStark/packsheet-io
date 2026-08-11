@@ -11,15 +11,18 @@
  * code at all: nothing here may import from `src/lib/auth/`. Invariant A in
  * tests/anonymous-read-path.test.ts is an EDGE rule — it does not look at what a module
  * contains, only at whether something outside the choke point has an import edge into it
- * — and this engine will be imported by the public share page, the most-visited anonymous
- * surface in the product. See the doc comment at the top of `src/lib/auth-routes.ts`,
- * which exists for exactly this reason. Constants, types and arithmetic only.
+ * — and this engine will be imported by the public share page (Ref 26, which is not
+ * written yet), the anonymous surface this product is built around. See the doc comment
+ * at the top of `src/lib/auth-routes.ts`, which exists for exactly this reason.
+ * Constants, types and arithmetic only.
  *
  * ---------------------------------------------------------------------------
  * THE DEFECT THIS MODULE EXISTS TO NOT HAVE
  * ---------------------------------------------------------------------------
  *
- * LighterPack's worn-weight subtotal ignores quantity — nine years and counting. Every
+ * LighterPack's worn-weight subtotal ignores quantity: reported in 2017 and still
+ * unfixed when this was written in August 2026 — an as-of claim rather than a standing
+ * fact, and tests/worn-weight-quantity.test.ts records where it was read. Every
  * bucket below multiplies by quantity, with no exceptions, and
  * tests/worn-weight-quantity.test.ts is the regression guard that says so in its own
  * file so it cannot be diluted into a general totals suite and quietly deleted. That file
@@ -33,12 +36,18 @@
  *
  * Base, worn and consumable are a partition of the pack: every item is in exactly one,
  * and the three add up to the whole. `pack_items.worn` and `pack_items.consumable` are
- * two independent booleans in
- * `supabase/migrations/20260810120000_core_schema.sql` with no CHECK constraint coupling
- * them, so the database permits an item flagged as both TODAY. A separate task in this
- * same ticket adds that constraint; until it lands, this module is the only thing
- * standing between that row and a total that does not add up, and after it lands the two
- * will simply agree.
+ * two independent booleans in `supabase/migrations/20260810120000_core_schema.sql`, and
+ * `supabase/migrations/20260812000000_worn_consumable_exclusive.sql` — which ships in
+ * this same commit — is the `check (not (worn and consumable))` that stops them being
+ * true together at rest.
+ *
+ * THE CONSTRAINT AND THE REFUSAL BELOW SHIP TOGETHER, AND NEITHER MAKES THE OTHER
+ * REDUNDANT. The constraint covers every row of that table, including rows written by
+ * psql, by a restore, or by some later import path that never calls this module. This
+ * module covers every input that did not come from that table: a hand-built object, a
+ * fixture, a payload assembled by a future feature. The engine is a pure function over a
+ * shape, not a reader of one database, so "the database will not let that happen" is not
+ * a reason for it to stop checking.
  *
  * Such an item is REFUSED — `computeTotals` throws and names it. The alternative was a
  * precedence rule ("worn wins over consumable", or the reverse), and it lost on the
@@ -53,9 +62,12 @@
  * `total` IS DEFINED AS `base + worn + consumable` — NOT SUMMED INDEPENDENTLY
  * ---------------------------------------------------------------------------
  *
- * There is no fourth accumulator anywhere below. `sumBuckets` is the ONLY function that
- * produces a `WeightBuckets`, at every level of the tree, and it derives `total` from the
- * three parts it just added rather than accumulating a fourth sum over the same items.
+ * There is no fourth accumulator anywhere below. `makeBuckets` is the ONLY function that
+ * produces a `WeightBuckets` — the only place `total` is ever assigned — at every level of
+ * the tree, and it derives `total` from the parts handed to it rather than from a fourth
+ * sum over the same items. The two callers that build one (`sumBuckets`, which adds a
+ * list of breakdowns, and `itemAsBuckets`, which turns a single line into one) both go
+ * through it, so neither can carry its own idea of what `total` means.
  *
  * That makes the acceptance criterion "the three sum to the total" hold STRUCTURALLY:
  * it cannot drift, because there is no second number to drift from, and it cannot fail
@@ -93,14 +105,15 @@
  * THE SNAPSHOT WINS OVER THE LIVE GEAR ROW when both are present, which is the case on
  * every locked pack: locking freezes the values but does not clear `gear_item_id` (only
  * deleting the gear does that, and the foreign key nulls the reference while leaving the
- * snapshot behind). The evidence is in the migration and pinned by a test rather than
- * inferred: `freeze_pack_items_on_lock()` exists so that "a completed trip stays true as
- * the closet evolves", and tests/core-schema.test.ts asserts it directly — "does not
- * follow later edits to the gear it froze", where the gear is renamed after the lock and
- * the snapshot still reads the old name. Resolve the other way round and a locked pack
- * silently tracks later gear edits through this module while the database dutifully keeps
- * the frozen copy nobody reads: the freeze would be defeated in the one place it is
- * visible to a user, and every schema test would stay green.
+ * snapshot behind). The evidence is a test rather than an inference:
+ * tests/core-schema.test.ts asserts it directly under "does not follow later edits to the
+ * gear it froze" — "a completed trip stays true as the closet evolves", in that file's
+ * own words — where the gear is renamed after the lock and the snapshot still reads the
+ * old name. `freeze_pack_items_on_lock()` in the core schema migration is the trigger
+ * that makes it so. Resolve the other way round and a locked pack silently tracks later
+ * gear edits through this module while the database dutifully keeps the frozen copy
+ * nobody reads: the freeze would be defeated in the one place it is visible to a user,
+ * and every schema test would stay green.
  *
  * OVERRIDES ARE MERGED OVER THE SNAPSHOT TOO, not only over the live gear row. The
  * snapshot captures the GEAR row, not the pack item, so an item whose weight this list
@@ -177,28 +190,54 @@
  * individual physical things that have been put in the bag.
  *
  * ---------------------------------------------------------------------------
- * THE INPUT TYPES ARE THE SHAPE THE APPLICATION ALREADY FETCHES
+ * THE INPUT TYPES ARE THE SHAPE THE ONE PACK-TREE QUERY ALREADY FETCHES
  * ---------------------------------------------------------------------------
  *
  * `PackTreePack` and friends below are satisfied, without reshaping, by the result of
  * `packTreeQuery` in tests/support/local-database.ts — the single-round-trip select the
- * share page uses. That is a deliberate constraint on this module rather than a
- * coincidence: an engine whose input needs hand-mapping from the query result puts a
- * second, hand-written transcription of the schema between the database and the
- * arithmetic, and that transcription is exactly where a `worn` flag gets dropped. The
+ * share page will issue once Ref 26 writes it.
+ *
+ * That select (`PACK_TREE_SELECT`) currently lives in tests/support/ because the page
+ * that will issue it does not exist yet, which is worth saying plainly rather than
+ * leaving a reader to discover: production code is documenting its input contract by
+ * pointing at a test helper. The pointer moves to the page's own module the day there is
+ * one, and the compile-time assertion in tests/totals.test.ts moves with it — what must
+ * not happen in the meantime is a second, hand-written select growing up beside it.
+ *
+ * The shape is a deliberate constraint on this module rather than a coincidence: an
+ * engine whose input needs hand-mapping from the query result puts a second,
+ * hand-written transcription of the schema between the database and the arithmetic,
+ * and that transcription is exactly where a `worn` flag gets dropped. The
  * types are structural, so a wider select (extra columns, extra embeds) satisfies them
  * too; tests/totals.test.ts pins the assignability at compile time.
  *
- * KNOWN GAP, recorded here rather than discovered later: `PACK_TREE_SELECT` does not
- * currently fetch `pack_items.consumable`, `pack_items.packed`, or `gear_items.price` and
- * `gear_items.currency`. Those four are therefore OPTIONAL below, and an absent flag is
- * read as `false` — matching the column defaults, and the only reading available, since
- * "not selected" and "false" are indistinguishable once the row has been serialised.
- * The consequence is precise and worth knowing before trusting a number: computed over
- * today's share-page select, every item lands in the base bucket, `packedCount` is 0, and
- * the price rollup is empty. Nothing is wrong; nothing was asked for either. Whichever
- * ticket renders a consumable split, a packing checklist or a pack's cost must widen that
- * select first, and the totals it wants will then simply appear.
+ * EVERY FIELD THIS ENGINE READS IS REQUIRED, INCLUDING THE NULLABLE ONES. `consumable`,
+ * `packed`, `price` and `currency` are not optional properties below: the two flags are
+ * required booleans and the two price fields are required but NULLABLE (`number | null`,
+ * `string | null`), so a caller with no price must say `null` rather than omit the key.
+ *
+ * That is a correction, and the shape it replaces is worth recording because it looked
+ * reasonable. The four were optional, defaulted with `?? false` / `?? null`, and
+ * documented as "may legitimately be absent" — but absent never meant "this item has no
+ * such fact", it meant "the one query we had did not fetch this column yet", and reading
+ * it as a value produced two wrong answers rather than one missing one:
+ *
+ *   - Every consumable item's weight landed in BASE, and a pack full of food was
+ *     indistinguishable from a pack with no consumables at all. A total that is silently
+ *     the wrong shape, not a total that is absent.
+ *   - Worse, the fields were not even absent uniformly WITHIN one pack.
+ *     `private.gear_item_snapshot()` captures `price` and `currency`, so a frozen item
+ *     carries them whatever the select asked for. Delete one gear item from a forty-item
+ *     priced pack and the BEFORE DELETE trigger snapshots that row alone: the price
+ *     rollup then reported that item's price and nothing else — `{ GBP: 4250 }` for a
+ *     pack that cost two thousand pounds. A partial map is worse than an empty one. An
+ *     empty map is visibly nothing; a partial map is a confident wrong number.
+ *
+ * Making the fields required moves that from a runtime surprise to a compile error, and
+ * the compile error lands in the right place: tests/totals.test.ts asserts that
+ * `PACK_TREE_SELECT`'s inferred row type is assignable to `PackTreePack`, which with no
+ * optional properties left now fails in BOTH directions — when a select is too narrow, as
+ * well as when one is narrowed later. `tests/support/local-database.ts` fetches all four.
  */
 
 import type { Json } from './database.types';
@@ -221,17 +260,20 @@ import { isWeightUnit, toGrams } from './units';
  * engine reads are named — a wider row satisfies this type structurally, which is why
  * the query's `id` and `brand` need no mention here.
  *
- * `price` and `currency` are optional because today's share-page select does not fetch
- * them (see the KNOWN GAP in the module comment); `name`, `weight` and `weight_unit` are
- * required because it does, and because a weight engine handed a row with no weight has
- * nothing to compute.
+ * `price` and `currency` are REQUIRED and NULLABLE, which is the whole distinction: the
+ * columns are nullable (an unpriced item is an ordinary thing, and
+ * `gear_items_price_has_currency` makes both null together the only way to express it),
+ * but a caller must SAY null rather than leave the key out. An optional property would
+ * collapse "this gear has no price" and "the query did not ask for a price" into the same
+ * value, and those two have different right answers — see the module comment for the
+ * partial-rollup number that produced.
  */
 export interface PackTreeGearItem {
   readonly name: string;
   readonly weight: number;
   readonly weight_unit: string;
-  readonly price?: number | null;
-  readonly currency?: string | null;
+  readonly price: number | null;
+  readonly currency: string | null;
 }
 
 /**
@@ -241,13 +283,20 @@ export interface PackTreeGearItem {
  * what the generated types say and what the columns actually guarantee: an object, of
  * whatever shape whoever wrote it chose. `resolvePackItem` narrows them; nothing else in
  * this file touches them.
+ *
+ * `worn`, `consumable` and `packed` are all three required booleans, matching three
+ * `boolean not null default false` columns. `snapshot` and `gear_items` stay optional
+ * because for those two, absent and null genuinely mean the same thing — an item with no
+ * frozen copy, an item whose gear has been deleted — and `pack_items_reference_or_snapshot`
+ * guarantees they are never both missing at once, which is the case `resolvePackItem`
+ * refuses by name.
  */
 export interface PackTreeItem {
   readonly id: string;
   readonly quantity: number;
   readonly worn: boolean;
-  readonly consumable?: boolean;
-  readonly packed?: boolean;
+  readonly consumable: boolean;
+  readonly packed: boolean;
   readonly overrides: Json;
   readonly snapshot?: Json | null;
   readonly gear_items?: PackTreeGearItem | null;
@@ -287,15 +336,24 @@ export type WeightBucket = (typeof WEIGHT_BUCKETS)[number];
 
 /**
  * A weight breakdown, in grams, at any level of the tree: one item, one category, or the
- * whole pack. `total` is always `base + worn + consumable` — see the module comment for
- * why that is a definition rather than a coincidence that happens to hold.
+ * whole pack. `total` is always the sum of the buckets — see the module comment for why
+ * that is a definition rather than a coincidence that happens to hold.
+ *
+ * DERIVED FROM `WEIGHT_BUCKETS` RATHER THAN LISTING THE SAME THREE NAMES AGAIN. That
+ * constant is exported so a caller rendering a breakdown need not hardcode the bucket
+ * names; a hand-written `{ total; base; worn; consumable }` here would have made this
+ * file itself the hardcoding it spares them. The failure that closes is specific: adding
+ * a fourth bucket to `WEIGHT_BUCKETS` compiled cleanly and the new bucket then silently
+ * vanished from every total — classified into by `classifyPackItem`, dropped by the
+ * accumulator, absent from the sum, with nothing red anywhere. Written this way, that
+ * same edit fails to compile in `makeBuckets` until the accumulation counts it too.
+ *
+ * The field names are unchanged and deliberately so: `total`, `base`, `worn`,
+ * `consumable` are what the ticket specifies and what a template reads.
  */
-export interface WeightBuckets {
-  readonly total: number;
-  readonly base: number;
-  readonly worn: number;
-  readonly consumable: number;
-}
+export type WeightBuckets = { readonly total: number } & {
+  readonly [B in WeightBucket]: number;
+};
 
 /** Quantities, not rows — see "COUNTS ARE QUANTITIES, NOT ROWS" in the module comment. */
 export interface ItemCounts {
@@ -348,7 +406,7 @@ export interface CategoryTotals extends WeightBuckets, ItemCounts {
   readonly id: string;
   readonly name: string;
   readonly items: readonly ItemTotals[];
-  readonly pricesByCurrency: ReadonlyMap<CurrencyCode, number>;
+  readonly pricesByCurrency: ReadonlyMap<CurrencyCode, Money>;
 }
 
 /**
@@ -360,15 +418,18 @@ export interface CategoryTotals extends WeightBuckets, ItemCounts {
  * is `categories.flatMap((c) => c.items)`, whereas rebuilding the grouping from a flat
  * list means re-joining on a category id this shape would then have to carry.
  *
- * `pricesByCurrency` is a map from currency code to total MINOR units — see
- * `sumByCurrency` in `src/lib/money.ts`, and that module's "CROSS-CURRENCY SUMMING IS
+ * `pricesByCurrency` is a map from currency code to the total `Money` in that currency —
+ * see `sumByCurrency` in `src/lib/money.ts`, and that module's "CROSS-CURRENCY SUMMING IS
  * IMPOSSIBLE" section, for why there is no single number here and why one must never be
- * added. A pack with GBP and USD gear yields two entries; rendering that as two lines, or
- * as an explicit "mixed currencies" notice, is the caller's decision.
+ * added, and its "THE VALUES ARE `Money`" note for why the totals are not bare minor-unit
+ * numbers a template could print unscaled. A pack with GBP and USD gear yields two
+ * entries; rendering that as two lines, or as an explicit "mixed currencies" notice, is
+ * the caller's decision — through `formatMoney`, which is now the only thing that can
+ * render one of these values at all.
  */
 export interface PackTotals extends WeightBuckets, ItemCounts {
   readonly categories: readonly CategoryTotals[];
-  readonly pricesByCurrency: ReadonlyMap<CurrencyCode, number>;
+  readonly pricesByCurrency: ReadonlyMap<CurrencyCode, Money>;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +463,21 @@ function describeItem(id: string, name: unknown): string {
     : `pack item ${id}`;
 }
 
+/**
+ * How a rejected VALUE is rendered in those messages. `JSON.stringify` for everything a
+ * jsonb column can actually hold, so a string arrives quoted (`"heavy"`) and is visibly a
+ * string — but NOT for the non-finite numbers, because `JSON.stringify(NaN)` and
+ * `JSON.stringify(Infinity)` are both the literal `"null"`, and "resolved to a price of
+ * null" is a report of the one thing that did not happen: the reader goes looking for a
+ * missing field when what they have is a bad number. `undefined` still renders as
+ * `undefined`, which is what an absent key is.
+ */
+function describeValue(value: unknown): string {
+  return typeof value === 'number' && !Number.isFinite(value)
+    ? String(value)
+    : JSON.stringify(value);
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
@@ -419,16 +495,31 @@ function describeItem(id: string, name: unknown): string {
  * The merge is SHALLOW, and deliberately so — the same shallow merge PostgREST callers
  * would get from `||` on the two jsonb values. It means `{ "weight": 450 }` overrides the
  * weight and leaves the unit alone, taking `weight_unit` from the base, which is the
- * behaviour a form that edits one field has to have. The snapshot's keys are exactly the
- * gear row's column names, because `private.gear_item_snapshot()` builds it that way, so
- * one set of field names covers both bases — and an override written against a live item
+ * behaviour a form that edits one field has to have. The snapshot uses the gear row's own
+ * column names for every field an override can touch — `name`, `weight`, `weight_unit`,
+ * `price`, `currency` — because `private.gear_item_snapshot()` builds it that way, so one
+ * set of field names covers both bases — and an override written against a live item
  * keeps working unchanged after that item is frozen.
+ *
+ * It is NOT a whole-row copy, and nothing above should be read as saying it is: that
+ * function renames `id` to `gear_item_id`, adds `captured_at`, and leaves out `notes`,
+ * `url`, `status`, `user_id` and the timestamps (a display record, not an audit log —
+ * the migration says so where it builds the object). None of those is a field this
+ * module reads, which is why the difference costs nothing here; it would cost something
+ * to the next person reaching for a column on the frozen path that only the live row has.
  */
 export function resolvePackItem(item: PackTreeItem): ResolvedPackItem {
+  // The gear embed's own name, for the two failures below that happen before there is a
+  // merged record to read a name out of. It is the best name available at this point and
+  // frequently the right one — an item whose snapshot or overrides are unreadable usually
+  // still references live gear — and `describeItem` falls back to the bare id when it is
+  // absent, which is the case for a frozen item whose gear has since been deleted.
+  const gearName = item.gear_items?.name;
+
   const snapshot = asJsonObject(item.snapshot);
   if (item.snapshot != null && snapshot === undefined) {
     throw new TypeError(
-      `${describeItem(item.id, undefined)} has a snapshot that is not a JSON object. ` +
+      `${describeItem(item.id, gearName)} has a snapshot that is not a JSON object. ` +
         `The pack_items.snapshot CHECK constraint permits only null or an object, so this row ` +
         `cannot have come from the database as it stands.`,
     );
@@ -441,7 +532,7 @@ export function resolvePackItem(item: PackTreeItem): ResolvedPackItem {
   const overrides = asJsonObject(item.overrides);
   if (item.overrides != null && overrides === undefined) {
     throw new TypeError(
-      `${describeItem(item.id, undefined)} has overrides that are not a JSON object. ` +
+      `${describeItem(item.id, gearName)} has overrides that are not a JSON object. ` +
         `pack_items.overrides is an object holding per-list divergence from the gear item; ` +
         `an empty object means no divergence.`,
     );
@@ -455,12 +546,16 @@ export function resolvePackItem(item: PackTreeItem): ResolvedPackItem {
           name: gear.name,
           weight: gear.weight,
           weight_unit: gear.weight_unit,
-          price: gear.price ?? null,
-          currency: gear.currency ?? null,
+          price: gear.price,
+          currency: gear.currency,
         }
       : undefined);
 
   if (base === undefined) {
+    // The one message here that cannot name the item, and it is not an oversight: this
+    // branch is reached precisely because there is no gear row and no snapshot, so there
+    // is nowhere left for a name to come from. The message says which two things are
+    // missing instead, which is what the reader needs anyway.
     throw new TypeError(
       `${describeItem(item.id, undefined)} has neither a gear item nor a snapshot, so there ` +
         `is nothing to resolve it from. The pack_items_reference_or_snapshot check constraint ` +
@@ -485,25 +580,41 @@ export function resolvePackItem(item: PackTreeItem): ResolvedPackItem {
  * every weight in a pack passes through, per `units.ts`'s "GRAMS IS THE CANONICAL UNIT".
  * Nothing downstream of this line holds a non-gram number.
  *
- * The finiteness half of the check duplicates `assertFiniteWeight` inside `toGrams`, and
+ * The finiteness and non-negativity checks duplicate `assertWeight` inside `toGrams`, and
  * that repetition is on purpose rather than an oversight: `toGrams` correctly reports
  * "value must be a finite number, got NaN", and this one can say which of the forty rows
- * on the page it came from. The item id is worth one redundant comparison.
+ * on the page it came from. The item id is worth two redundant comparisons.
+ *
+ * Both halves of `gear_items.weight`'s CHECK constraint are mirrored, not just the upper
+ * one. A negative weight is reachable through an ordinary PATCH of `pack_items.overrides`
+ * (whose contents no constraint touches) and it is the more dangerous of the two, because
+ * it does not announce itself downstream: two 1000 g items, one overridden to -400 g,
+ * total 600 g — a plausible number, in a partition that still adds up, on a page with no
+ * way to tell it from the truth. See "THROW, NOT RETURN" in units.ts.
  */
 function resolveWeightGrams(id: string, name: string | null, merged: JsonObject): number {
   const weight = merged.weight;
   if (typeof weight !== 'number' || !Number.isFinite(weight)) {
     throw new TypeError(
-      `${describeItem(id, name)} resolved to a weight of ${JSON.stringify(weight)}, which is ` +
+      `${describeItem(id, name)} resolved to a weight of ${describeValue(weight)}, which is ` +
         `not a finite number. gear_items.weight is numeric and non-null, so this came from an ` +
         `override or a snapshot; fix the value rather than the total it breaks.`,
+    );
+  }
+
+  if (weight < 0) {
+    throw new TypeError(
+      `${describeItem(id, name)} resolved to a weight of ${describeValue(weight)}, which is ` +
+        `negative. gear_items.weight carries check (weight >= 0), so this came from an override ` +
+        `or a snapshot; a negative line subtracts from the pack total while leaving it a ` +
+        `perfectly ordinary number, so nothing downstream can catch it.`,
     );
   }
 
   const unit = merged.weight_unit;
   if (!isWeightUnit(unit)) {
     throw new TypeError(
-      `${describeItem(id, name)} resolved to a weight unit of ${JSON.stringify(unit)}, which is ` +
+      `${describeItem(id, name)} resolved to a weight unit of ${describeValue(unit)}, which is ` +
         `not one of the four gear_items.weight_unit accepts (g, kg, oz, lb). A weight with an ` +
         `unknown unit cannot be converted, and guessing grams would be a specific wrong answer.`,
     );
@@ -538,16 +649,26 @@ function resolvePrice(id: string, name: string | null, merged: JsonObject): Mone
 
   if (typeof price !== 'number' || !Number.isFinite(price)) {
     throw new TypeError(
-      `${describeItem(id, name)} resolved to a price of ${JSON.stringify(price)} with a ` +
-        `currency of ${JSON.stringify(currency)}. A currency with no price is a unit with ` +
-        `nothing to measure; clear both to leave the item unpriced.`,
+      `${describeItem(id, name)} resolved to a price of ${describeValue(price)} with a ` +
+        `currency of ${describeValue(currency)}, which is not a finite number. A currency ` +
+        `with nothing usable to measure is not a price; clear both to leave the item ` +
+        `unpriced, or fix the value this one came from.`,
+    );
+  }
+
+  if (price < 0) {
+    throw new TypeError(
+      `${describeItem(id, name)} resolved to a price of ${describeValue(price)}, which is ` +
+        `negative. gear_items.price carries check (price >= 0), so this came from an override ` +
+        `or a snapshot; this product prices gear and has no refunds or credits for a negative ` +
+        `price to mean. Checked here rather than left to makeMoney so the message names the row.`,
     );
   }
 
   if (!isCurrencyCode(currency)) {
     throw new TypeError(
-      `${describeItem(id, name)} resolved to a price of ${JSON.stringify(price)} with a ` +
-        `currency of ${JSON.stringify(currency)}, which is not a three-letter ISO 4217 code. ` +
+      `${describeItem(id, name)} resolved to a price of ${describeValue(price)} with a ` +
+        `currency of ${describeValue(currency)}, which is not a three-letter ISO 4217 code. ` +
         `A price without a currency is a number no formatter can render; clear both to leave ` +
         `the item unpriced.`,
     );
@@ -563,15 +684,18 @@ function resolvePrice(id: string, name: string | null, merged: JsonObject): Mone
 /**
  * Which bucket an item belongs in, and the refusal that keeps the three a partition. See
  * "THREE BUCKETS THAT PARTITION" in the module comment for why this throws rather than
- * applying a precedence rule, and for the CHECK constraint that will make the state
- * unreachable from the database side.
+ * applying a precedence rule, and for why it keeps throwing even though
+ * `pack_items_worn_consumable_exclusive` now makes the state unreachable from the
+ * database side: this function is handed objects that never came from that table.
  *
- * `consumable` defaults to `false` when absent, matching the column default and today's
- * share-page select — see the KNOWN GAP in the module comment.
+ * Both flags are read exactly the same way — as the required booleans they are, with no
+ * defaulting on either side. That symmetry is the point: while `consumable` was optional
+ * and `worn` was not, this function silently answered "base" for every consumable item a
+ * query had not thought to fetch, and nothing distinguished that from a pack with no
+ * consumables in it. See the module comment.
  */
 function classifyPackItem(item: PackTreeItem, name: string | null): WeightBucket {
-  const consumable = item.consumable ?? false;
-  if (item.worn && consumable) {
+  if (item.worn && item.consumable) {
     throw new TypeError(
       `${describeItem(item.id, name)} is flagged both worn and consumable. Base, worn and ` +
         `consumable must partition the pack exactly — an item in two buckets makes ` +
@@ -581,7 +705,7 @@ function classifyPackItem(item: PackTreeItem, name: string | null): WeightBucket
     );
   }
   if (item.worn) return 'worn';
-  if (consumable) return 'consumable';
+  if (item.consumable) return 'consumable';
   return 'base';
 }
 
@@ -603,7 +727,7 @@ function computeItemTotals(item: PackTreeItem): ItemTotals {
 
   if (!Number.isInteger(quantity) || quantity <= 0) {
     throw new RangeError(
-      `${describeItem(item.id, resolved.name)} has a quantity of ${JSON.stringify(quantity)}. ` +
+      `${describeItem(item.id, resolved.name)} has a quantity of ${describeValue(quantity)}. ` +
         `pack_items.quantity is an integer with check (quantity > 0), so a pack item is always ` +
         `at least one of something.`,
     );
@@ -615,7 +739,7 @@ function computeItemTotals(item: PackTreeItem): ItemTotals {
     source: resolved.source,
     bucket,
     quantity,
-    packed: item.packed ?? false,
+    packed: item.packed,
     unitWeightGrams: resolved.weightGrams,
     // The multiplier LighterPack's worn subtotal collapses to 1. It is applied here, for
     // every bucket, with no branch on `bucket` anywhere near it — see
@@ -636,11 +760,35 @@ function computeItemTotals(item: PackTreeItem): ItemTotals {
 // ---------------------------------------------------------------------------
 
 /**
- * The ONLY place a `WeightBuckets` is built, at every level of the tree, and the only
- * place `total` is ever assigned. It is derived from the three parts this call just
- * added, never accumulated alongside them — the structural guarantee the module comment
- * describes lives in these four lines and nowhere else. An empty list gives four zeroes,
- * which is the right answer for an empty pack and for a category nobody has filled in.
+ * THE ONLY PLACE `total` IS EVER ASSIGNED — the four lines the module comment's
+ * structural guarantee actually lives in. Both producers of a `WeightBuckets` go through
+ * here, so `total` is derived from the parts every single time rather than written out
+ * beside them.
+ *
+ * This exists because the claim above it used to be false in a small, quiet way:
+ * `sumBuckets` said it was the only producer while `itemAsBuckets` was a second one with
+ * its own hand-written `base + worn + consumable`. The two formulas agreed, so there was
+ * no bug — but a second producer is exactly where the invariant drifts later, and the
+ * comment denying its existence is what would have made the drift hard to find.
+ *
+ * `total` is summed over `WEIGHT_BUCKETS` rather than written as `base + worn +
+ * consumable`, for the reason on `WeightBuckets` itself: a fourth bucket then joins the
+ * total by existing, instead of being silently omitted from it. The iteration order is
+ * the constant's own order, so the floating-point result is bit-identical to the
+ * left-associative sum it replaces — which matters, because the partition is asserted
+ * with exact equality.
+ */
+function makeBuckets(parts: { readonly [B in WeightBucket]: number }): WeightBuckets {
+  let total = 0;
+  for (const bucket of WEIGHT_BUCKETS) total += parts[bucket];
+  return { ...parts, total };
+}
+
+/**
+ * The accumulator, at every level of the tree. It adds the three parts and hands them to
+ * `makeBuckets`, never accumulating a fourth sum over the same items — see the module
+ * comment. An empty list gives four zeroes, which is the right answer for an empty pack
+ * and for a category nobody has filled in.
  */
 function sumBuckets(parts: readonly WeightBuckets[]): WeightBuckets {
   let base = 0;
@@ -651,7 +799,7 @@ function sumBuckets(parts: readonly WeightBuckets[]): WeightBuckets {
     worn += part.worn;
     consumable += part.consumable;
   }
-  return { total: base + worn + consumable, base, worn, consumable };
+  return makeBuckets({ base, worn, consumable });
 }
 
 /**
@@ -663,13 +811,19 @@ function sumBuckets(parts: readonly WeightBuckets[]): WeightBuckets {
 function itemAsBuckets(item: ItemTotals): WeightBuckets {
   const weightIn = (bucket: WeightBucket): number =>
     item.bucket === bucket ? item.lineWeightGrams : 0;
-  const base = weightIn('base');
-  const worn = weightIn('worn');
-  const consumable = weightIn('consumable');
-  return { total: base + worn + consumable, base, worn, consumable };
+  return makeBuckets({
+    base: weightIn('base'),
+    worn: weightIn('worn'),
+    consumable: weightIn('consumable'),
+  });
 }
 
-/** Counts add the same way at every level, and for the same reason. */
+/**
+ * Counts add at every level exactly as the weights do, but NOT for the same reason, and
+ * the difference is worth one line so nobody transplants the argument: these are
+ * integers, so summation order cannot disturb them and there is no structural guarantee
+ * here to protect. They get their own accumulator only because they are not weights.
+ */
 function sumCounts(parts: readonly ItemCounts[]): ItemCounts {
   let itemCount = 0;
   let packedCount = 0;
@@ -680,7 +834,6 @@ function sumCounts(parts: readonly ItemCounts[]): ItemCounts {
   return { itemCount, packedCount };
 }
 
-/** An item's own counts: its quantity, and its quantity again if the row is packed. */
 function itemAsCounts(item: ItemTotals): ItemCounts {
   return { itemCount: item.quantity, packedCount: item.packed ? item.quantity : 0 };
 }
@@ -696,7 +849,7 @@ function itemAsCounts(item: ItemTotals): ItemCounts {
  * one place currencies are ever keyed, rather than adding a map-merge that would be a
  * second implementation of the same idea.
  */
-function pricesByCurrency(items: readonly ItemTotals[]): ReadonlyMap<CurrencyCode, number> {
+function pricesByCurrency(items: readonly ItemTotals[]): ReadonlyMap<CurrencyCode, Money> {
   const monies: Money[] = [];
   for (const item of items) {
     if (item.linePrice !== null) monies.push(item.linePrice);

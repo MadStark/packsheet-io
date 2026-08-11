@@ -27,8 +27,18 @@ import {
  * shows up only on the worn line — and only when a worn item has a quantity above 1,
  * which is a minority of rows in a minority of packs, which is exactly why it survived.
  *
- * It was reported in 2017 as issues #74 and #211 against lighterpack, and is still
- * unfixed. The user-visible symptoms are two:
+ * It was reported in 2017 as issues #74 and #211 against lighterpack, and was still
+ * unfixed in August 2026.
+ *
+ * BOTH OF THOSE ARE AS-OF CLAIMS, and the date is here so a later reader can judge them
+ * rather than inherit them. The line quoted above was read from `client/dataTypes.js` in
+ * the upstream lighterpack repository as it stood in August 2026, when this file was
+ * written, and nothing in this suite re-checks either the line or the issues: a test that
+ * depended on a third party's repository staying still would be a test that went red for
+ * somebody else's reasons. What IS pinned below is this engine's behaviour, which is the
+ * part we control.
+ *
+ * The user-visible symptoms are two:
  *
  *   - The worn subtotal is too small, by the weight of every extra worn unit.
  *   - Ticking "worn" on a multi-quantity item CHANGES the pack's overall weight. Base
@@ -69,8 +79,18 @@ function packItem(overrides: Partial<PackTreeItem> = {}): PackTreeItem {
     id: 'item-1',
     quantity: 1,
     worn: false,
+    consumable: false,
+    packed: false,
     overrides: {},
-    gear_items: { name: 'Wool socks', weight: WORN_UNIT_GRAMS, weight_unit: 'g' },
+    gear_items: {
+      name: 'Wool socks',
+      weight: WORN_UNIT_GRAMS,
+      weight_unit: 'g',
+      // Stated as an explicit null pair because the type requires it: an unpriced gear
+      // row says so rather than leaving the fields out. Nothing in this file reads them.
+      price: null,
+      currency: null,
+    },
     ...overrides,
   };
 }
