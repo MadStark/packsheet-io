@@ -172,11 +172,27 @@ max_indexes = 5
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
-site_url = "http://127.0.0.1:3000"
+#
+# PK-19: was "http://127.0.0.1:3000", which is not this project's dev server — `astro
+# dev` serves on 4321 (see README), and 3000 is a different tool's default that never
+# matched anything here. Left uncorrected, the local OAuth/callback flow and any
+# confirmation-email link built from site_url would point at a port nothing is
+# listening on.
+site_url = "http://localhost:4321"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+#
+# Both loopback spellings for the same reason cookies in src/lib/auth/index.ts are not
+# scoped to one: which hostname the browser used to reach the dev server decides which
+# of these two is on the request, and either is a legitimate way to open
+# http://localhost:4321. Each entry is the exact path AUTH_CALLBACK_PATH
+# (src/lib/auth-routes.ts) names — "exact URLs" above is not a suggestion, a
+# same-origin-but-different-path redirect target is rejected same as a different host.
+additional_redirect_urls = [
+  "http://localhost:4321/auth/callback",
+  "http://127.0.0.1:4321/auth/callback",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.

@@ -1,0 +1,13 @@
+---
+// The case the header comment used to list as "still uncovered, deliberately": an SDK
+// vendored into public/ and loaded by a SAME-ORIGIN script tag. There is no host to
+// recognise and no package path — just a file somebody copied in — so none of the
+// remote-URL patterns matches it, and the module graph has no edge for it either.
+//
+// It is caught by the same-origin arm of checkEmittedHtmlForAuthCdn, which identifies the
+// SDK by what the file was named. That is a weaker rule than the others and the comment
+// there says so; this page is what keeps it honest rather than aspirational.
+---
+
+<script is:inline src="/vendor/supabase-js.min.js"></script>
+<p>vendored sdk</p>

@@ -74,6 +74,15 @@ jobs:
       # what protects the artifact.
       #
       # This is the last gate before production. Nothing downstream re-checks.
+      #
+      # THIS STEP HAS NO `env:` AND MUST NEVER ACQUIRE ONE NAMING A HOSTED SECRET. The
+      # suite creates users and deletes accounts; the local stack the action above
+      # started is the only thing it may ever do that to, and this is the workflow where
+      # getting that wrong deletes real people's accounts. It reaches the local stack
+      # because the action exported PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY into
+      # `$GITHUB_ENV`, and it stays pointed there because production's own hosted values
+      # are set on the Build step's own `env:` below — a step-level scope, which cannot
+      # reach backwards to this one. tests/deploy-workers.test.ts asserts both halves.
       - run: npm test
 
       # Before the build and before the deploy, so the schema a release needs is in
@@ -110,6 +119,13 @@ jobs:
           # tests/deploy-workers.test.ts. The failure that costs something is the
           # mirror image of it, in deploy-staging.yml.
           CLOUDFLARE_ENV: production
+
+          # PK-19: build-time inputs Vite inlines into the client bundle at this step —
+          # see the identical comment in deploy-staging.yml. Production's own
+          # environment-scoped secrets, distinct from staging's: separate Supabase
+          # project, separate URL, separate key. See the README's "Database" section.
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
         run: npm run build
 
       - name: Deploy to Cloudflare Workers
@@ -119,7 +135,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # Pinned to package-lock.json's wrangler. See deploy-staging.yml.
           wranglerVersion: '4.120.0'
-          command: deploy -c dist/client/wrangler.json
+          command: deploy -c dist/server/wrangler.json
 
       # The upload reporting success is not the same as the site answering, and this is
       # the one deploy nobody gets to re-run casually. A release that builds, uploads

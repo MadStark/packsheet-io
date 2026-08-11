@@ -17,6 +17,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
+// Route paths only — no auth SDK. src/lib/auth-routes.ts exists precisely so that
+// wanting a path does not drag the choke point along; see its own header comment.
+import { ACCOUNT_PATH, SIGN_IN_PATH } from '../src/lib/auth-routes';
 
 /**
  * The deploy pipeline.
@@ -283,6 +286,57 @@ describe('environment selection', () => {
     },
   );
 
+  /**
+   * The Supabase project the ARTIFACT points at, and the reason it is set on this one
+   * step and nowhere else.
+   *
+   * `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY` are build-time inputs: Vite
+   * inlines every `PUBLIC_`-prefixed variable into the bundle at `npm run build`, so
+   * there is no later point at which a deploy could supply them. They therefore have to
+   * be in this job — which is also the job that runs `npm test` a few steps earlier, and
+   * that suite creates users and DELETES ACCOUNTS.
+   *
+   * The separation is entirely a matter of scope. A step-level `env:` exists for the
+   * duration of that step; a job-level or workflow-level one is visible to every step in
+   * the job, including the ones that already ran. So this asserts the pair is on the
+   * Build step's own `env:`, from a secret, and appears in no other step's — hoisting
+   * them "to avoid the duplication between the two deploy files" is the edit this is
+   * here to stop, and its consequence is the account-deleting suite running against a
+   * hosted project. tests/rls-enabled.test.ts asserts the mirror image: that nothing
+   * above step level sets them at all.
+   *
+   * From `secrets.*`, not a literal: staging and production are separate Supabase
+   * projects, and this repository is public.
+   */
+  const SUPABASE_BUILD_INPUTS = ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_ANON_KEY'];
+
+  it.each(DEPLOYS)(
+    'takes the Supabase project for the $env build from that environment’s own secrets',
+    ({ file, job }) => {
+      const build = stepsOf(file, job).find(isBuild);
+      expect(build).toBeDefined();
+      for (const name of SUPABASE_BUILD_INPUTS) {
+        expect(build?.env?.[name], `${file}: Build does not set ${name}`).toMatch(
+          new RegExp(`\\$\\{\\{\\s*secrets\\.${name}\\s*\\}\\}`),
+        );
+      }
+    },
+  );
+
+  it.each(DEPLOYS)(
+    'sets it on the Build step alone in $file, so npm test never sees a hosted project',
+    ({ file, job }) => {
+      const elsewhere = stepsOf(file, job)
+        .filter((step) => !isBuild(step))
+        .flatMap((step) =>
+          Object.keys(step.env ?? {})
+            .filter((name) => SUPABASE_BUILD_INPUTS.includes(name))
+            .map((name) => `${step.name ?? step.run ?? step.uses}: ${name}`),
+        );
+      expect(elsewhere).toEqual([]);
+    },
+  );
+
   // `wrangler deploy --env staging` reads plausibly and does nothing: by deploy time
   // the generated config has no environments left in it. Someone reaching for it has
   // misunderstood where the choice is made, and the deploy would go to production.
@@ -306,12 +360,15 @@ describe('deploy steps', () => {
     expect(stepsOf(file, job).filter(isWranglerAction)).toHaveLength(1);
   });
 
-  // The build writes dist/client/wrangler.json and the deploy must read that file, not
-  // the repository root config — which still carries both environments and would
-  // deploy the wrong one, or nothing.
+  // The build writes dist/server/wrangler.json — dist/client/ before PK-19 added the
+  // first real Worker entry; @cloudflare/vite-plugin writes the resolved config next
+  // to entry.mjs, not next to the static assets, once one exists (verified against a
+  // real build: dist/client never gets a wrangler.json once any route is on-demand) —
+  // and the deploy must read that file, not the repository root config, which still
+  // carries both environments and would deploy the wrong one, or nothing.
   it.each(DEPLOYS)('$file deploys the generated config, not the source one', ({ file, job }) => {
     const command = stepsOf(file, job).find(isWranglerAction)?.with?.command ?? '';
-    expect(command).toContain('-c dist/client/wrangler.json');
+    expect(command).toContain('-c dist/server/wrangler.json');
     expect(command.trim().startsWith('deploy')).toBe(true);
   });
 
@@ -656,20 +713,26 @@ describe('verify-release.sh', () => {
   const SCRIPT = repoPath('scripts/verify-release.sh');
   const servers: Server[] = [];
 
-  /** A stub origin. `routes` maps a path to [status, body], or to a SEQUENCE of them
-   *  consumed one per request, which is how the retry paths get exercised. */
-  type Route = [number, string];
+  /** A stub origin. `routes` maps a path to [status, body, extraHeaders?], or to a
+   *  SEQUENCE of them consumed one per request, which is how the retry paths get
+   *  exercised. The third element is what lets a route answer with a `Location`, which
+   *  the on-demand check reads rather than following. */
+  type Route = [number, string, Record<string, string>?];
   async function stub(routes: Record<string, Route | Route[]>): Promise<string> {
     const server = createServer((req, res) => {
       const entry = routes[req.url ?? '/'] ?? ([404, 'not found'] as Route);
-      const [status, body] = Array.isArray(entry[0])
+      const [status, body, extraHeaders] = Array.isArray(entry[0])
         ? (entry as Route[]).length > 1
           ? (entry as Route[]).shift()!
           : (entry as Route[])[0]
         : (entry as Route);
       // Close each connection: a keep-alive socket left open by curl keeps the server
       // from firing its close callback, which hangs teardown rather than failing it.
-      res.writeHead(status, { 'content-type': 'text/plain', connection: 'close' });
+      res.writeHead(status, {
+        'content-type': 'text/plain',
+        connection: 'close',
+        ...(extraHeaders ?? {}),
+      });
       res.end(body);
     });
     server.keepAliveTimeout = 0;
@@ -719,9 +782,14 @@ describe('verify-release.sh', () => {
     'User-agent: *\nAllow: /\n\nSitemap: https://packsheet.io/sitemap-index.xml\n';
   const STAGING_ROBOTS = '# Not the production site — do not index.\nUser-agent: *\nDisallow: /\n';
 
+  // A healthy production origin: a prerendered landing page, a production robots.txt,
+  // and — the half added by PK-19 — an on-demand route that actually ran. Only the third
+  // of these involves the Worker at all; the first two are served by the assets binding
+  // whether the script works or not.
   const HEALTHY: Record<string, Route | Route[]> = {
     '/': [200, '<html>packsheet</html>'],
     '/robots.txt': [200, PRODUCTION_ROBOTS],
+    '/account': [302, '', { location: '/sign-in?next=%2Faccount' }],
   };
 
   it('passes when the site serves the production build', async () => {
@@ -782,11 +850,11 @@ describe('verify-release.sh', () => {
   // real browser.
   it('retries a transient failure before believing it', async () => {
     const site = await stub({
+      ...HEALTHY,
       '/': [
         [403, 'cf challenge'],
         [200, '<html>packsheet</html>'],
       ],
-      '/robots.txt': [200, PRODUCTION_ROBOTS],
     });
     const { status } = await verify(site, { attempts: '4' });
     expect(status).toBe(0);
@@ -808,6 +876,97 @@ describe('verify-release.sh', () => {
     }
   });
 
+  /**
+   * The check PK-19 made necessary, and the gap it closes.
+   *
+   * Both checks above fetch a PRERENDERED path. Cloudflare's assets binding serves those
+   * off the uploaded files without ever invoking the Worker — so before this existed, a
+   * release whose every on-demand route answered 500 passed release verification with a
+   * green tick. That is not a corner case for this PR: `/sign-in`, `/sign-up`, `/account`
+   * and both `/auth/*` routes became on-demand in it, they all reach
+   * `src/lib/auth/index.ts`, and that module throws at request time if
+   * PUBLIC_SUPABASE_URL or PUBLIC_SUPABASE_ANON_KEY is missing or unparseable — which is
+   * one renamed GitHub secret away.
+   */
+  it('fails when an on-demand route 500s while the prerendered pages are fine', async () => {
+    const site = await stub({ ...HEALTHY, '/account': [500, 'boom'] });
+    const { status, output } = await verify(site);
+    expect(status).toBe(1);
+    expect(output).toMatch(/\/account answered 500/);
+    // Names the cause, because "500" on its own sends somebody to read Worker logs for
+    // a fault whose fix is in a GitHub environment.
+    expect(output).toMatch(/PUBLIC_SUPABASE_/);
+  });
+
+  /**
+   * The more serious of the two failures, and the one a bare liveness check would pass:
+   * a signed-out visitor SERVED the account page. Whatever produced that — a guard
+   * deleted, middleware not running, a stale prerendered copy of a page that must not be
+   * prerendered — the release is broken in the direction that leaks rather than the one
+   * that errors.
+   */
+  it('fails when a signed-out visitor is served the account page instead of a redirect', async () => {
+    const site = await stub({ ...HEALTHY, '/account': [200, '<html>your account</html>'] });
+    const { status, output } = await verify(site);
+    expect(status).toBe(1);
+    expect(output).toMatch(/\/account answered 200/);
+  });
+
+  // A redirect is not enough on its own. Somewhere other than sign-in means the guard
+  // ran and reached a different conclusion — an open redirect, a loop back to `/`, a
+  // route that has quietly moved — none of which is this release working.
+  it('fails when the on-demand route redirects somewhere other than sign-in', async () => {
+    const site = await stub({
+      ...HEALTHY,
+      '/account': [302, '', { location: 'https://evil.example/' }],
+    });
+    const { status, output } = await verify(site);
+    expect(status).toBe(1);
+    expect(output).toMatch(/redirected to 'https:\/\/evil\.example\/'/);
+  });
+
+  // And a 3xx carrying no Location at all, which is what a half-built redirect looks
+  // like: it satisfies "did it redirect" and tells the browser nowhere to go.
+  it('fails when the redirect carries no Location header', async () => {
+    const site = await stub({ ...HEALTHY, '/account': [302, ''] });
+    const { status, output } = await verify(site);
+    expect(status).toBe(1);
+    expect(output).toMatch(/redirected to ''/);
+  });
+
+  // Absolute Location headers are legal and Astro emits relative ones; both have to be
+  // accepted, or this check fails every correct release on a Cloudflare setting nobody
+  // here controls. The absolute form is accepted only on the site's OWN origin — the case
+  // above pins that a different host is refused, which matters because "somewhere ending
+  // in /sign-in" is exactly the shape of an open redirect.
+  it.each([
+    ['relative', () => '/sign-in?next=%2Faccount'],
+    ['same-origin absolute', (site: string) => `${site}/sign-in`],
+  ])('accepts a %s redirect to the sign-in page', async (_label, locationFor) => {
+    // The routes object is read per request rather than snapshotted, so the Location can
+    // name the stub's own origin — which is not known until the server is listening.
+    const routes: Record<string, Route | Route[]> = { ...HEALTHY };
+    const site = await stub(routes);
+    routes['/account'] = [302, '', { location: locationFor(site) }];
+
+    expect((await verify(site)).status).toBe(0);
+  });
+
+  /**
+   * The paths in the script are copies — bash cannot import a TypeScript constant — so
+   * they are pinned against the constants they were copied from. Renaming ACCOUNT_PATH
+   * without editing the script would otherwise leave the verifier fetching a 404 on every
+   * release, which fails loudly; renaming SIGN_IN_PATH would leave it asserting a
+   * redirect target that no longer exists, which is the quieter half.
+   */
+  it('checks the routes src/lib/auth-routes.ts actually declares', () => {
+    const script = readFileSync(SCRIPT, 'utf8');
+    expect(ACCOUNT_PATH).toBe('/account');
+    expect(SIGN_IN_PATH).toBe('/sign-in');
+    expect(script).toContain(`$SITE${ACCOUNT_PATH}`);
+    expect(script).toContain(SIGN_IN_PATH);
+  });
+
   // Exiting at the first problem hides the second until someone fixes the first and
   // deploys again — on the one deploy nobody re-runs casually.
   it('runs every check even when an earlier one fails, and counts them', async () => {
@@ -816,10 +975,12 @@ describe('verify-release.sh', () => {
     expect(status).toBe(1);
     expect(output).toMatch(/expected 200/);
     expect(output).toMatch(/disallows crawling/);
-    // Three, not two: a staging robots.txt trips both robots assertions — it has no
-    // Sitemap line AND it disallows. The count is asserted exactly so that a check
-    // quietly ceasing to run shows up as a smaller number rather than as nothing.
-    expect(output).toMatch(/3 problem\(s\)/);
+    expect(output).toMatch(/\/account answered 404/);
+    // Four, not three: a staging robots.txt trips both robots assertions — it has no
+    // Sitemap line AND it disallows — and this origin serves no on-demand route either.
+    // The count is asserted exactly so that a check quietly ceasing to run shows up as a
+    // smaller number rather than as nothing.
+    expect(output).toMatch(/4 problem\(s\)/);
   });
 
   it('refuses to run without a site argument', async () => {
@@ -855,9 +1016,11 @@ describe('verify-release.sh', () => {
 
 /**
  * Everything above reads wrangler.jsonc — the SOURCE. What `wrangler deploy` reads is
- * dist/client/wrangler.json, which the build generates by resolving one environment
- * out of that source. Those are two different files, and only the second one decides
- * what is publicly reachable.
+ * dist/server/wrangler.json (dist/client/wrangler.json before PK-19 gave this project
+ * its first on-demand route — see the comment on "deploys the generated config, not
+ * the source one" above for why the location moved), which the build generates by
+ * resolving one environment out of that source. Those are two different files, and
+ * only the second one decides what is publicly reachable.
  *
  * The gap is not theoretical. Wrangler environments do not inherit every key: some are
  * inherited, some must be repeated per environment, and which is which is a property
@@ -885,7 +1048,7 @@ describe('the generated deploy config', () => {
         env: { ...process.env, CLOUDFLARE_ENV: env, PUBLIC_SITE_ENV: env },
         stdio: 'pipe',
       });
-      const generated = join(outDir, 'client', 'wrangler.json');
+      const generated = join(outDir, 'server', 'wrangler.json');
       if (!existsSync(generated)) {
         throw new Error(`No generated wrangler.json for ${env} at ${generated}`);
       }

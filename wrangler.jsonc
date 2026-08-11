@@ -4,10 +4,12 @@
  * This file is the source of truth for both environments. `astro build` reads it
  * through @astrojs/cloudflare, resolves ONE environment — selected by the
  * CLOUDFLARE_ENV variable — and writes the resolved result to
- * dist/client/wrangler.json. That generated file is what `wrangler deploy`
- * consumes, and it carries no environments of its own, so `wrangler deploy
- * --env staging` does nothing useful: by deploy time the choice has already been
- * made. The environment is a BUILD input here, not a deploy flag.
+ * dist/server/wrangler.json (dist/client/wrangler.json before PK-19 — see the
+ * comment on the `assets` block below for why the location moved with the first
+ * real Worker entry). That generated file is what `wrangler deploy` consumes, and
+ * it carries no environments of its own, so `wrangler deploy --env staging` does
+ * nothing useful: by deploy time the choice has already been made. The
+ * environment is a BUILD input here, not a deploy flag.
  *
  * Both environments are named explicitly, including production. The top level
  * would serve as production by default, but then "no CLOUDFLARE_ENV" would
@@ -44,12 +46,17 @@
   // needed a daily cap on Application Insights on day one does not arise here.
   "observability": { "enabled": true },
 
-  // Astro emits the static files here and the on-demand entry (when one exists)
-  // into dist/server. Every route is prerendered today, so this deploy is
-  // assets-only and there is no Worker script to run — static asset requests are
-  // free and unlimited, which is the reason the 100 GB Static Web Apps wall
-  // stops existing. The first `export const prerender = false` adds a script
-  // with no change needed here.
+  // Astro emits the static files here and the on-demand entry into dist/server.
+  // Static asset requests still hit this binding directly and are free and
+  // unlimited, which is the reason the 100 GB Static Web Apps wall stops
+  // existing — that stayed true the moment PK-19 added the first `export const
+  // prerender = false` routes (sign-in, sign-up, account, the auth API routes),
+  // which is also what gives this deploy an actual Worker script (`main` in the
+  // GENERATED config, not here — this file has none, because entry.mjs does not
+  // exist until the build produces it) for the first time. The directory below is
+  // relative to THIS file at the repo root, for `wrangler dev` run directly
+  // against it; the generated dist/server/wrangler.json restates it relative to
+  // itself (`../client`) — see the header comment above.
   "assets": {
     "directory": "./dist/client",
 
@@ -77,9 +84,11 @@
       "workers_dev": false,
 
       // Production must have exactly one URL. Version preview URLs are a per-PR
-      // review affordance and staging turns them on below; on production they
-      // would be an unlisted, unindexed, un-gated copy of the live site — the
-      // same shape of problem as the Azure hostname, self-inflicted.
+      // review affordance, and this project stopped having per-PR previews — so
+      // they are off here AND off on staging below, rather than off here and on
+      // there as this comment used to say. On production one would be an
+      // unlisted, unindexed, un-gated copy of the live site — the same shape of
+      // problem as the Azure hostname, self-inflicted.
       "preview_urls": false,
 
       // The hostname is declared here rather than clicked into a dashboard, so the

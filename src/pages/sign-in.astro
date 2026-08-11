@@ -1,0 +1,160 @@
+---
+// On-demand: this page reads the request body on POST and sets cookies, neither of
+// which a prerendered file can do. See src/middleware.ts for why that costs nothing on
+// the anonymous read path — this route was never on it.
+export const prerender = false;
+
+import Layout from '../layouts/Layout.astro';
+import { getGoogleAuthorizationUrl, signInWithPassword } from '../lib/auth';
+import {
+  AUTH_CALLBACK_PATH,
+  googleAuthUnavailableMessage,
+  nextFromForm,
+  NEXT_PARAM,
+  SIGN_UP_PATH,
+  safeNextPath,
+} from '../lib/auth-routes';
+
+// `next` is trusted nowhere near its raw form — see safeNextPath's own comment for the
+// open-redirect it closes. Seeded from the query string here, which is what a GET has,
+// and re-read from the submitted form in the POST branch below (see nextFromForm). One
+// value from then on: the redirect target, the hidden field the next submission will
+// carry, and the sign-up link.
+let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
+
+// Set by src/pages/auth/callback.ts redirecting back here after a failed OAuth
+// exchange — see that file. Never Supabase's or Google's own error text, which is a
+// neutral message away from disclosing implementation detail to whoever is looking.
+const oauthFailed = Astro.url.searchParams.has('oauth_error');
+
+let errorMessage: string | null = oauthFailed
+  ? 'Something went wrong signing in with Google. Please try again, or use email and password below.'
+  : null;
+
+// CSRF: this POST relies on Astro's on-demand origin check (security.checkOrigin,
+// on by default and set explicitly in astro.config.mjs — see the comment there),
+// which rejects a cross-site submission before this code ever runs, together with the
+// session cookie's `sameSite: 'lax'` (src/lib/auth/index.ts) not being sent on a
+// cross-site request in the first place. No separate CSRF token is needed on top of
+// that pair.
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  // Re-read from the submitted form, falling back to the query string. The hidden field
+  // below is the carrier; the query string is the safety net for a form that lost it.
+  // See nextFromForm in src/lib/auth-routes.ts for why the field is read rather than
+  // deleted, and note that both sources go through safeNextPath — a hidden field is not
+  // a trusted one.
+  next = nextFromForm(form, Astro.url);
+  const intent = form.get('intent');
+
+  if (intent === 'google') {
+    const callbackUrl = new URL(AUTH_CALLBACK_PATH, Astro.url.origin);
+    callbackUrl.searchParams.set(NEXT_PARAM, next);
+    const result = await getGoogleAuthorizationUrl({
+      cookies: Astro.cookies,
+      request: Astro.request,
+      redirectTo: callbackUrl.toString(),
+    });
+    if (result.ok) {
+      return Astro.redirect(result.url);
+    }
+    // Google is configured and enabled on both hosted Supabase projects, so this is
+    // the exceptional path, not the everyday one — Supabase unreachable, the provider
+    // disabled again in the dashboard, a malformed redirect. Never render
+    // result.error, which is Supabase's own text; say what a visitor can do about it.
+    errorMessage = googleAuthUnavailableMessage('in');
+  } else {
+    const email = String(form.get('email') ?? '');
+    const password = String(form.get('password') ?? '');
+    const result = await signInWithPassword({
+      cookies: Astro.cookies,
+      request: Astro.request,
+      email,
+      password,
+    });
+    if (result.ok) {
+      return Astro.redirect(next);
+    }
+    // result.error is already the neutral BAD_CREDENTIALS_MESSAGE from
+    // src/lib/auth/index.ts — safe to render verbatim, unlike a raw Supabase error.
+    errorMessage = result.error;
+  }
+}
+---
+
+<Layout title="Sign in — Packsheet" description="Sign in to your Packsheet account.">
+  <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
+    <a href="/" class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Packsheet</a>
+    <h1 class="mt-6 text-3xl">Sign in</h1>
+
+    {
+      errorMessage && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {errorMessage}
+        </p>
+      )
+    }
+
+    <form method="POST" class="mt-8 space-y-4">
+      <input type="hidden" name={NEXT_PARAM} value={next} />
+      <div>
+        <label for="email" class="text-ink-2 block text-sm">Email</label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autocomplete="email"
+          required
+          class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+        />
+      </div>
+      <div>
+        <label for="password" class="text-ink-2 block text-sm">Password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+          class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+        />
+      </div>
+      <button
+        type="submit"
+        class="border-blue-deep text-blue-deep hover:bg-blue-tint w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+      >
+        Sign in
+      </button>
+    </form>
+
+    <div class="my-6 flex items-center gap-3" aria-hidden="true">
+      <span class="border-hairline h-px flex-1 border-t"></span>
+      <span class="text-ink-3 text-xs tracking-wide uppercase">or</span>
+      <span class="border-hairline h-px flex-1 border-t"></span>
+    </div>
+
+    <form method="POST">
+      <input type="hidden" name="intent" value="google" />
+      <input type="hidden" name={NEXT_PARAM} value={next} />
+      <button
+        type="submit"
+        class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+      >
+        Continue with Google
+      </button>
+    </form>
+
+    <p class="text-ink-2 mt-8 text-sm">
+      New here?{' '}
+      <a
+        href={`${SIGN_UP_PATH}?next=${encodeURIComponent(next)}`}
+        class="text-blue-deep hover:text-blue-ink underline"
+      >
+        Create an account
+      </a>
+    </p>
+  </main>
+</Layout>

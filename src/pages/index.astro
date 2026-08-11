@@ -1,6 +1,11 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import ThemeToggle from '../components/ThemeToggle.vue';
+// A path constant, not the auth SDK — safe for this prerendered, anonymous page to
+// import. See src/lib/auth-routes.ts's own header comment for why this file exists
+// separately from src/lib/auth/, and src/lib/auth/index.ts's "corollary of an edge
+// rule" paragraph for why importing the choke point itself here would sink the build.
+import { SIGN_IN_PATH } from '../lib/auth-routes';
 
 const title = 'Packsheet — a free, open gear tracker for hikers';
 // Feeds og:description, twitter:description and the search snippet as well as the
@@ -17,7 +22,20 @@ const repoUrl = 'https://github.com/MadStark/packsheet-io';
   <main class="mx-auto flex min-h-svh max-w-2xl flex-col justify-center px-6 py-16">
     <header class="flex items-baseline justify-between gap-4">
       <p class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Coming soon</p>
-      <ThemeToggle client:load />
+      <div class="flex items-center gap-4">
+        {
+          /*
+          A quiet link, not a gate: the ticket is explicit that nothing stands between
+          a visitor and the product on this page — no signup wall, no modal, no
+          redirect. text-blue-deep for the same AA-contrast reason as the GitHub link
+          below (plain --blue is 4.48:1 on --paper, under the AA floor).
+        */
+        }
+        <a href={SIGN_IN_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline"
+          >Sign in</a
+        >
+        <ThemeToggle client:load />
+      </div>
     </header>
 
     <h1 class="mt-8 text-4xl leading-[1.1] sm:text-5xl">Packsheet</h1>

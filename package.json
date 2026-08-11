@@ -36,6 +36,8 @@
     "@astrojs/cloudflare": "^14.2.0",
     "@astrojs/sitemap": "^3.7.3",
     "@astrojs/vue": "^7.0.1",
+    "@supabase/ssr": "^0.12.4",
+    "@supabase/supabase-js": "^2.112.2",
     "@tailwindcss/vite": "^4.3.3",
     "astro": "^7.2.0",
     "lucide-vue-next": "^1.0.0",
@@ -45,7 +47,6 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
     "@eslint/js": "^10.0.1",
-    "@supabase/supabase-js": "^2.112.2",
     "@types/pg": "^8.21.0",
     "astro-eslint-parser": "^1.4.0",
     "cross-env": "^10.1.0",

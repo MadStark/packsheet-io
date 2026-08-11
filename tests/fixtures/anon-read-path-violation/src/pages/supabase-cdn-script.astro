@@ -1,0 +1,18 @@
+---
+// The Supabase half of the boundary cdn-script.astro pins for Clerk, and the one PK-19
+// made reachable: `@supabase/ssr` is a runtime dependency now, so an import specifier for
+// it is a thing somebody can plausibly type — and typed as a URL, in an inline module
+// script, it produces ZERO edges for the module graph to walk. Invariants A, B, C and D
+// are all blind to this page, correctly, because there is no import here for a bundler to
+// resolve.
+//
+// Caught only by the scan of the emitted HTML. Until PK-19 that scan named Clerk hosts
+// and nothing else, so this exact page would have shipped the whole GoTrue stack to every
+// visitor with the suite green.
+---
+
+<script is:inline type="module">
+  import { createBrowserClient } from 'https://esm.sh/@supabase/ssr@0.12.4';
+  window.__packsheetLeak = createBrowserClient;
+</script>
+<p>supabase cdn script</p>

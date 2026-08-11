@@ -1,0 +1,17 @@
+---
+// The acceptance criterion the emitted-HTML scan would be WRONG without, and the reason
+// its patterns are anchored on package paths and bundle filenames rather than on the word
+// "supabase" in a URL.
+//
+// This is a project's Data API host — where the anonymous read path legitimately points,
+// and exactly what `PUBLIC_SUPABASE_URL` resolves to. It will appear in emitted HTML the
+// day a share page renders anything at all from it. A scan that flagged it would fail
+// every correct build of the feature this project exists to ship, and the first person to
+// hit that would be right to delete the scan.
+const projectUrl = 'https://abcdefghijklmnop.supabase.co';
+---
+
+<p data-supabase-url={projectUrl}>{projectUrl}</p>
+<script is:inline define:vars={{ projectUrl }}>
+  window.__packsheetDataApi = projectUrl;
+</script>
