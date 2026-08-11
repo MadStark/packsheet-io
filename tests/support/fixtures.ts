@@ -9,7 +9,7 @@
  * during setup rather than producing a green run over impossible data.
  */
 
-import type { PostgrestError, SupabaseClient } from '@supabase/supabase-js';
+import type { PostgrestError } from '@supabase/supabase-js';
 import type { TestUser } from './local-database';
 
 /**
@@ -85,7 +85,7 @@ export async function createPack(
   options: PackFixtureOptions = {},
 ): Promise<PackFixture> {
   const { visibility = 'private', itemCount = 1, locked = false, slug } = options;
-  const db: SupabaseClient = user.client;
+  const db = user.client;
 
   if (!Number.isInteger(itemCount) || itemCount < 1) {
     throw new Error(`createPack needs itemCount >= 1, got ${itemCount}`);

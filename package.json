@@ -27,6 +27,7 @@
     "db:stop": "scripts/supabase.sh stop",
     "db:reset": "scripts/supabase.sh db reset",
     "db:status": "scripts/supabase.sh status",
+    "db:types": "scripts/database-types.sh write",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write ."
