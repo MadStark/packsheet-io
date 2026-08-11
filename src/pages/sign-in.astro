@@ -8,7 +8,6 @@ import Layout from '../layouts/Layout.astro';
 import { getGoogleAuthorizationUrl, signInWithPassword } from '../lib/auth';
 import {
   AUTH_CALLBACK_PATH,
-  GOOGLE_AUTH_ENABLED,
   googleAuthUnavailableMessage,
   nextFromForm,
   NEXT_PARAM,
@@ -49,29 +48,21 @@ if (Astro.request.method === 'POST') {
   const intent = form.get('intent');
 
   if (intent === 'google') {
-    if (!GOOGLE_AUTH_ENABLED) {
-      // Reached only by a stale cached form or a crafted POST — GOOGLE_AUTH_ENABLED
-      // being false is also why the button below is never rendered. Refuse outright
-      // rather than attempting the OAuth call: Google credentials do not exist in any
-      // environment yet, so that call would only reach Supabase's authorize endpoint,
-      // which renders its own raw JSON error straight to the visitor. See
-      // GOOGLE_AUTH_ENABLED's own comment in src/lib/auth-routes.ts.
-      errorMessage = googleAuthUnavailableMessage('in');
-    } else {
-      const callbackUrl = new URL(AUTH_CALLBACK_PATH, Astro.url.origin);
-      callbackUrl.searchParams.set(NEXT_PARAM, next);
-      const result = await getGoogleAuthorizationUrl({
-        cookies: Astro.cookies,
-        request: Astro.request,
-        redirectTo: callbackUrl.toString(),
-      });
-      if (result.ok) {
-        return Astro.redirect(result.url);
-      }
-      // Reachable once a provider IS configured and Supabase itself refuses for some
-      // other reason. Never render that raw string; say what a visitor can do about it.
-      errorMessage = googleAuthUnavailableMessage('in');
+    const callbackUrl = new URL(AUTH_CALLBACK_PATH, Astro.url.origin);
+    callbackUrl.searchParams.set(NEXT_PARAM, next);
+    const result = await getGoogleAuthorizationUrl({
+      cookies: Astro.cookies,
+      request: Astro.request,
+      redirectTo: callbackUrl.toString(),
+    });
+    if (result.ok) {
+      return Astro.redirect(result.url);
     }
+    // Google is configured and enabled on both hosted Supabase projects, so this is
+    // the exceptional path, not the everyday one — Supabase unreachable, the provider
+    // disabled again in the dashboard, a malformed redirect. Never render
+    // result.error, which is Supabase's own text; say what a visitor can do about it.
+    errorMessage = googleAuthUnavailableMessage('in');
   } else {
     const email = String(form.get('email') ?? '');
     const password = String(form.get('password') ?? '');
@@ -139,33 +130,22 @@ if (Astro.request.method === 'POST') {
       </button>
     </form>
 
-    {
-      // GOOGLE_AUTH_ENABLED off (the default until a Google OAuth client exists and
-      // the provider is switched on — see src/lib/auth-routes.ts) means offering this
-      // button would offer a control that cannot currently work, which is worse than
-      // not offering it at all: the visitor would land on Supabase's own raw JSON
-      // error page.
-      GOOGLE_AUTH_ENABLED && (
-        <Fragment>
-          <div class="my-6 flex items-center gap-3" aria-hidden="true">
-            <span class="border-hairline h-px flex-1 border-t" />
-            <span class="text-ink-3 text-xs tracking-wide uppercase">or</span>
-            <span class="border-hairline h-px flex-1 border-t" />
-          </div>
+    <div class="my-6 flex items-center gap-3" aria-hidden="true">
+      <span class="border-hairline h-px flex-1 border-t"></span>
+      <span class="text-ink-3 text-xs tracking-wide uppercase">or</span>
+      <span class="border-hairline h-px flex-1 border-t"></span>
+    </div>
 
-          <form method="POST">
-            <input type="hidden" name="intent" value="google" />
-            <input type="hidden" name={NEXT_PARAM} value={next} />
-            <button
-              type="submit"
-              class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-            >
-              Continue with Google
-            </button>
-          </form>
-        </Fragment>
-      )
-    }
+    <form method="POST">
+      <input type="hidden" name="intent" value="google" />
+      <input type="hidden" name={NEXT_PARAM} value={next} />
+      <button
+        type="submit"
+        class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+      >
+        Continue with Google
+      </button>
+    </form>
 
     <p class="text-ink-2 mt-8 text-sm">
       New here?{' '}

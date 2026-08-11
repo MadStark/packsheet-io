@@ -131,9 +131,9 @@ build produces, and CI does not yet assert it.
 
 ### The one thing staging cannot reproduce
 
-`PUBLIC_SITE_ENV` is reproducible locally, and so is the other build-time switch PK-19
-added: `PUBLIC_GOOGLE_AUTH_ENABLED` decides whether the "Continue with Google" control is
-compiled in at all, and setting it in `.env` reproduces either answer exactly. What is
+`PUBLIC_SITE_ENV` is reproducible locally — it is the only build-time switch left; the
+"Continue with Google" control has no flag of its own and is simply always compiled in
+(see "Database" below for where the Google credentials that back it live). What is
 environment-dependent and NOT reproducible is which Supabase project a build points at —
 production and staging have separate ones, with separate data — and, more sharply, the
 gate in front of staging itself:
@@ -222,16 +222,20 @@ that environment's Supabase project:
   is NOT this one), scoped per environment purely so staging and production build against
   their own separate Supabase projects rather than because either value is sensitive on
   its own.
-- `PUBLIC_GOOGLE_AUTH_ENABLED` — same build-time mechanism as the pair above,
-  alongside them in both workflows' `Build` step, gating whether the "Continue with
-  Google" button is compiled into the built site at all (see
-  `src/lib/auth-routes.ts`). Off — unset, or anything other than the literal `true` —
-  in every environment until a Google Cloud OAuth client exists and the Google
-  provider is switched on in that environment's own Supabase project; see
-  `.env.example` for exactly what that requires. Neither exists yet anywhere, so this
-  stays off. Turning it on early is not a harmless placeholder: it sends every visitor
-  who clicks the button to Supabase's own raw JSON error page rather than merely
-  hiding an unfinished feature.
+
+Google sign-in needs no secret of its own in this repository or either workflow. The
+"Continue with Google" button (`src/lib/auth-routes.ts`, `src/pages/sign-in.astro`,
+`src/pages/sign-up.astro`) always renders — there used to be a `PUBLIC_`-prefixed
+build-time flag gating it, added because neither hosted Supabase project had a Google
+OAuth client configured yet, so the button would have sent every visitor to Supabase's
+own authorize endpoint and its raw JSON `"provider is not enabled"` error. Google is now
+configured and enabled on both hosted projects — a Google Cloud OAuth 2.0 client with
+this project's auth callback as an authorised redirect URI, and the provider switched on
+in each project's Authentication -> Providers with that client's ID and secret entered —
+so the flag's only remaining job would have been to silently disable the button if
+someone forgot to set it in a new environment, which is worse than not having it. Those
+credentials live in Supabase's dashboard for each project, not as a GitHub secret, so
+there is nothing to configure here to turn Google sign-in on or off.
 
 **Local development runs the whole stack in Docker, one per git worktree:**
 

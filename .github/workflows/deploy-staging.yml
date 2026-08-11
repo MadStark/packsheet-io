@@ -133,14 +133,6 @@ jobs:
           # "Database" section for what backs these two secrets.
           PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
           PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
-
-          # Off (this secret unset, or anything other than the literal "true") until a
-          # Google Cloud OAuth client exists AND the provider is switched on in
-          # staging's own Supabase project — see .env.example and
-          # src/lib/auth-routes.ts (GOOGLE_AUTH_ENABLED). Same build-time mechanism as
-          # the pair above: whichever way this resolves is compiled into the artifact
-          # here, not decided later.
-          PUBLIC_GOOGLE_AUTH_ENABLED: ${{ secrets.PUBLIC_GOOGLE_AUTH_ENABLED }}
         run: npm run build
 
       - name: Deploy to Cloudflare Workers

@@ -124,49 +124,18 @@ export function nextFromForm(form: FormData, url: URL): string {
 }
 
 /**
- * Whether the "Continue with Google" control should be offered at all, and whether a
- * POST claiming `intent=google` should be honoured rather than refused outright.
- *
- * Google OAuth credentials do not exist in any environment yet — no Google Cloud OAuth
- * client, and the provider is not switched on in either Supabase project — so before
- * this flag existed, clicking the button sent every visitor to Supabase's own
- * authorize endpoint, which rendered its raw JSON straight to them:
- * `{"code":400,"error_code":"validation_failed","msg":"Unsupported provider: provider
- * is not enabled"}`. The PKCE construction that gets a visitor there
- * (`getGoogleAuthorizationUrl` in `src/lib/auth/index.ts`) is correct; the problem is
- * purely that nothing is configured to answer it yet. An offered control that always
- * fails is worse than an absent one, so sign-in.astro and sign-up.astro gate both the
- * button and the POST branch behind this rather than relying on the error message to
- * paper over a state that is, today, universal rather than exceptional.
- *
- * A plain constant rather than a function, and read here rather than separately in
- * each page, for the same reason `SIGN_IN_PATH` and friends are constants above: it is
- * `PUBLIC_`-prefixed, so Vite inlines it into both the server and client bundle at
- * BUILD time (see `.env.example` for what has to exist before it may be turned on, and
- * the README's "Database" section for the two deploy workflows it is wired into
- * alongside `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY`) — there is no request-
- * time check left to perform, and reading it once here rather than twice keeps the two
- * pages from ever being able to disagree about it.
- *
- * Compared against the literal string `"true"` and nothing else — unset, misspelled,
- * or any other value all resolve to `false` — matching `PUBLIC_SITE_ENV`'s own fail-
- * safe pattern in `src/pages/robots.txt.ts` for the same reason: the safe side of a
- * typo here is "no button", not "button that silently starts sending visitors into a
- * JSON error page".
- */
-export const GOOGLE_AUTH_ENABLED = import.meta.env.PUBLIC_GOOGLE_AUTH_ENABLED === 'true';
-
-/**
- * The plain-English message shown in place of attempting Google OAuth when
- * `GOOGLE_AUTH_ENABLED` is `false`. Reached either because the button was never
- * rendered and something POSTed `intent=google` anyway — a stale cached form, a
- * crafted request — or, once the flag IS on, because Supabase itself refused the
- * request for some other reason once a real provider exists to refuse things.
- * Centralised here rather than typed out separately in sign-in.astro and
+ * The plain-English message shown when `getGoogleAuthorizationUrl` (src/lib/auth/index.ts)
+ * fails — Supabase unreachable, the provider disabled again in the dashboard, a
+ * malformed redirect URI. Google is configured and enabled on both hosted Supabase
+ * projects (verified: the authorize endpoint 302s to `accounts.google.com` with the
+ * right client ID and redirect URI), so this is no longer the everyday path it once
+ * was, but the call still crosses the network and can still fail, and a visitor who
+ * hits that must never see Supabase's or Google's own error text — a raw
+ * `{"code":400,...}` body, or a redirect into a JSON error page — rendered straight at
+ * them. Centralised here rather than typed out separately in sign-in.astro and
  * sign-up.astro's frontmatter so the two pages cannot drift into two different
- * wordings for the same failure, and so the rule that matters — NEVER relay
- * Supabase's or Google's own error text to a visitor — lives in one function this
- * file's own test can pin, rather than only in two hand-read `.astro` files.
+ * wordings for the same failure, and so the rule that matters lives in one function
+ * this file's own test can pin, rather than only in two hand-read `.astro` files.
  */
 export function googleAuthUnavailableMessage(action: 'in' | 'up'): string {
   return `Google sign-${action} is not available right now. Use email and password below.`;
