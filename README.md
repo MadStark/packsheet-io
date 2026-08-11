@@ -199,6 +199,29 @@ There are two hosted projects — production and staging — with separate keys 
 separate data. Neither ref appears in this repository; CI selects between them from an
 environment-scoped secret.
 
+Production answers on **`auth.packsheet.io`** rather than on its generated
+`<ref>.supabase.co` hostname, which is why `PUBLIC_SUPABASE_URL` for that environment
+names it. This is bought — the Custom Domain add-on, \$10/month on top of Pro — for one
+user-visible reason: an OAuth redirect is the single place a hosted project's hostname
+reaches a person's eyes. Before this, Google's consent screen read _"to continue to
+hrslxngdfocxderslkws.supabase.co"_, because Google shows the host of the redirect URI
+rather than an app name for an app it has not verified. It now reads _"to continue to
+packsheet.io"_ — Google collapses the subdomain to the registrable domain.
+
+Nothing else needed it. Every other request to Supabase is made by the Worker, server
+to server, where the hostname is never read by anyone: no browser talks to Supabase
+directly, and `tests/anonymous-read-path.test.ts` fails the build if a `@supabase/*`
+package ever reaches the client bundle. So a second custom domain for the data API
+would rename something no user can see, at \$10/month per project. The generated
+hostname keeps working alongside the custom one, so this is additive rather than a
+cutover.
+
+Two DNS records in the `packsheet.io` zone hold it up, and both must stay **DNS-only,
+never proxied** — an orange cloud in front of them breaks certificate renewal, and the
+failure arrives as an expired certificate months later rather than as a broken deploy:
+a `CNAME` from `auth` to the project's generated hostname, and the `_acme-challenge`
+`TXT` beneath it.
+
 Each deploy workflow's GitHub _environment_ (`staging` or `production` — see
 `environment:` in the workflow file) needs its own copies of these secrets, matching
 that environment's Supabase project:
