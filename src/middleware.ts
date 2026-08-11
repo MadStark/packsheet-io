@@ -9,12 +9,35 @@ import {
 } from './lib/auth-routes';
 
 /**
- * Every path this middleware treats as "an auth route" for the caching rule below —
- * not for the user lookup, which runs unconditionally (see the comment on `onRequest`).
- * Listed rather than pattern-matched off a shared `/auth/` or `/account/` prefix,
- * because a future on-demand route that happens to share a prefix (an `/account/`
- * settings sub-page, say) should have to earn its way onto this list rather than
- * inherit the no-store rule by accident of URL shape.
+ * Every path this middleware treats as "an auth route" for the caching rule below — not
+ * for the user lookup, which is gated on `isPrerendered` instead (see the comment on
+ * `onRequest`).
+ *
+ * ENUMERATED ROOTS, INHERITED SUB-PATHS, and the two halves of that are a deliberate
+ * pair rather than an accident of how `isAuthRoute` was written. This comment used to
+ * say the opposite of the code — that a future `/account/` sub-page "should have to earn
+ * its way onto this list rather than inherit the no-store rule by accident of URL shape"
+ * — while `isAuthRoute` matched every sub-path of every entry. One of the two had to go,
+ * and it was the comment, because the code is right:
+ *
+ *   - The two failures are not symmetric. Over-applying `no-store` costs a route its edge
+ *     cacheability, and every path below is on-demand and session-shaped anyway, so the
+ *     bill is close to nothing. UNDER-applying it means a response that depends on who is
+ *     asking is handed to a shared cache — one visitor's account screen served to
+ *     another. A default that has to be remembered is the wrong way round for a pair like
+ *     that.
+ *   - The route that would be forgotten is exactly the one that matters. `/account/`
+ *     sub-pages are where a signed-in person's data goes; the argument for making them
+ *     opt in is tidiness, and the cost of forgetting is a cross-visitor cache hit.
+ *
+ * The ROOTS stay enumerated for the reason the comment originally reached for: nothing
+ * here matches a bare `/auth/` or `/account/` prefix by pattern, so a new top-level route
+ * is a line somebody adds on purpose. What is inherited is only what sits UNDER a path
+ * already on the list, which is a place a session-bearing page genuinely belongs.
+ *
+ * A route that must be publicly cacheable therefore must not live under one of these
+ * prefixes — which is the right constraint anyway, since these are the prefixes whose
+ * whole meaning is "this is about who you are".
  */
 const AUTH_ROUTE_PATHS: readonly string[] = [
   SIGN_IN_PATH,
@@ -24,6 +47,9 @@ const AUTH_ROUTE_PATHS: readonly string[] = [
   AUTH_CALLBACK_PATH,
 ];
 
+/** The path itself, or anything beneath it. `${path}/` and not `path` as a bare prefix:
+ *  without the separator, `/accountant` would inherit `/account`'s rule — the same
+ *  trailing-separator bug the auth choke-point check has its own fixture for. */
 function isAuthRoute(pathname: string): boolean {
   return AUTH_ROUTE_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
@@ -68,17 +94,22 @@ function isAuthRoute(pathname: string): boolean {
  * THE CACHING RULE ITSELF. `Cache-Control: private, no-store` is set whenever either
  * is true: the request resolved to a signed-in user (so the response is personal —
  * the account page and any future page that adapts to who is asking), or the route is
- * one of `AUTH_ROUTE_PATHS` regardless of session state (the sign-in page for a
- * signed-out visitor still must not be cached, because the wrong visitor's CSRF-
- * relevant form state or a stale error message is not a page any other stranger's
- * browser should be shown). A prerendered page's build-time render never sets this
- * header at all — `next()` for it produces the response `astro build` writes to a
- * static file, which Cloudflare's assets binding then serves untouched by this
- * function ever again, and Astro's own asset headers govern its caching instead.
- * `@supabase/ssr` already sets a `Cache-Control` on its own responses for the same
- * reason this block exists; this is the belt to that suspenders — it applies at the
- * Astro response level so it covers every route in `AUTH_ROUTE_PATHS`, not only the
- * ones that happen to touch a Supabase call on every request.
+ * one of `AUTH_ROUTE_PATHS` — or anything beneath one — regardless of session state (the
+ * sign-in page for a signed-out visitor still must not be cached, because the wrong
+ * visitor's CSRF-relevant form state or a stale error message is not a page any other
+ * stranger's browser should be shown). A prerendered page's build-time render never sets
+ * this header at all — `next()` for it produces the response `astro build` writes to a
+ * static file, which Cloudflare's assets binding then serves untouched by this function
+ * ever again, and Astro's own asset headers govern its caching instead. That last
+ * sentence used to be a description of behaviour the code did not have: the header was
+ * set for any listed path, prerendered or not, which is unobservable today only because
+ * every path on the list is on-demand. `isPrerendered` gates both halves now, so the
+ * comment is the specification rather than an aspiration.
+ *
+ * `@supabase/ssr` already sets a `Cache-Control` on its own responses for the same reason
+ * this block exists; this is the belt to that suspenders — it applies at the Astro
+ * response level so it covers every route in `AUTH_ROUTE_PATHS`, not only the ones that
+ * happen to touch a Supabase call on every request.
  */
 export const onRequest = defineMiddleware(async (context, next) => {
   context.locals.user = context.isPrerendered
@@ -87,7 +118,10 @@ export const onRequest = defineMiddleware(async (context, next) => {
 
   const response = await next();
 
-  if (context.locals.user !== null || isAuthRoute(context.url.pathname)) {
+  if (
+    !context.isPrerendered &&
+    (context.locals.user !== null || isAuthRoute(context.url.pathname))
+  ) {
     response.headers.set('Cache-Control', 'private, no-store');
   }
 

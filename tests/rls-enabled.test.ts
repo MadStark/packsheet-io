@@ -235,9 +235,11 @@ describe('every workflow that runs the suite starts a database first', () => {
     if?: string;
     'continue-on-error'?: boolean;
     with?: { version?: string };
+    env?: Record<string, string>;
   }
   interface Workflow {
-    jobs: Record<string, { steps?: Step[] }>;
+    env?: Record<string, string>;
+    jobs: Record<string, { steps?: Step[]; env?: Record<string, string> }>;
   }
 
   const workflowsDir = fileURLToPath(new URL('../.github/workflows', import.meta.url));
@@ -251,11 +253,20 @@ describe('every workflow that runs the suite starts a database first', () => {
   const isTest = (s: Step) => (s.run ?? '').trim() === 'npm test';
   const isDatabase = (s: Step) => (s.uses ?? '') === './.github/actions/local-database';
 
-  /** Every (workflow, job) pair that runs the suite. */
+  /** Every (workflow, job) pair that runs the suite, with the two env scopes that reach
+   *  a step from ABOVE it — the workflow's and the job's. A step's own `env:` is read
+   *  off the step itself where it is needed; these two are the ones that apply to every
+   *  step in the job whether it asked for them or not, which is the whole distinction
+   *  the environment assertions below turn on. */
   const suiteJobs = parsed.flatMap(({ file, workflow }) =>
     Object.entries(workflow.jobs ?? {})
       .filter(([, job]) => (job.steps ?? []).some(isTest))
-      .map(([jobName, job]) => ({ file, jobName, steps: job.steps ?? [] })),
+      .map(([jobName, job]) => ({
+        file,
+        jobName,
+        steps: job.steps ?? [],
+        inheritedEnv: { ...(workflow.env ?? {}), ...(job.env ?? {}) },
+      })),
   );
 
   // Without this the whole describe passes over an empty list — the same vacuum the
@@ -289,6 +300,88 @@ describe('every workflow that runs the suite starts a database first', () => {
     },
   );
 
+  /**
+   * WHERE THE SUITE IS POINTED, which is a sharper question than whether it has a
+   * database at all.
+   *
+   * `npm test` creates users, signs them in and DELETES ACCOUNTS — tests/auth-flow.test.ts
+   * ends by calling `deleteOwnAccount()` for real. Against the local stack that is a
+   * container that gets thrown away. Against a hosted project it is somebody's data.
+   *
+   * Two of the three workflows that run this suite are deploys, and both of them legitimately
+   * hold hosted `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY` secrets, because Vite
+   * inlines those into the artifact at build time. So the hosted values and the destructive
+   * suite live in the same job, a few lines apart, and the only thing separating them is
+   * WHERE the secrets are set: on the Build step's own `env:`, which no other step can see.
+   *
+   * Moving that pair up one level — to the job, or to the workflow — is a plausible-looking
+   * tidy-up (it removes a duplicated block between the two deploy files) and it would point
+   * the account-deleting tests at production. Nothing else in this repository would notice.
+   * So it is asserted here, keyed on `npm test` rather than on a filename, for the same
+   * reason the database assertion above is: a fourth workflow must inherit the rule rather
+   * than have to remember it.
+   *
+   * The rule is deliberately about the ENVIRONMENT rather than about the word "secrets".
+   * A literal hosted URL typed into a job-level `env:` is exactly as dangerous as a secret
+   * reference, and reads as more innocent.
+   */
+  const SUPABASE_TARGET_VARS = ['PUBLIC_SUPABASE_URL', 'PUBLIC_SUPABASE_ANON_KEY'];
+
+  it.each(suiteJobs.map((j) => [`${j.file}:${j.jobName}`, j] as const))(
+    '%s sets no Supabase target above step level, so npm test cannot see a hosted project',
+    (_label, job) => {
+      expect(Object.keys(job.inheritedEnv).filter((n) => SUPABASE_TARGET_VARS.includes(n))).toEqual(
+        [],
+      );
+    },
+  );
+
+  it.each(suiteJobs.map((j) => [`${j.file}:${j.jobName}`, j] as const))(
+    '%s gives the npm test step itself no Supabase target of its own',
+    (_label, job) => {
+      for (const step of job.steps.filter(isTest)) {
+        expect(Object.keys(step.env ?? {}).filter((n) => SUPABASE_TARGET_VARS.includes(n))).toEqual(
+          [],
+        );
+      }
+    },
+  );
+
+  /**
+   * The other half, and the reason the two assertions above are safe to make rather than
+   * merely strict: with nothing setting those variables anywhere a test step can see, the
+   * suite would have none at all — which is how PK-19's CI actually failed, with
+   * `PUBLIC_SUPABASE_URL is not set` and a summary line reading "skipped".
+   *
+   * The local-database action is what supplies them, writing this job's own stack into
+   * `$GITHUB_ENV`. That is asserted from the action's source rather than assumed, because
+   * "no workflow points the tests at a hosted project" and "the tests are pointed at
+   * nothing" are the same green here otherwise.
+   */
+  it('the local-database action is what supplies them, from the stack it just started', () => {
+    const action = readFileSync(
+      fileURLToPath(new URL('../.github/actions/local-database/action.yml', import.meta.url)),
+      'utf8',
+    );
+
+    for (const name of SUPABASE_TARGET_VARS) {
+      expect(action, `${name} is never written to $GITHUB_ENV`).toMatch(
+        new RegExp(`echo "${name}=\\$[A-Z_]+" >> "\\$GITHUB_ENV"`),
+      );
+    }
+    // From the running stack, not from a secret or a literal. `supabase status -o env`
+    // is the only thing that knows this job's own ports. Anchored on the expression
+    // syntax rather than on the word, so a comment that merely discusses secrets — this
+    // action's does, at length — is not mistaken for one that interpolates one.
+    expect(action).toContain('scripts/supabase.sh status -o env');
+    expect(action).not.toMatch(/\$\{\{\s*secrets\./);
+
+    // And nothing privileged goes with them. The CLI prints SERVICE_ROLE_KEY and
+    // SECRET_KEY in the same block, and this action is a step whose exports reach the
+    // build.
+    expect(action).not.toMatch(/SERVICE_ROLE_KEY=|SECRET_KEY=/);
+  });
+
   // One CLI version across every workflow that installs it, including the two that
   // `db push` to a hosted project: the migrations replayed locally and the migrations
   // pushed to production must be applied by the same tool.
@@ -314,10 +407,16 @@ describe('every workflow that runs the suite starts a database first', () => {
  * unqualified names resolve to, while it runs as its owner. Supabase's own linter
  * flags it as `function_search_path_mutable`.
  *
- * There are no definer functions in this schema today. The assertion exists so that
- * the first one to arrive has to be deliberate about it. `private` is swept as well as
- * `public`: it is the schema the migration directs definer helpers towards, so leaving
- * it out would aim people at the one place nothing was checking.
+ * This was written when the schema had no definer functions at all, so that the first one
+ * to arrive would have to be deliberate about it. PK-19 is that arrival:
+ * `public.delete_own_account()` is SECURITY DEFINER — it has to be, because
+ * `authenticated` holds no DELETE privilege on `auth.users` and no policy on our own
+ * tables can express deleting the identity that owns them — and it pins `search_path = ''`
+ * with every name qualified. This assertion is what makes that a checked fact rather than
+ * a habit. `private` is swept as well as `public`: it is the schema the migration directs
+ * definer HELPERS towards (the RPC itself must live in `public` to be reachable through
+ * PostgREST at all), so leaving it out would aim people at the one place nothing was
+ * checking.
  */
 describe('security definer functions pin their search_path', () => {
   it('has no SECURITY DEFINER function without a set search_path', async () => {

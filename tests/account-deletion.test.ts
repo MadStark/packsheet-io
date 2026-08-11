@@ -35,7 +35,7 @@ beforeAll(async () => {
 });
 
 describe('a signed-in user deletes their own account', () => {
-  it('removes the auth.users row and cascades every pack, category, item and gear row', async () => {
+  it('removes the auth.users row and every pack, category, item and gear row it owned', async () => {
     const { error } = await alice.client.rpc('delete_own_account');
     expect(error).toBeNull();
 
@@ -44,9 +44,19 @@ describe('a signed-in user deletes their own account', () => {
     const users = await adminSql('select id from auth.users where id = $1', [alice.id]);
     expect(users).toEqual([]);
 
-    // Rule 3's cascade, proved against a REAL fixture rather than an empty one: two
-    // gear items, one pack, one category, two pack items, all inserted as Alice through
-    // PostgREST's own insert policies before the deletion ran.
+    // Everything Alice owned, proved against a REAL fixture rather than an empty one:
+    // two gear items, one pack, one category, two pack items, all inserted as Alice
+    // through PostgREST's own insert policies before the deletion ran.
+    //
+    // Deleted BY NAME rather than by cascade, which is worth saying because the schema
+    // does carry `on delete cascade` back to auth.users and it would be reasonable to
+    // assume that is what ran. It is not: the function issues five statements leaf to
+    // root, because letting Postgres interleave the gear_items and packs cascades from
+    // one statement hits a referential-integrity race — see the comment above
+    // `public.delete_own_account()` in the migration for the reproduction. What this
+    // block asserts is the outcome, which is the same either way; what it would NOT
+    // catch is somebody "simplifying" the function back to a single delete, since that
+    // fails loudly on any account that owns a pack with an item in it.
     const packs = await adminSql('select id from packs where id = $1', [alicePack.packId]);
     const categories = await adminSql('select id from pack_categories where id = $1', [
       alicePack.categoryId,

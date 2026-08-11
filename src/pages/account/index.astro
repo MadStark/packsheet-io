@@ -7,6 +7,12 @@ export const prerender = false;
 import Layout from '../../layouts/Layout.astro';
 import { deleteOwnAccount, signOut } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import {
+  confirmsAccountDeletion,
+  CONFIRMATION_MISMATCH_MESSAGE,
+  DELETE_ACCOUNT_CONFIRMATION_FIELD,
+  DELETE_ACCOUNT_INTENT,
+} from '../../lib/account-deletion';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -41,17 +47,30 @@ let deleteError: string | null = null;
 // delete the account without also guessing the visitor's own email address.
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
-  if (form.get('intent') === 'delete-account') {
-    const typed = String(form.get('confirmation') ?? '');
-    if (typed !== user.email) {
-      deleteError = 'That did not match your email address. Type it exactly to confirm.';
+  if (form.get('intent') === DELETE_ACCOUNT_INTENT) {
+    // The gate itself lives in src/lib/account-deletion.ts, and it is there rather than
+    // inline for one reason: frontmatter is code no test in this repository can reach
+    // (vitest excludes src/pages/, because every file there becomes a route), so written
+    // here it was the only piece of authorization logic in the codebase with no test at
+    // all. See that file for what the comparison does and does not tolerate, and why.
+    const typed = form.get(DELETE_ACCOUNT_CONFIRMATION_FIELD);
+    if (!confirmsAccountDeletion(typeof typed === 'string' ? typed : null, user.email)) {
+      deleteError = CONFIRMATION_MISMATCH_MESSAGE;
     } else {
       const result = await deleteOwnAccount({ cookies: Astro.cookies, request: Astro.request });
       if (result.ok) {
-        // The account row (and, via RLS-scoped cascades in the migration, everything
-        // it owned) is already gone server-side. The session cookies themselves are
-        // still sitting in this browser until something clears them, so sign out
-        // explicitly rather than leaving a cookie that points at nobody.
+        // The account row and everything it owned are already gone server-side —
+        // deleted by name, five WHERE clauses all scoped to `auth.uid()`, in
+        // `public.delete_own_account()`. NOT by RLS: that function is SECURITY DEFINER,
+        // so it runs as its owner and row-level security does not apply to a single
+        // statement in it. What confines it is that it takes no arguments and can name
+        // no user but the caller. (Nor is it the foreign-key cascade from auth.users,
+        // which the migration deletes by hand around for a referential-integrity race —
+        // see the comment above the function.)
+        //
+        // The session cookies themselves are still sitting in this browser until
+        // something clears them, so sign out explicitly rather than leaving a cookie
+        // that points at nobody.
         await signOut({ cookies: Astro.cookies, request: Astro.request });
         return Astro.redirect('/', 303);
       }
@@ -110,10 +129,10 @@ if (Astro.request.method === 'POST') {
               </p>
             )}
             <form method="POST" class="mt-4 space-y-3">
-              <input type="hidden" name="intent" value="delete-account" />
+              <input type="hidden" name="intent" value={DELETE_ACCOUNT_INTENT} />
               <input
                 type="text"
-                name="confirmation"
+                name={DELETE_ACCOUNT_CONFIRMATION_FIELD}
                 autocomplete="off"
                 required
                 aria-label="Type your email address to confirm"

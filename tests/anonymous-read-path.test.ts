@@ -44,19 +44,21 @@ import type { build as AstroBuild } from 'astro';
  *
  * So this file enforces four invariants at build time, by building the real site and
  * inspecting the actual Rollup module graph Astro produces — not by convention, which
- * relies on every future PR author having read this comment.
+ * relies on every future PR author having read this comment. A fifth check, of a
+ * different kind entirely, scans the bytes the build wrote to disk; see the "what none of
+ * these can see" paragraph below for why a graph rule cannot do its job.
  *
  * "Not by grep" applies to some of them and not to others, and the difference is worth
  * stating because the phrase reads as if it covered all four. Invariants A and B are graph
  * rules: they follow edges, which is what grep cannot do through a re-export or an aliased
- * import. Invariant D is not about edges at all but about PASS MEMBERSHIP — which of
- * Astro's Rollup passes a module was transformed for, i.e. whether it is server code or
- * code a browser downloads — which no amount of reading source text can answer, because
- * the same file is server-only or browser-bound depending on how a page renders it.
- * Invariant C IS a text scan, the same kind of thing grep does. What the graph gives it is
- * not sight through indirection but SCOPE: it decides which text is scanned, namely every
- * module that actually ships, dependencies included, rather than whatever happens to be
- * lying in the working tree.
+ * import. Invariant D is about both — PASS MEMBERSHIP, which of Astro's Rollup passes a
+ * module was transformed for, i.e. whether it is server code or code a browser downloads,
+ * which no amount of reading source text can answer because the same file is server-only
+ * or browser-bound depending on how a page renders it; and, for its second half, the edges
+ * out of the modules in that pass. Invariant C IS a text scan, the same kind of thing grep
+ * does. What the graph gives it is not sight through indirection but SCOPE: it decides
+ * which text is scanned, namely every module that actually ships, dependencies included,
+ * rather than whatever happens to be lying in the working tree.
  *
  * Invariant A: no module outside src/lib/auth/ may import anything under src/lib/auth/,
  * EXCEPT the modules enumerated in AUTH_CONSUMERS below. Not "no anonymous route may
@@ -83,37 +85,51 @@ import type { build as AstroBuild } from 'astro';
  * key BELONGS on the anonymous read path — it is how anonymous reads happen at all — so
  * the package cannot be what is banned. The rule is about the KEY. It is scoped to the
  * whole graph for the same reason Invariant B is, and that scoping is affordable because
- * it was measured rather than hoped: no pattern in that set matches anything in the 2,070
- * modules of the real build's graph, and neither @supabase/supabase-js@2.112.2 nor
- * @supabase/ssr@0.12.4 contains the string SERVICE_ROLE anywhere, so this does not go red
- * on contact when those land (Ref 49). See checkServiceRoleKey.
+ * it was measured rather than hoped: with one documented exemption, no pattern in that set
+ * matches anything in the 2,145 modules of the real build's graph, and neither
+ * @supabase/supabase-js@2.112.2 nor @supabase/ssr@0.12.4 contains the string SERVICE_ROLE
+ * anywhere, so landing them (Ref 49) did not turn this red. See checkServiceRoleKey.
  *
- * That measurement is narrower than it reads, and the difference is a live tripwire rather
- * than a quibble — so it is recorded here rather than left for somebody to rediscover from
- * a red build. It was taken over SERVICE_ROLE and over the graph AS IT IS TODAY, in which
- * nothing imports the choke point, so @supabase/ssr's own dependencies are not in the
- * graph at all. Measured while writing PK-19, by allowlisting one server-only page and
- * having it import src/lib/auth/: the graph then acquires @supabase/auth-js, and
- * `node_modules/@supabase/auth-js/dist/module/GoTrueAdminApi.js:24` names
- * SUPABASE_SECRET_KEY — in a JSDoc example, which this check cannot tell from an
- * assignment and by design does not try to. Invariant C goes red there, on somebody else's
- * comment, the day the first genuine consumer lands. Nothing has been changed here to
- * pre-empt that, deliberately: the remedy is a named entry in
- * PACKAGES_EXEMPT_FROM_KEY_SCAN and it belongs to whoever lands that route, as a decision
- * made with the failure in front of them rather than one taken in advance for a build
- * nobody has run. See that constant, which carries the same note.
+ * THE ONE EXEMPTION, which this comment used to predict and now records. The measurement
+ * above was originally taken over a graph in which NOTHING imported the choke point, so
+ * @supabase/ssr's own dependencies were not in it at all — and the note here said that the
+ * day a genuine consumer landed, @supabase/auth-js would enter the graph and
+ * `node_modules/@supabase/auth-js/dist/module/GoTrueAdminApi.js:24` would trip the scan by
+ * naming SUPABASE_SECRET_KEY in a JSDoc example, which this check cannot tell from an
+ * assignment and by design does not try to. That is exactly what happened: PK-19 landed
+ * six consumers, the package arrived, and the remedy the note promised — a named entry in
+ * PACKAGES_EXEMPT_FROM_KEY_SCAN, taken with the failure in front of somebody rather than
+ * in advance — was applied. See that constant for the confirmation that the hit is still
+ * only that comment.
  *
- * Invariant D: NO module under src/lib/auth/, and no module named in AUTH_CONSUMERS, may
- * appear in the CLIENT Rollup pass — the pass whose output a browser downloads. This is
- * the invariant that makes the allowlist in Invariant A sound rather than a hole. An
- * allowlist is only ever as good as the judgement of whoever last added a line to it, and
- * this is the part that judgement cannot get wrong: whatever is on the list, the auth SDK
- * cannot reach a visitor, because a module that reaches a visitor is in the client pass
- * and this fails. It is also why the `client:only` attribution problem described on
- * checkAnonymousReadPath did not have to be solved before the allowlist could exist. An
- * island importing auth is not on the allowlist, so Invariant A's unchanged edge rule
- * still catches it — and if somebody put one ON the allowlist, this invariant catches it a
- * second time, from the other side. See checkAuthStaysOffTheClient.
+ * Invariant D, in two halves. Both are about the CLIENT Rollup pass — the pass whose
+ * output a browser downloads — and they exist for the same reason: auth code that runs in
+ * a browser is not an authorization boundary, because the visitor owns that runtime.
+ *
+ *   D1: NO module under src/lib/auth/, and no module named in AUTH_CONSUMERS, may appear
+ *   in the client pass. This is the invariant that makes the allowlist in Invariant A
+ *   sound rather than a hole. An allowlist is only ever as good as the judgement of
+ *   whoever last added a line to it, and this is the part that judgement cannot get wrong:
+ *   whatever is on the list, the auth SDK cannot reach a visitor, because a module that
+ *   reaches a visitor is in the client pass and this fails. It is also why the
+ *   `client:only` attribution problem described on checkAnonymousReadPath did not have to
+ *   be solved before the allowlist could exist. An island importing auth is not on the
+ *   allowlist, so Invariant A's unchanged edge rule still catches it — and if somebody put
+ *   one ON the allowlist, this invariant catches it a second time, from the other side.
+ *   See checkAuthStaysOffTheClient.
+ *
+ *   D2: NO module in the client pass may BE, or import, any `@supabase/*` package. D1 is
+ *   anchored on two named sets, which was sufficient while the only route to an auth SDK
+ *   ran through src/lib/auth/. PK-19 made @supabase/ssr and @supabase/supabase-js ordinary
+ *   runtime dependencies, so any component can now `import { createBrowserClient } from
+ *   '@supabase/ssr'` and hydrate itself, touching neither set — demonstrated against this
+ *   repository, with all 62 tests of the day passing while the whole GoTrue stack shipped
+ *   to every anonymous reader of `/`. Note what D2 is NOT: it is not Invariant B with the
+ *   package name swapped. Banning `@supabase/*` outside the choke point would contradict
+ *   Invariant C's own message and break the share page before it is written; D2 is about
+ *   the RUNTIME, and nothing needs Supabase in a browser today. When something genuinely
+ *   does, that is a deliberate revisit — and the failure message says so. See
+ *   checkSupabaseStaysOffTheClient.
  *
  * A module graph tells you what SHIPS; it cannot tell you what a module says. So
  * Invariant C needs source text, correlated with graph membership: the graph recorder
@@ -130,10 +146,14 @@ import type { build as AstroBuild } from 'astro';
  *     fragment that is itself one of the banned spellings still matches, and one that is
  *     not, does not.
  *   - The rule is NAME-BOUND. It knows the spellings in PRIVILEGED_KEY_PATTERNS and no
- *     others, and there is no Supabase secret in .env.example or wrangler.jsonc yet for it
- *     to have been checked against. Whoever adds one must confirm its name matches a
- *     pattern there, or add a pattern — otherwise this check stays green forever while the
- *     key ships, which is the one failure mode a guardrail must not have.
+ *     others. .env.example and both deploy workflows now carry Supabase entries, but every
+ *     one of them is a PUBLIC_ value — the project URL and the publishable anon key — and
+ *     this project holds no privileged Supabase secret at all, in any environment (see
+ *     `deleteOwnAccount` in src/lib/auth/index.ts for the SECURITY DEFINER pattern that
+ *     removes the reason to want one). So there is still nothing for this rule to have been
+ *     checked against. Whoever introduces the first such secret must confirm its name
+ *     matches a pattern there, or add a pattern — otherwise this check stays green forever
+ *     while the key ships, which is the one failure mode a guardrail must not have.
  *   - A module with no file on disk that the transform hook never saw is a module this
  *     check has no text for at all. Anything backed by a file is scanned from the file
  *     regardless, so that gap is narrow, but it is not empty — and it is not left to
@@ -154,32 +174,35 @@ import type { build as AstroBuild } from 'astro';
  * What none of the four invariants can see, stated plainly because the rest of this file
  * invites the assumption that it is airtight: a module graph contains only what the
  * bundler resolved. `<script is:inline src="https://js.clerk.com/...">` in a .astro file,
- * or a vendored SDK dropped into public/, produce ZERO graph edges — and Clerk ships a
- * browser bundle meant to be used exactly that way. That is a real boundary of any
- * build-graph check, not a defect in this one. It is covered here by a separate,
- * independent assertion that scans the HTML the build actually emitted for known auth
- * CDN hosts (checkEmittedHtmlForAuthCdn), and the fixture's cdn-script.astro pins both
- * halves of the boundary: invisible to the graph, caught by the HTML scan. Still
- * uncovered, deliberately: an SDK vendored into public/ and loaded by a same-origin
- * script tag, and any URL assembled at runtime. Closing those needs a different tool —
- * a script-src/connect-src CSP enforced at the edge — not a longer regex here.
+ * the same tag pointing at `https://esm.sh/@supabase/ssr`, or a vendored SDK dropped into
+ * public/, produce ZERO graph edges — and both providers ship browser bundles meant to be
+ * used exactly that way. That is a real boundary of any build-graph check, not a defect in
+ * this one. It is covered here by a separate, independent assertion that scans the HTML
+ * the build actually emitted (checkEmittedHtmlForAuthCdn), and three fixture pages pin
+ * both halves of the boundary — invisible to the graph, caught by the HTML scan — one per
+ * shape: a Clerk CDN host, an `@supabase/*` package served over HTTP, and a copy vendored
+ * into public/ and loaded same-origin. Still uncovered, deliberately: a vendored copy
+ * renamed to something that does not say what it is, and any URL assembled at runtime.
+ * Closing those needs a different tool — a script-src/connect-src CSP enforced at the edge
+ * — not a longer regex here.
  *
- * A build-graph-based check that never finds anything is indistinguishable from a
- * broken one — this repo already has a documented case of that failure mode (see
- * the header comment on deploy-origin-lock.test.ts). Today nothing in the real site
- * imports auth, so Invariant A's real-repo assertion passes trivially and proves
- * nothing about the checker on its own; the same goes for Invariant D, whose allowlist
- * is empty and whose choke point is not in the real build at all. Two things answer
- * that. The self-test lower down in this file runs the exact same functions against a
- * fixture project that DOES violate the invariants, in ten ways for Invariant A (two of
- * which are allowlisted there, leaving eight reported), in four ways for Invariant D, and
- * in one way per spelling Invariant C recognises plus one per source its text can come
- * from, and asserts each is caught with the right chain, the right lines and the right
- * message.
- * And the real-site block opens with a tripwire asserting its graph is genuinely
- * populated and its transform hook genuinely fired, because every other assertion there
- * is "this derived list is empty" — which an empty graph, and a transform hook that
- * silently stopped running, satisfy just as well as a clean site does.
+ * A build-graph-based check that never finds anything is indistinguishable from a broken
+ * one — this repo already has a documented case of that failure mode (see the header
+ * comment on deploy-origin-lock.test.ts). That was the state this file shipped in and is
+ * no longer: PK-19 put six real modules on AUTH_CONSUMERS and pulled the choke point,
+ * @supabase/ssr and @supabase/supabase-js into the real build, so Invariants A, C and D
+ * are all now making assertions about a graph that genuinely contains what they are about.
+ * What has not changed is that a passing assertion is still "some derived list is empty",
+ * so two things back it up. The self-test lower down in this file runs the exact same
+ * functions against a fixture project that DOES violate the invariants: in ten ways for
+ * Invariant A (two of which are allowlisted there, leaving eight reported), in four ways
+ * for Invariant D's first half and one for its second, in one way per spelling Invariant C
+ * recognises plus one per source its text can come from, and in three ways for the
+ * emitted-HTML scan — each asserted to be caught with the right chain, the right lines and
+ * the right message. And the real-site block opens with a tripwire asserting its graph is
+ * genuinely populated and its transform hook genuinely fired, because an empty graph, and
+ * a transform hook that silently stopped running, satisfy "this list is empty" just as
+ * well as a clean site does.
  *
  * Mechanism notes, from spiking this before writing it:
  *
@@ -194,10 +217,10 @@ import type { build as AstroBuild } from 'astro';
  *   for instance, is the only one that resolves a Vue island's own client-side
  *   dependencies. The passes are unioned into one graph below; checking only the
  *   first pass would miss anything reachable only from client-hydrated code. The
- *   fixture has a Vue integration and three islands specifically so this union is
+ *   fixture has a Vue integration and four islands specifically so this union is
  *   exercised rather than merely asserted here in prose: against the fixture the three
  *   passes contain an empty one, a server pass of a couple of hundred modules, and a
- *   client pass of a dozen or so, and the `client:only` island's own import of auth is
+ *   client pass of several dozen, and the `client:only` island's own import of auth is
  *   visible ONLY in that third, small pass. Exact counts are deliberately not written
  *   down — they move every time the fixture gains a case — but the property that matters
  *   is pinned by a test rather than by this sentence: the client:only case below fails
@@ -207,13 +230,16 @@ import type { build as AstroBuild } from 'astro';
  *   hook instead of from `buildEnd`: Vite passes an options argument to `transform(code,
  *   id, options)` whose `ssr` boolean says which environment the module is being
  *   transformed for, and `clientIds` below records every id transformed with it falsy.
- *   Measured rather than assumed, against both projects at the time of writing: the
- *   options object is always present, always `{ moduleType, ssr }`, and the split is
- *   total — pass 1 transforms nothing, pass 2 is 226 modules all `ssr: true`, pass 3 is
- *   15 modules all `ssr: false` in the fixture (2,069 / 1,726 in the real site), with no
- *   module ever arriving `ssr: false` in a server pass. First-party ids in the fixture's
- *   client pass are its three islands and the three choke-point modules they drag in;
- *   pages, middleware and .astro components never appear there. The polarity of the test
+ *   Measured rather than assumed, against both projects: the options object is always
+ *   present, always `{ moduleType, ssr }`, and the split is total — pass 1 transforms
+ *   nothing, and no module ever arrives `ssr: false` in a server pass. Orders of magnitude
+ *   rather than exact counts, because both move whenever the fixture gains a case or a
+ *   dependency lands: the fixture's server pass is a couple of hundred modules and its
+ *   client pass several dozen; the real site's are around two thousand and around
+ *   seventeen hundred (they overlap — a module transformed for both passes is counted in
+ *   each). First-party ids in the fixture's client pass are its four islands, the three
+ *   choke-point modules three of them drag in, and one page `<script>`; pages, middleware
+ *   and .astro components never appear there in their own right. The polarity of the test
  *   below is deliberate: anything NOT positively marked `ssr: true` counts as client. If
  *   a future Vite stops passing the argument, every module lands in `clientIds` and the
  *   real-site tripwire goes red on the spot, which is the direction a guardrail should
@@ -354,13 +380,55 @@ interface BuildGraph {
   clientIds: Set<string>;
 }
 
-/** Module ids sometimes carry a query suffix (e.g. a font imported as `...woff2?
- *  url`) that is part of how Vite tags the import, not part of the module's
- *  identity for graph-walking purposes. Stripped so the same file is recognised as
- *  the same node regardless of which query string a given import used. */
+/**
+ * An Astro compiler SUBMODULE: the id of a `<script>` or `<style>` block lifted out of a
+ * `.astro` file and compiled as a module in its own right. Astro spells them as a query
+ * on the page's own path —
+ *
+ *     /abs/src/pages/sign-in.astro?astro&type=script&index=0&lang.ts
+ *
+ * — and they are the one query suffix that is part of a module's IDENTITY rather than of
+ * how somebody imported it. See `stripQuery`.
+ */
+const ASTRO_SUBMODULE_QUERY = /(?:^|[?&])astro&type=(?<type>[a-z]+)&index=(?<index>\d+)/;
+
+/**
+ * Module ids sometimes carry a query suffix (e.g. a font imported as `...woff2?url`)
+ * that is part of how Vite tags the import, not part of the module's identity for
+ * graph-walking purposes. Stripped so the same file is recognised as the same node
+ * regardless of which query string a given import used.
+ *
+ * WITH ONE EXCEPTION, AND IT IS A REAL DEFECT THIS USED TO HAVE rather than a nicety.
+ * A `<script>` in a `.astro` page is compiled as its OWN module, whose id is the page's
+ * path plus `?astro&type=script&index=0&lang.ts` — and it is browser code by
+ * definition, so the client pass transforms it. Stripping the whole query collapsed that
+ * module onto the PAGE, which put the page's own path into `clientIds`. Consequences,
+ * both measured by adding `<script>console.log('hi')</script>` to src/pages/sign-in.astro:
+ *
+ *   - Invariant D reported `src/pages/sign-in.astro` — an AUTH_CONSUMERS entry — as
+ *     having reached the browser, i.e. the suite went red claiming the auth SDK ships to
+ *     every visitor, over a console.log. A guardrail that fails on a benign edit is one
+ *     somebody deletes rather than obeys.
+ *   - The mirror image, which is the worse half and nobody would have noticed: a
+ *     `<script>` in an ALLOWLISTED page that genuinely imported the choke point would
+ *     have been collapsed onto the page's id too, and the page is on the allowlist, so
+ *     Invariant A would have exempted browser code on the strength of an entry granted to
+ *     a server module.
+ *
+ * So the submodule keeps a distinct id. It is normalised rather than passed through
+ * untouched — `&lang.ts` and any other trailing tag are dropped — so the same script
+ * block is one node however Vite tagged a given import of it, which is the same property
+ * the plain strip provides for everything else.
+ */
 function stripQuery(id: string): string {
   const i = id.indexOf('?');
-  return i === -1 ? id : id.slice(0, i);
+  if (i === -1) return id;
+  const submodule = ASTRO_SUBMODULE_QUERY.exec(id.slice(i));
+  if (submodule) {
+    const { type, index } = submodule.groups!;
+    return `${id.slice(0, i)}?astro&type=${type}&index=${index}`;
+  }
+  return id.slice(0, i);
 }
 
 /** The choke point as a path prefix, which is what all three invariants are anchored on.
@@ -393,14 +461,19 @@ function chokePointDir(root: string): string {
  * rule intact and makes each exception a line somebody wrote on purpose and a reviewer
  * saw, rather than a category that quietly grows to fit whatever was added last.
  *
- * WHAT AN ENTRY HAS TO BE TRUE OF, both of which are checked rather than trusted:
+ * WHAT AN ENTRY HAS TO BE TRUE OF, all three of which are checked rather than trusted:
  *
  *   1. It must exist. A stale entry — a route that was renamed or deleted with its line
  *      left behind — is how an allowlist rots into permanent green: the name sits there
  *      waiting for some unrelated future file to be given that path and inherit an
  *      exemption nobody granted it. The real-site block fails if any entry here has no
  *      file on disk, and the fixture block does the same for its own list.
- *   2. It must be SERVER-ONLY. A page, an API route, middleware — never a component that
+ *   2. It must still IMPORT the choke point. The other half of the same rot, and the one
+ *      "the file exists" cannot see: a module that stopped importing auth two refactors
+ *      ago keeps a standing permission with no live reason, and nothing goes red, because
+ *      an exemption for an edge that does not exist exempts nothing. See
+ *      unusedAuthConsumers.
+ *   3. It must be SERVER-ONLY. A page, an API route, middleware — never a component that
  *      hydrates. That is not a convention either: Invariant D fails the build if anything
  *      on this list turns up in the client Rollup pass, which is what makes the list safe
  *      to have at all rather than a hole in the middle of the guardrail.
@@ -408,12 +481,12 @@ function chokePointDir(root: string): string {
  * Each entry carries a comment saying what that module does with auth. "Needs auth" is not
  * one; the next reader has to be able to tell whether the reason is still true.
  *
- * Empty today, deliberately and not by oversight: the routes that will need auth are a
- * later task's, and this landed first so that they arrive into a check that already knows
- * how to say yes. Adding one is a single line here plus its comment. Removing the import
- * is always the better fix where it is available — everything auth-adjacent that an
- * anonymous route can legitimately want (paths, constants, types) belongs in
- * src/lib/auth-routes.ts or beside its consumer, not in the choke point.
+ * The list was empty until PK-19, and the six entries below are the routes that ticket
+ * landed. Adding one is a single line here plus its comment. Removing the import is always
+ * the better fix where it is available — everything auth-adjacent that an anonymous route
+ * can legitimately want (paths, constants, types) belongs in src/lib/auth-routes.ts or
+ * beside its consumer, not in the choke point. If this list ever grows past a handful,
+ * that is evidence about the shape of the codebase rather than about this rule.
  */
 const AUTH_CONSUMERS: readonly string[] = [
   // Resolves the signed-in user once per request into Astro.locals.user and enforces
@@ -463,14 +536,50 @@ function staleAuthConsumers(root: string, consumers: readonly string[]): string[
 }
 
 /**
+ * Allowlist entries whose file exists and which no longer import the choke point at all.
+ *
+ * `staleAuthConsumers` above answers a weaker question than the list's own docstring
+ * promises. "It must exist" catches the renamed-away entry; it says nothing about the
+ * entry whose file is still sitting there having stopped importing auth two refactors
+ * ago. That is the same rot with a different surface: a live exemption, granted for a
+ * reason that has expired, waiting for somebody to add a `getUser()` call to a file that
+ * was on the list for reasons nobody remembers. Nothing goes red when it happens, because
+ * an exemption for an edge that does not exist exempts nothing — which is precisely why
+ * it has to be asserted rather than noticed.
+ *
+ * Measured against the BUILD, not the source text, for the reason the whole file is:
+ * `grep` cannot follow a re-export or an aliased import, and an entry that reaches the
+ * choke point through one is still a genuine consumer.
+ *
+ * The remedy when this fails is to DELETE the line, not to widen the check. Every entry
+ * is a standing permission for that module to import anything in `src/lib/auth/`, and one
+ * kept alive past its reason is exactly the line somebody writes a real auth call under.
+ */
+function unusedAuthConsumers(
+  build: BuildGraph,
+  root: string,
+  consumers: readonly string[],
+): string[] {
+  const authDir = chokePointDir(root);
+  return consumers.filter((entry) => {
+    const id = join(root, ...entry.split('/'));
+    const targets = build.graph.get(id);
+    if (!targets) return true;
+    return ![...targets].some((target) => target.startsWith(authDir));
+  });
+}
+
+/**
  * EVERY spelling Invariant C bans, in one place so extending the rule is a one-line edit
  * rather than an archaeology exercise. This is the definition of "a privileged key" for
  * the whole file; nothing else hardcodes a name.
  *
  * The rule is NAME-BOUND, and that is its sharpest limitation rather than a detail. This
- * check knows the strings below and nothing else. At the time of writing the project has
- * not yet chosen which name the secret ships under: `.env.example` has no Supabase entry
- * and wrangler.jsonc declares no such secret, so nothing here has ever been confirmed
+ * check knows the strings below and nothing else. The project still holds no privileged
+ * Supabase secret in any environment: `.env.example` and both deploy workflows carry only
+ * the PUBLIC_ pair (the project URL and the publishable anon key), wrangler.jsonc declares
+ * no such secret, and `deleteOwnAccount` in src/lib/auth/index.ts is the SECURITY DEFINER
+ * pattern that removes the reason to introduce one. So nothing here has ever been confirmed
  * against the real thing. WHOEVER ADDS THAT SECRET — to .env.example, to wrangler, to a
  * CI secret, anywhere — MUST CHECK ITS NAME AGAINST THIS LIST AND ADD IT IF IT IS NOT
  * HERE. A name-bound rule that does not know the name in use is not a weaker guardrail,
@@ -495,9 +604,9 @@ function staleAuthConsumers(root: string, consumers: readonly string[]): string[
  *
  * Every pattern is word-bounded so `MY_SERVICE_ROLE_KEY_NAME` is not a match while
  * `env.SERVICE_ROLE_KEY` and `{ SUPABASE_SERVICE_ROLE_KEY }` are. All of them were run
- * against the whole of both build graphs before being adopted — the real site's 2,070
+ * against the whole of both build graphs before being adopted — the real site's 2,145
  * modules and the fixture's — and none matches anything outside the fixture cases written
- * for it. The looser spellings that were considered and rejected are worth recording so
+ * for it and the one dependency comment PACKAGES_EXEMPT_FROM_KEY_SCAN names. The looser spellings that were considered and rejected are worth recording so
  * nobody re-litigates them by accident: a bare `SERVICE_ROLE` or `SECRET_KEY` also matches
  * nothing today, but both are short enough and generic enough to start matching a
  * dependency's own unrelated constant later, and a guardrail that goes red on somebody
@@ -535,20 +644,20 @@ const PRIVILEGED_KEY_PATTERNS: readonly PrivilegedKeyPattern[] = [
  *  plumbing, say — put its package name here with a comment saying why, rather than
  *  narrowing the rule to first-party code. Matched against the `node_modules/<name>/`
  *  segment of a resolved id, so it exempts a package and not a path that merely contains
- *  its name. Empty today, and it should stay a list of named exceptions rather than
+ *  its name. One entry today, and it should stay a list of named exceptions rather than
  *  becoming a category.
  *
- *  THE FIRST ENTRY IS ALREADY KNOWN, and is left off deliberately rather than forgotten.
- *  @supabase/auth-js — a transitive dependency of @supabase/ssr, so it enters the graph the
- *  moment anything imports the choke point — names SUPABASE_SECRET_KEY in a JSDoc example
- *  at dist/module/GoTrueAdminApi.js:24, and this rule cannot tell a comment from an
- *  assignment. Measured during PK-19 by allowlisting one server-only page and having it
- *  import src/lib/auth/: Invariants A, B and D stay green and Invariant C reports that one
- *  file. It is not exempted here yet because nothing in the build reaches it yet, and an
- *  exemption written ahead of the failure is one nobody has checked the shape of — the
- *  package might by then name the key somewhere that matters. Whoever lands the first
- *  allowlisted route will see it go red on their first run: add `'@supabase/auth-js'`
- *  below with a reason, having first confirmed the hit is still only that comment. */
+ *  THAT ENTRY WAS PREDICTED HERE BEFORE IT EXISTED, and the prediction is worth keeping
+ *  because it is the argument for how the next one should be added. This comment used to
+ *  say the list was empty and name @supabase/auth-js as the first entry it would acquire —
+ *  a transitive dependency of @supabase/ssr, so it enters the graph the moment anything
+ *  imports the choke point, and it names SUPABASE_SECRET_KEY in a JSDoc example at
+ *  dist/module/GoTrueAdminApi.js:24, which this rule cannot tell from an assignment. It
+ *  deliberately did NOT exempt it in advance, on the grounds that an exemption written
+ *  ahead of the failure is one nobody has checked the shape of. PK-19 landed the first
+ *  allowlisted routes, the build went red exactly there, the hit was confirmed to be only
+ *  that comment, and the entry below was added with the failure in front of somebody. Do
+ *  the same for the next one. */
 const PACKAGES_EXEMPT_FROM_KEY_SCAN: readonly string[] = [
   // @supabase/auth-js — a transitive dependency of @supabase/ssr, pulled into the
   // graph the moment anything imports the choke point, which PK-19's AUTH_CONSUMERS
@@ -1236,6 +1345,205 @@ function checkAuthStaysOffTheClient(
   return violations.sort((a, b) => a.module.localeCompare(b.module));
 }
 
+// ---------------------------------------------------------------------------
+// Invariant D, second half: no Supabase package in the browser at all
+// ---------------------------------------------------------------------------
+
+/** A Supabase module in either shape a graph produces, exactly as `isClerkModule`
+ *  recognises Clerk's: the bare specifier a pass left external, or a resolved
+ *  node_modules path. Scoped to the `@supabase/` namespace, so it matches the SDK
+ *  packages and not a first-party file that merely has "supabase" in its name. */
+function isSupabaseModule(id: string): boolean {
+  return /^\0?@supabase\//.test(id) || /(^|\/)node_modules\/@supabase\//.test(id);
+}
+
+/**
+ * The PACKAGE a Supabase module belongs to — `@supabase/ssr` for both
+ * `@supabase/ssr` (the bare specifier a pass left external) and
+ * `…/node_modules/@supabase/ssr/dist/module/index.js` (the resolved path another pass
+ * produced).
+ *
+ * Reporting by package rather than by id is not cosmetic. The graph is a union of three
+ * passes and the same dependency appears in it under both shapes at once, so one import
+ * in one component yields two edges — which, reported per edge, is the same defect
+ * printed twice with two different-looking targets. It is also the more useful unit: what
+ * a reader has to go and delete is an import of a package, and which of the two spellings
+ * the bundler happened to record is not information they can act on.
+ */
+function supabasePackageName(id: string): string {
+  const marker = id.lastIndexOf('node_modules/');
+  const bare = marker === -1 ? stripVirtualMarker(id) : id.slice(marker + 'node_modules/'.length);
+  return bare.split('/').slice(0, 2).join('/');
+}
+
+type SupabaseClientReason = 'imports-supabase' | 'supabase-package';
+
+interface SupabaseClientViolation {
+  /** The client-pass module that is, or imports, a Supabase package. */
+  module: string;
+  /** The `@supabase/*` package it reached, for the 'imports-supabase' case. */
+  pkg: string | null;
+  reason: SupabaseClientReason;
+  message: string;
+}
+
+/** Why this is a rule at all, given that the whole of Invariant C exists to say the
+ *  opposite about the same packages. The distinction is WHERE, not WHAT, and stating it
+ *  in the failure is the only thing standing between this check and being read as "we
+ *  have banned Supabase" by somebody about to delete it. */
+const SUPABASE_ON_THE_CLIENT_ARGUMENT =
+  'WHAT SHIPPED: `@supabase/*` — the GoTrue auth stack, the PostgREST client, the realtime ' +
+  'and storage clients behind them — as JavaScript a browser downloads, parses and ' +
+  'executes. TO WHOM: every visitor of every page that hydrates the module named above, ' +
+  'signed in or not, which on this site means overwhelmingly not: the stranger opening a ' +
+  'shared pack list from a Reddit link. WHY THAT IS A FAILURE and not a bundle-size ' +
+  'complaint: authentication here is a server-side fact. The session cookie is httpOnly ' +
+  'precisely so that page JavaScript cannot read it, so a Supabase auth client running in ' +
+  'a browser cannot do the job it looks like it is doing — and code that decides who you ' +
+  'are while running inside your own browser is not an authorization boundary, it is a ' +
+  'suggestion, because the visitor owns that runtime and can edit it.';
+
+/** The half a reader will get wrong if only the ban is stated, and getting it wrong here
+ *  breaks the site rather than merely annoying somebody: Invariant C's own message says
+ *  in as many words that `@supabase/supabase-js` with the publishable `anon` key BELONGS
+ *  on the anonymous read path. Both are true, because they are about different runtimes. */
+const SUPABASE_BELONGS_ON_THE_SERVER =
+  'This is a rule about the BROWSER, not about Supabase. `@supabase/supabase-js` with the ' +
+  'publishable `anon` key belongs on the anonymous read path — it is how anonymous reads ' +
+  'happen at all, and Invariant C says so explicitly — but it belongs there on the SERVER, ' +
+  'where the response is rendered once and can be cached for every reader. Do the query in ' +
+  'the page, in an API route or in middleware, and pass the result into the island as an ' +
+  'ordinary prop. That is not a workaround; it is the same data over a smaller surface, ' +
+  'with no SDK downloaded by anybody.';
+
+/** The deliberate-revisit clause. Nothing in this codebase needs a browser-side Supabase
+ *  client today, which is exactly why the rule is enforceable NOW — and a rule with no
+ *  stated way to change is one that gets changed without the conversation. */
+const WHEN_THE_BROWSER_GENUINELY_NEEDS_SUPABASE =
+  'IF A TICKET GENUINELY NEEDS A BROWSER-SIDE SUPABASE CLIENT — a realtime subscription, an ' +
+  'upload straight to Storage, an optimistic write — this rule is wrong for that ticket and ' +
+  'has to be changed rather than worked around. That is a deliberate revisit, not a red ' +
+  'build to get past: decide which pages may carry it and what the `anon` key is confined ' +
+  'to by RLS on those tables, then narrow this check to the modules that stay out rather ' +
+  'than deleting it. It is enforceable as a blanket rule today only because the answer is ' +
+  'currently "none", and it is worth having today because the thing it stops arriving by ' +
+  'accident — a `createBrowserClient` in a component somebody hydrated — looks identical in ' +
+  'review to the server-side call two files away that is correct.';
+
+function supabaseClientViolationMessage(
+  root: string,
+  module: string,
+  pkg: string | null,
+  reason: SupabaseClientReason,
+): string {
+  const rel = (id: string) => renderId(root, id);
+  const lead =
+    reason === 'imports-supabase'
+      ? `${rel(module)} imports ${pkg}, and the build transformed it for the CLIENT:`
+      : `${rel(module)} is part of ${pkg}, and the build transformed it for the CLIENT:`;
+  return [
+    lead,
+    `    ${rel(module)}${reason === 'imports-supabase' ? `\n    -> ${pkg}` : ''}`,
+    '',
+    SUPABASE_ON_THE_CLIENT_ARGUMENT,
+    '',
+    SUPABASE_BELONGS_ON_THE_SERVER,
+    '',
+    WHEN_THE_BROWSER_GENUINELY_NEEDS_SUPABASE,
+  ].join('\n');
+}
+
+/**
+ * Invariant D's second half: NO module in the CLIENT Rollup pass may BE, or import, an
+ * `@supabase/*` package.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE HALF ABOVE, which is the question a reader will
+ * have first. `checkAuthStaysOffTheClient` is anchored on two named sets — the choke
+ * point, and AUTH_CONSUMERS — and that was sufficient while the only way to reach an auth
+ * SDK was through `src/lib/auth/`. PK-19 made `@supabase/ssr` and `@supabase/supabase-js`
+ * ordinary runtime dependencies, so any component in the codebase can now write
+ * `import { createBrowserClient } from '@supabase/ssr'` and hydrate itself with
+ * `client:load`, touching neither of those two sets. A review demonstrated exactly that:
+ * 62 of 62 tests still passed while the whole GoTrue stack shipped to every anonymous
+ * reader of `/`, visible only as the client pass growing from 1,726 modules to 1,784.
+ *
+ * WHY NOT THE OBVIOUS RULE — "nothing outside src/lib/auth/ may import `@supabase/*`",
+ * i.e. Invariant B with the package name swapped. Because it would be wrong, and wrong in
+ * the direction that breaks the product rather than merely annoying somebody. Ref 55 and
+ * PK-30 are explicit that `@supabase/supabase-js` with the publishable `anon` key belongs
+ * on the anonymous read path: that is how a share page reads a public pack at all. A
+ * package-wide ban outside the choke point would fail the share page before it is
+ * written, and whoever hit it would be right to delete this file. So the rule is about
+ * the RUNTIME. Invariant C already draws the line that matters for the server (the KEY,
+ * not the package); this draws the one that matters for the browser.
+ *
+ * The scope is the client pass and nothing narrower — not "first-party client modules",
+ * for the same reason Invariant B is not first-party-scoped. A dependency that pulls the
+ * SDK into a browser bundle ships it exactly as our own import would, and nobody here
+ * wrote the line to notice it in review.
+ *
+ * WHAT IS REPORTED, and why it is not simply "every `@supabase/*` id in the client pass".
+ * That set is the whole transitive subgraph — several dozen modules for one import — and
+ * a failure message somebody has to scroll past is one they stop reading. So the BOUNDARY
+ * is reported: the client-pass modules that hold an edge into `@supabase/*` without being
+ * one, which is the set whose imports somebody can actually go and change. A Supabase
+ * module with no client-pass importer at all is reported directly, because that is the
+ * shape of a package arriving through an edge the union cannot attribute — the mirror of
+ * the `client:only` problem Invariant A is an edge rule for — and it must not fall between
+ * the two arms.
+ */
+function checkSupabaseStaysOffTheClient(
+  build: BuildGraph,
+  root: string,
+): SupabaseClientViolation[] {
+  const violations: SupabaseClientViolation[] = [];
+
+  // Every Supabase module some client-pass module imports — INCLUDING the ones another
+  // Supabase module imports. Without that second half, `@supabase/ssr`'s own dependency
+  // on `@supabase/supabase-js` (and everything below it) counts as unimported and the
+  // second arm reports the whole subgraph, which is the output nobody reads.
+  const reachedFromTheClientPass = new Set<string>();
+  for (const id of build.clientIds) {
+    for (const target of build.graph.get(id) ?? []) {
+      if (isSupabaseModule(target)) reachedFromTheClientPass.add(target);
+    }
+  }
+
+  // Deduped by (importer, package): the union graph holds the same dependency as both a
+  // bare specifier and a resolved node_modules path, so one import produces two edges.
+  const reported = new Set<string>();
+  for (const id of build.clientIds) {
+    if (isSupabaseModule(id)) continue;
+    for (const target of build.graph.get(id) ?? []) {
+      if (!isSupabaseModule(target)) continue;
+      const pkg = supabasePackageName(target);
+      if (reported.has(`${id} ${pkg}`)) continue;
+      reported.add(`${id} ${pkg}`);
+      violations.push({
+        module: id,
+        pkg,
+        reason: 'imports-supabase',
+        message: supabaseClientViolationMessage(root, id, pkg, 'imports-supabase'),
+      });
+    }
+  }
+
+  for (const id of build.clientIds) {
+    if (!isSupabaseModule(id) || reachedFromTheClientPass.has(id)) continue;
+    const pkg = supabasePackageName(id);
+    violations.push({
+      module: id,
+      pkg,
+      reason: 'supabase-package',
+      message: supabaseClientViolationMessage(root, id, pkg, 'supabase-package'),
+    });
+  }
+
+  return violations.sort(
+    (a, b) => a.module.localeCompare(b.module) || (a.pkg ?? '').localeCompare(b.pkg ?? ''),
+  );
+}
+
 interface ClerkViolation {
   clerkModule: string;
   importer: string;
@@ -1309,8 +1617,7 @@ function clerkViolationMessage(root: string, importer: string, clerkModule: stri
  * `@clerk/backend`; every one of those edges has an importer outside the choke point,
  * and reporting them would turn `npm i @clerk/astro` red on contact — before a line of
  * first-party auth code existed, with no way to go green except by gutting the check.
- * (For scale: of the 1,917 modules in the real build's graph at the time of writing,
- * 1,885 are under node_modules.)
+ * (For scale: of the 2,145 modules in the real build's graph, 2,102 are under node_modules.)
  *
  * Exempting them costs nothing, and that is provable rather than hopeful: Clerk cannot
  * import itself into a build out of nowhere. Some non-Clerk module — a first-party
@@ -1601,38 +1908,102 @@ interface CdnScriptViolation {
   file: string;
   /** The matched URL, so the failure names the thing to delete. */
   url: string;
+  /** Which rule matched. A failure that says only "this URL" leaves the reader to guess
+   *  whether the scan recognised an SDK or tripped over page copy. */
+  what: string;
 }
 
-/** Auth SDKs served as a plain browser bundle, by host. Anchored on the host rather
- *  than on the word "clerk" anywhere in the document: a pack list could legitimately
- *  mention Clerk in prose, and a check that goes red on page copy is a check somebody
- *  deletes. Add a host here if another provider is ever evaluated. */
-const AUTH_CDN_URL = /https?:\/\/[^"'\s>]*\bclerk\.(?:com|dev|io|accounts\.dev)\b[^"'\s>]*/gi;
+/**
+ * Auth SDKs served as a plain browser bundle, by the shape of the URL that serves them.
+ *
+ * Every pattern is anchored on something that can only be the SDK — a provider's own CDN
+ * host, a package path, a bundle filename — and never on the bare word "clerk" or
+ * "supabase" anywhere in the document. A pack list could legitimately mention either in
+ * prose, and a check that goes red on page copy is a check somebody deletes.
+ *
+ * THE SUPABASE PATTERNS ARE THE ONES PK-19 MADE NECESSARY, and their absence was a real
+ * hole. Until this file was migrated it named Clerk and only Clerk, which was correct
+ * while Clerk was the auth SDK under discussion and became wrong the moment
+ * `@supabase/ssr` was a runtime dependency: `<script type="module">import { createBrowserClient }
+ * from 'https://esm.sh/@supabase/ssr'</script>` produces no module edge for the graph
+ * invariants to see, and the CDN scan had nothing to say about it either.
+ *
+ * WHAT IS DELIBERATELY NOT MATCHED, because getting this wrong breaks the site: a plain
+ * Supabase PROJECT URL, `https://<ref>.supabase.co`. That is the Data API, it is where
+ * the anonymous read path legitimately points, and `PUBLIC_SUPABASE_URL` will appear in
+ * emitted HTML the day a share page renders anything from it. `@supabase/` and
+ * `supabase-js`/`supabase.js` both fail to match it, which is checked rather than
+ * assumed — see the fixture case that renders one.
+ */
+const AUTH_SDK_URL_PATTERNS: readonly { name: string; pattern: RegExp }[] = [
+  {
+    name: 'a Clerk CDN host',
+    pattern: /https?:\/\/[^"'\s>]*\bclerk\.(?:com|dev|io|accounts\.dev)\b[^"'\s>]*/gi,
+  },
+  {
+    name: 'an @supabase/* package served over HTTP (esm.sh, unpkg, jsdelivr, skypack, …)',
+    pattern: /https?:\/\/[^"'\s>]*@supabase(?:\/|%2f)[^"'\s>]*/gi,
+  },
+  {
+    name: 'a Supabase browser bundle by filename',
+    pattern: /https?:\/\/[^"'\s>]*\bsupabase[-.]js\b[^"'\s>]*/gi,
+  },
+];
+
+/** Every `<script src="...">` in a document, whatever else the tag carries. Used only
+ *  for the same-origin case below; a remote src is caught by the URL patterns above
+ *  wherever it appears, tag or not. */
+const SCRIPT_SRC = /<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi;
+
+/** A path segment naming an auth SDK, for a script served from this site's own origin.
+ *  Bounded by the characters a filename is built from, so `/vendor/supabase-js.min.js`
+ *  and `/js/clerk.browser.js` match while `/assets/subsupabaseish.js` does not. */
+const VENDORED_SDK_PATH = /(?:^|[/\-_.])(?:clerk|supabase)(?:[/\-_.]|$)/i;
+
+/** True for a src the URL patterns above already cover — an absolute URL, or a
+ *  protocol-relative one. Excluded from the vendored scan so a CDN script is reported
+ *  once, by the rule that identifies what it actually is. */
+const isRemoteSrc = (src: string) => /^(?:https?:)?\/\//i.test(src);
 
 /**
- * The complement to the two graph invariants, and the reason the header comment can
- * state a boundary instead of quietly having one.
+ * The complement to the graph invariants, and the reason the header comment can state a
+ * boundary instead of quietly having one.
  *
- * `<script is:inline src="https://js.clerk.com/...">` and anything vendored into
- * public/ never enter the module graph — there is no import for a bundler to resolve —
- * so both invariants above are structurally blind to them, and Clerk publishes a
- * browser bundle designed to be loaded exactly that way. This looks at what the build
- * actually wrote to disk instead of at what it modelled, which is a different kind of
- * evidence and fails for a different reason. The fixture's cdn-script.astro is caught
- * here and by nothing else in this file.
+ * `<script is:inline src="https://js.clerk.com/...">`, the same thing pointed at
+ * `https://esm.sh/@supabase/ssr`, and anything vendored into public/ never enter the
+ * module graph — there is no import for a bundler to resolve — so every invariant above
+ * is structurally blind to them, and both providers publish browser bundles designed to
+ * be loaded exactly that way. This looks at what the build actually wrote to disk instead
+ * of at what it modelled, which is a different kind of evidence and fails for a different
+ * reason. The fixture's cdn-script.astro and vendored-sdk.astro are caught here and by
+ * nothing else in this file.
+ *
+ * The same-origin arm is what closes the case the header used to list as "still
+ * uncovered, deliberately": an SDK dropped into public/ and loaded by a relative script
+ * tag. It is a weaker rule than the URL ones — it identifies an SDK by what somebody
+ * named the file — and that is honest rather than apologetic: a vendored copy renamed to
+ * `/js/vendor.min.js` is invisible to this and to everything else short of a
+ * script-src CSP at the edge, which is the tool that actually closes it.
  */
 function checkEmittedHtmlForAuthCdn(build: BuildGraph): CdnScriptViolation[] {
   const violations: CdnScriptViolation[] = [];
   for (const [file, contents] of build.emittedHtml) {
-    for (const match of contents.matchAll(AUTH_CDN_URL)) {
-      violations.push({ file, url: match[0] });
+    for (const { name, pattern } of AUTH_SDK_URL_PATTERNS) {
+      for (const match of contents.matchAll(pattern)) {
+        violations.push({ file, url: match[0], what: name });
+      }
+    }
+    for (const match of contents.matchAll(SCRIPT_SRC)) {
+      const src = match[1];
+      if (isRemoteSrc(src) || !VENDORED_SDK_PATH.test(src)) continue;
+      violations.push({ file, url: src, what: 'an auth SDK served from this site’s own origin' });
     }
   }
   return violations.sort((a, b) => a.file.localeCompare(b.file) || a.url.localeCompare(b.url));
 }
 
 // ---------------------------------------------------------------------------
-// Invariants A, B and C, plus the emitted-HTML scan — against the real site
+// All four invariants, plus the emitted-HTML scan — against the real site
 // ---------------------------------------------------------------------------
 
 describe('the real site', () => {
@@ -1664,16 +2035,17 @@ describe('the real site', () => {
     expect(realBuild).toBeDefined();
   });
 
-  // Both invariants are anchored on the string "<root>/src/lib/auth/", and neither
-  // would notice if that directory stopped existing: the edge check would match no
-  // importer and no target, the Clerk check would exempt nobody, and all of it would
-  // stay green forever while auth lived somewhere else entirely. Collapsing the
-  // directory to src/lib/auth.ts, or renaming it to src/lib/session/ when Clerk
-  // lands, are both one-line changes a reviewer would wave through. This test is
-  // only meaningful while that directory is where auth lives, so that fact is
-  // asserted rather than assumed. If this fails, do not delete it — update both
-  // invariants to point at wherever the choke point moved to.
-  it('the auth choke point directory exists where both invariants expect it', () => {
+  // Four things are anchored on the string "<root>/src/lib/auth/" — Invariant A's edge
+  // rule, Invariant B's exemption, Invariant C's exemption and Invariant D's first half —
+  // and not one of them would notice if that directory stopped existing: the edge check
+  // would match no importer and no target, the two exemptions would exempt nobody, and
+  // all of it would stay green forever while auth lived somewhere else entirely.
+  // Collapsing the directory to src/lib/auth.ts, or renaming it to src/lib/session/, are
+  // both one-line changes a reviewer would wave through. Every rule here is only
+  // meaningful while that directory is where auth lives, so that fact is asserted rather
+  // than assumed. If this fails, do not delete it — point chokePointDir at wherever the
+  // choke point moved to, which is the one place all four read it from.
+  it('the auth choke point directory exists where every rule anchored on it expects it', () => {
     expect(statSync(join(repoRoot, 'src', 'lib', 'auth')).isDirectory()).toBe(true);
   });
 
@@ -1706,7 +2078,7 @@ describe('the real site', () => {
     // a file (see the generated-only fixture case). Both are exactly the cases nobody
     // would think to check by hand.
     //
-    // `> 0` would be satisfied by the hook firing for one module out of 2,070, which is
+    // `> 0` would be satisfied by the hook firing for one module out of 2,145, which is
     // indistinguishable from broken. The assertion is proportional to the graph instead,
     // and names one module that must specifically be in there.
     expect(realBuild.transformedIds.size).toBeGreaterThan(realBuild.graph.size * 0.9);
@@ -1771,10 +2143,12 @@ describe('the real site', () => {
    * `src/pages/account/index.astro` is the kind of path that gets restructured twice
    * before it settles, and the old spelling is exactly what stays behind.
    *
-   * Vacuous while AUTH_CONSUMERS is empty, and knowingly so — this is the assertion that
-   * starts working the moment the first entry lands, which is the moment it is needed. The
-   * unit test further down is what proves the check itself has teeth today, and the
-   * fixture block runs the same check against a list that is genuinely populated.
+   * This was vacuous while AUTH_CONSUMERS was empty, and was written that way on purpose:
+   * an assertion that starts working the moment the first entry lands, which is the moment
+   * it is needed. PK-19 landed six, so it is doing real work now. The unit test further
+   * down and the fixture block both exercise the check against lists written for it,
+   * including the two cases a real project cannot hold — an entry naming a file that does
+   * not exist, and one naming a directory.
    *
    * If this fails, the fix is to correct or delete the entry. It is never to delete this
    * assertion: an allowlist nobody validates is a list of names that used to mean
@@ -1785,20 +2159,67 @@ describe('the real site', () => {
   });
 
   /**
-   * Invariant D. Green today for two independent reasons, both of which are worth saying
-   * out loud so nobody reads this as evidence of anything: AUTH_CONSUMERS is empty, and
-   * nothing in the real site imports src/lib/auth/ at all, so the choke point is not even a
-   * module in this build. It will do real work for the first time the day an allowlisted
-   * route arrives, and more importantly the first day one of them turns out to hydrate.
+   * Invariant D, first half. This stopped being green-for-want-of-anything-to-check when
+   * PK-19 landed: AUTH_CONSUMERS names six real modules, all six genuinely import
+   * src/lib/auth/, and the choke point and everything behind it — @supabase/ssr,
+   * @supabase/supabase-js, @supabase/auth-js — are ordinary modules in this build now.
+   * The only thing keeping them out of the client pass is that all six consumers are
+   * server-only, which is exactly the claim this assertion checks rather than trusts.
    *
-   * The tripwire above is what keeps that from being indistinguishable from a broken
-   * check: it asserts the client pass was genuinely observed, and genuinely told apart
-   * from the server pass, before this assertion is allowed to mean "and auth was not in
-   * it".
+   * The tripwire above is what keeps it from being indistinguishable from a broken check:
+   * it asserts the client pass was genuinely observed, and genuinely told apart from the
+   * server pass, before this assertion is allowed to mean "and auth was not in it".
    */
   it('no auth module and no allowlisted consumer reaches the client build', () => {
     const violations = checkAuthStaysOffTheClient(realBuild, repoRoot, AUTH_CONSUMERS);
     expect(violations.map((v) => v.message)).toEqual([]);
+  });
+
+  /**
+   * Invariant D, second half — and the one a review got past every other assertion in this
+   * file with.
+   *
+   * PK-19 made `@supabase/ssr` and `@supabase/supabase-js` runtime dependencies, so any
+   * component may now write `import { createBrowserClient } from '@supabase/ssr'` and
+   * hydrate itself. That module is not inside the choke point and not on the allowlist, so
+   * the assertion above never sees it; it imports no choke-point module, so Invariant A
+   * never sees it; it names no privileged key, so Invariant C never sees it. Demonstrated
+   * against this exact repository: 62 of 62 tests passed while the whole GoTrue stack
+   * shipped to every anonymous reader of `/`, the only trace being the client pass growing
+   * from 1,726 modules to 1,784.
+   *
+   * Not vacuous the way the assertion above once was: the packages are in this build, and
+   * the tripwire proves the client pass is genuinely populated and genuinely distinguished.
+   * What this says is that none of what is in the client pass is, or reaches, `@supabase/*`.
+   */
+  it('no module in the client build is, or imports, a @supabase/* package', () => {
+    // The premise. Supabase is really in this build — so "none of it is in the client
+    // pass" is a fact about where it went, not about it being absent.
+    expect([...realBuild.graph.keys()].filter(isSupabaseModule).length).toBeGreaterThan(0);
+
+    const violations = checkSupabaseStaysOffTheClient(realBuild, repoRoot);
+    expect(violations.map((v) => v.message)).toEqual([]);
+  });
+
+  /**
+   * The allowlist's OTHER rot condition, and the one "the file still exists" cannot see:
+   * an entry whose module stopped importing the choke point. It exempts nothing, so
+   * nothing goes red — it simply sits there as a standing permission with no live reason,
+   * until somebody adds a real auth call to a file that was on the list for reasons
+   * nobody remembers.
+   *
+   * If this fails, delete the entry. Do not widen the check: an entry is permission for
+   * that module to import ANYTHING in src/lib/auth/, and the whole value of enumerating
+   * them is that each one is a line somebody wrote on purpose for a reason that is still
+   * true.
+   */
+  it('every AUTH_CONSUMERS entry still actually imports the choke point', () => {
+    expect(unusedAuthConsumers(realBuild, repoRoot, AUTH_CONSUMERS)).toEqual([]);
+    // Not vacuous: a real, existing module that does not import auth IS reported, so this
+    // is measuring the edge rather than the file.
+    expect(unusedAuthConsumers(realBuild, repoRoot, ['src/pages/index.astro'])).toEqual([
+      'src/pages/index.astro',
+    ]);
   });
 
   // Dormant rather than vacuous: see the comment on checkClerkChokePoint. This
@@ -1815,20 +2236,23 @@ describe('the real site', () => {
   // decided auth and data provider, so the names it looks for are ones somebody on this
   // project will genuinely reach for.
   //
-  // Why it is green today, stated exactly, because the obvious explanation is wrong and
+  // Why it is green, stated exactly, because the obvious explanation is wrong and
   // believing it would hide a real gap. Several files in this repository DO name the key:
-  // this test file names it a couple of dozen times, four fixture files under
-  // tests/fixtures/ do, and src/lib/auth/index.ts does. None of them is why this passes.
-  // What makes it pass is that none of them is in the real build graph — tests and
-  // fixtures are not built, and nothing in the site imports src/lib/auth/ at all, so the
-  // choke point is not a module in this build. The `startsWith(authDir)` exemption is not
-  // load-bearing here: delete it and this assertion stays green. It is exercised by the
-  // fixture, whose src/lib/auth/service-role.ts is in that build's graph and does name the
-  // key, and where deleting the exemption goes red.
+  // this test file names it a couple of dozen times, several fixture files under
+  // tests/fixtures/ do (deliberately — they are the cases Invariant C is proved
+  // against), and src/lib/auth/index.ts does. Two different things account for
+  // that, and only one of them used to. Tests and fixtures are simply not in the real
+  // build graph, so they were never in scope. src/lib/auth/index.ts IS in the graph now —
+  // PK-19 put six consumers on AUTH_CONSUMERS, so the choke point and everything behind it
+  // ships — and it is not reported only because of the `startsWith(authDir)` exemption.
+  // That exemption used to be inert here (delete it and this stayed green, as the comment
+  // said); it is load-bearing in the real build today. @supabase/auth-js, which arrived
+  // with it, is the one dependency that names the key and is exempted by name; see
+  // PACKAGES_EXEMPT_FROM_KEY_SCAN.
   //
   // The consequence to keep in mind: this assertion will do real work for the first time
-  // when the first module that ships names the key, and it must not be softened before
-  // then on the grounds that it has never caught anything.
+  // when the first module that ships names the key OUTSIDE those two exemptions, and it
+  // must not be softened before then on the grounds that it has never caught anything.
   it('nothing outside src/lib/auth/ names a Supabase privileged key', () => {
     const violations = checkServiceRoleKey(realBuild, repoRoot);
     expect(violations.map((v) => v.message)).toEqual([]);
@@ -1943,7 +2367,7 @@ const FIXTURE_SERVICE_ROLE_MODULES = [
   'src/pages/supabase-secret-key.astro',
 ];
 
-describe('the checkers, run against a fixture that actually violates Invariants A, C and D', () => {
+describe('the checkers, run against a fixture that actually violates Invariants A, C and D and loads SDKs the graph cannot see', () => {
   let fixtureBuild: BuildGraph;
   let fixtureBuildFailure: unknown;
   const rel = (id: string) => relative(fixtureRoot, id);
@@ -2349,8 +2773,195 @@ describe('the checkers, run against a fixture that actually violates Invariants 
     expect(violations.map((v) => rel(v.importer))).not.toContain('src/pages/cdn-script.astro');
     expect(fixtureBuild.pageEntries.has('src/pages/cdn-script')).toBe(true);
 
-    expect(checkEmittedHtmlForAuthCdn(fixtureBuild)).toEqual([
-      { file: join('cdn-script', 'index.html'), url: 'https://cdn.clerk.io/clerk.browser.js' },
+    expect(checkEmittedHtmlForAuthCdn(fixtureBuild)).toContainEqual({
+      file: join('cdn-script', 'index.html'),
+      url: 'https://cdn.clerk.io/clerk.browser.js',
+      what: 'a Clerk CDN host',
+    });
+  });
+
+  /**
+   * The same boundary, for the SDK this project actually depends on. Until PK-19 the
+   * emitted-HTML scan named Clerk and only Clerk, which was correct while Clerk was the
+   * provider under discussion — and stopped being correct the moment `@supabase/ssr`
+   * became a runtime dependency. A `<script type="module">` importing it off esm.sh
+   * produces no module edge, so every graph invariant is blind to it, and the one check
+   * positioned to see it was looking for a different vendor's hostname.
+   */
+  it('catches a Supabase SDK loaded from a CDN, which is what the Clerk-only scan missed', () => {
+    expect(checkEmittedHtmlForAuthCdn(fixtureBuild)).toContainEqual({
+      file: join('supabase-cdn-script', 'index.html'),
+      url: 'https://esm.sh/@supabase/ssr@0.12.4',
+      what: 'an @supabase/* package served over HTTP (esm.sh, unpkg, jsdelivr, skypack, …)',
+    });
+  });
+
+  // The case no URL pattern can recognise: a copy of the SDK dropped into public/ and
+  // loaded same-origin. Identified by what the file was named, which is weaker than the
+  // other rules and is the honest limit of scanning bytes rather than enforcing a CSP.
+  it('catches an SDK vendored into public/ and loaded by a same-origin script tag', () => {
+    expect(checkEmittedHtmlForAuthCdn(fixtureBuild)).toContainEqual({
+      file: join('vendored-sdk', 'index.html'),
+      url: '/vendor/supabase-js.min.js',
+      what: 'an auth SDK served from this site’s own origin',
+    });
+  });
+
+  /**
+   * The other half of "not vacuous", and the one that would break the product if it
+   * failed: a page that renders a Supabase PROJECT URL is the anonymous read path working
+   * as designed. `https://<ref>.supabase.co` is the Data API — it is what
+   * `PUBLIC_SUPABASE_URL` resolves to, and it will be in emitted HTML the day a share page
+   * renders a pack. A scan that flagged it would be deleted by the first person who hit
+   * it, and they would be right.
+   */
+  it('does NOT flag a page that renders a Supabase project URL', () => {
+    const page = join('supabase-project-url', 'index.html');
+    const html = fixtureBuild.emittedHtml.get(page);
+
+    // The premise: the URL really is in the emitted bytes, so "not flagged" is not "the
+    // fixture stopped containing the case".
+    expect(html).toBeDefined();
+    expect(html).toContain('https://abcdefghijklmnop.supabase.co');
+
+    expect(checkEmittedHtmlForAuthCdn(fixtureBuild).filter((v) => v.file === page)).toEqual([]);
+  });
+
+  // Every emitted-HTML finding in this fixture, so a pattern that started matching
+  // something it should not shows up here rather than in a count nobody reads. Four
+  // pages produce findings; every other page in the fixture — including the one that
+  // renders a project URL, and the twenty-odd that render nothing remote at all —
+  // produces none.
+  it('reports exactly those emitted-HTML findings, no more and no fewer', () => {
+    expect(checkEmittedHtmlForAuthCdn(fixtureBuild).map((v) => [v.file, v.url])).toEqual([
+      [join('cdn-script', 'index.html'), 'https://cdn.clerk.io/clerk.browser.js'],
+      [join('supabase-cdn-script', 'index.html'), 'https://esm.sh/@supabase/ssr@0.12.4'],
+      [join('vendored-sdk', 'index.html'), '/vendor/supabase-js.min.js'],
+    ]);
+  });
+
+  /**
+   * Invariant D's second half, against a real build: a component that imports
+   * `@supabase/*` and hydrates.
+   *
+   * The premise assertions are the point. This module is not inside the choke point, is
+   * not on the allowlist, does not import the choke point and names no privileged key —
+   * so Invariants A, C and the FIRST half of D all have nothing to say about it, and are
+   * asserted to have nothing to say about it. Everything in this file was green while
+   * exactly this shape shipped the GoTrue stack to every anonymous reader of the real
+   * site's landing page; this is the assertion that stops being true when it does.
+   */
+  it('flags a hydrated island that imports @supabase/*, which every other invariant misses', () => {
+    const island = join(fixtureRoot, 'src', 'components', 'SupabaseIsland.vue');
+
+    // The premise, all four halves.
+    expect(fixtureBuild.clientIds.has(island)).toBe(true);
+    expect(find('src/components/SupabaseIsland.vue')).toBeUndefined();
+    expect(
+      checkAuthStaysOffTheClient(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS).map((v) =>
+        rel(v.module),
+      ),
+    ).not.toContain('src/components/SupabaseIsland.vue');
+    expect(checkServiceRoleKey(fixtureBuild, fixtureRoot).map((v) => rel(v.module))).not.toContain(
+      'src/components/SupabaseIsland.vue',
+    );
+
+    const violation = checkSupabaseStaysOffTheClient(fixtureBuild, fixtureRoot).find(
+      (v) => rel(v.module) === 'src/components/SupabaseIsland.vue',
+    );
+
+    expect(violation).toBeDefined();
+    expect(violation!.reason).toBe('imports-supabase');
+    expect(violation!.pkg).toBe('@supabase/ssr');
+
+    // The message has to carry all three things, because the reader is one of three
+    // people: somebody who added an island by accident, somebody about to conclude
+    // Supabase is banned outright and go and break the share page, and somebody whose
+    // ticket genuinely needs a browser client.
+    expect(violation!.message).toContain('WHAT SHIPPED');
+    expect(violation!.message).toContain('TO WHOM');
+    expect(violation!.message).toContain('not an authorization boundary');
+    expect(violation!.message).toContain('rule about the BROWSER, not about Supabase');
+    expect(violation!.message).toContain('publishable `anon` key belongs');
+    expect(violation!.message).toContain('as an ordinary prop');
+    expect(violation!.message).toContain('deliberate revisit');
+  });
+
+  /**
+   * The boundary, and nothing below it. `@supabase/ssr` drags several dozen modules into
+   * the client pass behind it, and a checker that reported every one of them would produce
+   * a failure nobody reads — so only the modules holding an edge INTO the namespace are
+   * reported. That is also the set somebody can act on: there is exactly one import to
+   * delete.
+   */
+  it('reports the importing boundary rather than the whole @supabase subgraph', () => {
+    const violations = checkSupabaseStaysOffTheClient(fixtureBuild, fixtureRoot);
+
+    // Not vacuous: the subgraph really is in the client pass, in quantity.
+    expect([...fixtureBuild.clientIds].filter(isSupabaseModule).length).toBeGreaterThan(5);
+
+    expect(violations.map((v) => rel(v.module))).toEqual(['src/components/SupabaseIsland.vue']);
+    expect(violations.every((v) => v.reason === 'imports-supabase')).toBe(true);
+  });
+
+  /**
+   * The page `<script>` regression, which used to be reported as the auth SDK shipping to
+   * every visitor.
+   *
+   * Astro compiles this page's `<script>` into a module of its own, and it really is in
+   * the client pass — asserted, or the rest proves nothing. What must be true is that the
+   * PAGE is not, because the page is on the allowlist and Invariant D reads that list.
+   * Before `stripQuery` learnt to keep the two apart, the script's id collapsed onto the
+   * page's and adding a console.log to a real sign-in page turned the whole suite red.
+   */
+  it('keeps a page <script> distinct from the page, so a benign script is not a violation', () => {
+    const page = join(fixtureRoot, 'src', 'pages', 'allowlisted-route.astro');
+    const scripts = [...fixtureBuild.clientIds].filter((id) => id.startsWith(`${page}?`));
+
+    // The premise: Astro really did lift the script into the client pass under an id of
+    // its own. If a future Astro stops doing that, this fails and says so, rather than
+    // the case below quietly passing for the wrong reason.
+    expect(scripts).toEqual([`${page}?astro&type=script&index=0`]);
+    expect(fixtureBuild.clientIds.has(page)).toBe(false);
+
+    // And neither invariant that reads an id has anything to say about either module.
+    expect(
+      checkAuthStaysOffTheClient(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS).map((v) =>
+        rel(v.module),
+      ),
+    ).not.toContain('src/pages/allowlisted-route.astro');
+    expect(
+      checkSupabaseStaysOffTheClient(fixtureBuild, fixtureRoot).map((v) => rel(v.module)),
+    ).not.toContain('src/pages/allowlisted-route.astro');
+  });
+
+  /**
+   * The mirror image, and the half that actually matters for security: the script
+   * submodule does NOT inherit the page's allowlist entry. A `<script>` in an allowlisted
+   * page that imported the choke point would be browser code exempted on the strength of
+   * an entry granted to a server module — silent, because Invariant A would see an
+   * allowlisted importer and Invariant D would see a page it believes is server-only.
+   *
+   * Asserted over the resolved allowlist rather than by adding a violating fixture script,
+   * because a fixture script that imported auth would fail the build it is embedded in
+   * before it could be measured.
+   */
+  it('does not let a page <script> inherit its page’s allowlist entry', () => {
+    const page = join(fixtureRoot, 'src', 'pages', 'allowlisted-route.astro');
+    const allowed = resolveAuthConsumers(fixtureRoot, FIXTURE_AUTH_CONSUMERS);
+
+    expect(allowed.has(page)).toBe(true);
+    expect(allowed.has(`${page}?astro&type=script&index=0`)).toBe(false);
+  });
+
+  // The allowlist's second rot condition, on a list that is genuinely populated. Both
+  // fixture entries import the choke point today; an entry that stopped would be a
+  // standing exemption with no live reason, which nothing else here would notice.
+  it('every FIXTURE_AUTH_CONSUMERS entry still actually imports the choke point', () => {
+    expect(unusedAuthConsumers(fixtureBuild, fixtureRoot, FIXTURE_AUTH_CONSUMERS)).toEqual([]);
+    // Not vacuous: a module that exists and does not import auth IS reported.
+    expect(unusedAuthConsumers(fixtureBuild, fixtureRoot, ['src/pages/clean.astro'])).toEqual([
+      'src/pages/clean.astro',
     ]);
   });
 
@@ -2870,6 +3481,98 @@ describe('the allowlist machinery, exercised on lists written here rather than o
    * that happens not to have looked. Here the sets are chosen so the difference is the
    * only thing being measured.
    */
+  /**
+   * Invariant D's second half over a hand-made graph, for the two properties a fixture
+   * cannot show.
+   *
+   * The first is the SECOND ARM — a `@supabase/*` module in the client pass that nothing
+   * in the client pass imports. Against a real build that set is always empty, because a
+   * package arrives by being imported and the importer is in the pass too; it is there for
+   * the shape the union graph cannot attribute, the same hole `client:only` opens for
+   * Invariant A. Untested, it would be a branch that has never run in a rule whose whole
+   * job is to have no blind spot.
+   *
+   * The second is the NEGATIVE: the rule is about `@supabase/*` and not about the client
+   * pass at large. A real client pass is full of Vue and islands, and every one of them
+   * staying unreported there is consistent both with correct scoping and with a checker
+   * that happened not to look.
+   */
+  it('reports a Supabase package in the client pass that nothing in it imports', () => {
+    const vue = join(repoRoot, 'node_modules', 'vue', 'dist', 'vue.runtime.esm-bundler.js');
+    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const orphan = join(repoRoot, 'node_modules', '@supabase', 'ssr', 'dist', 'module', 'index.js');
+    const build: BuildGraph = {
+      graph: new Map([[island, new Set([vue])]]),
+      pageEntries: new Map(),
+      emittedHtml: new Map(),
+      serviceRoleRefs: new Map(),
+      transformedIds: new Set(),
+      clientIds: new Set([vue, island, orphan]),
+    };
+
+    const violations = checkSupabaseStaysOffTheClient(build, repoRoot);
+
+    expect(violations.map((v) => v.module)).toEqual([orphan]);
+    expect(violations[0].reason).toBe('supabase-package');
+    expect(violations[0].pkg).toBe('@supabase/ssr');
+    expect(violations[0].message).toContain('is part of @supabase/ssr');
+  });
+
+  // And the arm that normally fires instead: give the orphan an importer inside the pass
+  // and the package stops being reported on its own, because the boundary is the thing
+  // somebody can go and edit. Same graph, one edge different.
+  it('reports the importer instead, once something in the pass imports the package', () => {
+    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const pkg = join(repoRoot, 'node_modules', '@supabase', 'ssr', 'dist', 'module', 'index.js');
+    const deep = join(
+      repoRoot,
+      'node_modules',
+      '@supabase',
+      'auth-js',
+      'dist',
+      'module',
+      'index.js',
+    );
+    const build: BuildGraph = {
+      graph: new Map([
+        [island, new Set([pkg])],
+        [pkg, new Set([deep])],
+      ]),
+      pageEntries: new Map(),
+      emittedHtml: new Map(),
+      serviceRoleRefs: new Map(),
+      transformedIds: new Set(),
+      clientIds: new Set([island, pkg, deep]),
+    };
+
+    const violations = checkSupabaseStaysOffTheClient(build, repoRoot);
+
+    // One finding, naming the one import there is to delete — not three naming a package,
+    // its dependency and the component that pulled both in.
+    expect(violations.map((v) => [v.module, v.pkg])).toEqual([[island, '@supabase/ssr']]);
+  });
+
+  // The bare-specifier shape a pass that left the dependency external produces, which is
+  // half of what the union graph holds for the same import. Reported under the same
+  // package name as the resolved path, which is what keeps one import from being one
+  // finding per spelling.
+  it('recognises the bare specifier shape and names the same package', () => {
+    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const resolved = join(repoRoot, 'node_modules', '@supabase', 'ssr', 'dist', 'index.js');
+    const build: BuildGraph = {
+      graph: new Map([[island, new Set(['@supabase/ssr', resolved])]]),
+      pageEntries: new Map(),
+      emittedHtml: new Map(),
+      serviceRoleRefs: new Map(),
+      transformedIds: new Set(),
+      clientIds: new Set([island]),
+    };
+
+    expect(checkSupabaseStaysOffTheClient(build, repoRoot).map((v) => [v.module, v.pkg])).toEqual([
+      [island, '@supabase/ssr'],
+    ]);
+  });
+
   it('ignores client modules that are neither in the choke point nor on the allowlist', () => {
     const vue = join(repoRoot, 'node_modules', 'vue', 'dist', 'vue.runtime.esm-bundler.js');
     const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');

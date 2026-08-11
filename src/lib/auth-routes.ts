@@ -3,12 +3,19 @@
  * "Sign in", a share page offering "Claim this pack" pointing at sign-up, a 404 page
  * linking back to the account screen. None of that is auth code — it is a handful of
  * strings — but if it lived in src/lib/auth/ it would still sink any anonymous route
- * that imported it, because Invariant A in tests/anonymous-read-path.test.ts is an
- * unconditional EDGE rule: it does not look at what a module contains, only at whether
- * something outside the choke point has an import edge into it. A `types.ts` of pure
- * constants would ship zero auth code and still fail the build with a message about a
- * $6,000/month bill, which is exactly the kind of false positive that gets a guardrail
- * weakened rather than obeyed. See the "corollary of an edge rule" paragraph in
+ * that imported it, because Invariant A in tests/anonymous-read-path.test.ts is an EDGE
+ * rule: it does not look at what a module contains, only at whether something outside the
+ * choke point has an import edge into it. A `types.ts` of pure constants would ship zero
+ * auth code and still fail the build with a message about a $6,000/month bill, which is
+ * exactly the kind of false positive that gets a guardrail weakened rather than obeyed.
+ *
+ * That rule stopped being UNCONDITIONAL in PK-19 — it now consults an enumerated
+ * allowlist, AUTH_CONSUMERS — and this file is no less necessary for it. An allowlist
+ * entry is standing permission for one module to import ANYTHING in the choke point, so
+ * granting one to a nav bar that wanted a string is a far worse trade than moving the
+ * string; the list is meant to hold routes that authenticate people and to stay short
+ * enough to read at once. Everything below is here so that wanting a path never becomes a
+ * reason to ask for a line on it. See the "corollary of an edge rule" paragraph in
  * src/lib/auth/index.ts's own doc comment — this file is what that paragraph is for.
  *
  * So the constants live out here, one door away from the choke point, where any page
@@ -33,11 +40,10 @@ export const ACCOUNT_PATH = '/account';
 
 /**
  * Where Google's redirect lands after `getGoogleAuthorizationUrl`'s authorization URL
- * sends the visitor away and back. `exchangeCodeForSession` completes the flow from
- * whatever route answers this path — the route itself is a future task's job, but the
- * path is a public contract (it has to match the redirect URI configured in the OAuth
- * provider and in the Supabase dashboard), so it is named here rather than invented
- * inline wherever it is first used.
+ * sends the visitor away and back. `src/pages/auth/callback.ts` answers this path and
+ * calls `exchangeCodeForSession` to complete the flow. The path is a public contract — it
+ * has to match the redirect URI configured in the OAuth provider and in the Supabase
+ * dashboard — so it is named here rather than written inline in the route that serves it.
  */
 export const AUTH_CALLBACK_PATH = '/auth/callback';
 
@@ -83,6 +89,38 @@ export function safeNextPath(raw: string | null | undefined): string {
     return raw;
   }
   return ACCOUNT_PATH;
+}
+
+/** The form field, and the query parameter, that carry the post-sign-in destination.
+ *  One constant for both because they are the same value at two moments of the same
+ *  journey, and a form whose field name disagreed with the query parameter would fail
+ *  silently — the value simply would not be found, and the visitor would land on the
+ *  default. */
+export const NEXT_PARAM = 'next';
+
+/**
+ * The destination a POSTed sign-in or sign-up form should return the visitor to.
+ *
+ * WHY THE FORM FIELD IS READ AT ALL, given that it worked without this. The four forms in
+ * sign-in.astro and sign-up.astro each carry `<input type="hidden" name="next">`, and
+ * nothing read it: a `<form method="POST">` with no `action` posts to the CURRENT URL,
+ * query string included, so the value survived by being in the URL rather than by being
+ * in the form. The field was inert, and its comment described it as the mechanism.
+ *
+ * Two ways to fix that, and this is the one that keeps the more robust behaviour rather
+ * than the smaller diff. Deleting the fields would leave the journey resting on a detail
+ * of HTML form submission that is invisible at the call site — give any of those forms an
+ * `action`, for any reason, and `?next=` is silently dropped and every visitor lands on
+ * `/account` instead of where they were going. Reading the field makes the carrier
+ * explicit and the fallback the safety net.
+ *
+ * Both are passed through `safeNextPath`, so a crafted POST setting `next` to an
+ * off-site URL is refused exactly as a crafted query string is — the field being
+ * `hidden` says nothing about who filled it in.
+ */
+export function nextFromForm(form: FormData, url: URL): string {
+  const field = form.get(NEXT_PARAM);
+  return safeNextPath(typeof field === 'string' ? field : url.searchParams.get(NEXT_PARAM));
 }
 
 /**

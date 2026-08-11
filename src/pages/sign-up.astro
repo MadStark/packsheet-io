@@ -9,11 +9,16 @@ import {
   AUTH_CALLBACK_PATH,
   GOOGLE_AUTH_ENABLED,
   googleAuthUnavailableMessage,
+  nextFromForm,
+  NEXT_PARAM,
   SIGN_IN_PATH,
   safeNextPath,
 } from '../lib/auth-routes';
 
-const next = safeNextPath(Astro.url.searchParams.get('next'));
+// Same handling as sign-in.astro, and for the same reason — see safeNextPath and
+// nextFromForm in src/lib/auth-routes.ts. Seeded from the query string, re-read from the
+// submitted form below, and never trusted in its raw form from either source.
+let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
 
 const oauthFailed = Astro.url.searchParams.has('oauth_error');
 
@@ -38,6 +43,12 @@ let awaitingConfirmation = false;
 // needed on top of that pair.
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
+  // Re-read from the submitted form, falling back to the query string. The hidden field
+  // below is the carrier; the query string is the safety net for a form that lost it.
+  // See nextFromForm in src/lib/auth-routes.ts for why the field is read rather than
+  // deleted, and note that both sources go through safeNextPath — a hidden field is not
+  // a trusted one.
+  next = nextFromForm(form, Astro.url);
   const intent = form.get('intent');
 
   if (intent === 'google') {
@@ -49,7 +60,7 @@ if (Astro.request.method === 'POST') {
       errorMessage = googleAuthUnavailableMessage('up');
     } else {
       const callbackUrl = new URL(AUTH_CALLBACK_PATH, Astro.url.origin);
-      callbackUrl.searchParams.set('next', next);
+      callbackUrl.searchParams.set(NEXT_PARAM, next);
       const result = await getGoogleAuthorizationUrl({
         cookies: Astro.cookies,
         request: Astro.request,
@@ -92,9 +103,15 @@ if (Astro.request.method === 'POST') {
       }
       awaitingConfirmation = true;
     } else {
-      // Sign-up failures are not the account-enumeration-sensitive case sign-in is —
-      // see the comment on signUpWithPassword in src/lib/auth/index.ts — so
-      // result.error is safe to render as-is.
+      // Already neutralised by signUpErrorMessage in src/lib/auth/index.ts, the same way
+      // sign-in.astro's error is already BAD_CREDENTIALS_MESSAGE by the time it gets
+      // here: chosen from the error's CODE, never relayed from Supabase's own text. This
+      // page used to render `result.error` on the reasoning that sign-up is not the
+      // enumeration-sensitive case sign-in is — which is true only when "Confirm email"
+      // is ON, and it is OFF here (enable_confirmations = false in
+      // supabase/config.toml), so a duplicate address came back as a verbatim
+      // `user_already_exists` and this form was an account-enumeration oracle. See
+      // SIGN_UP_UNAVAILABLE_MESSAGE there, including what it does and does not close.
       errorMessage = result.error;
     }
   }
@@ -127,7 +144,7 @@ if (Astro.request.method === 'POST') {
           )}
 
           <form method="POST" class="mt-8 space-y-4">
-            <input type="hidden" name="next" value={next} />
+            <input type="hidden" name={NEXT_PARAM} value={next} />
             <div>
               <label for="email" class="text-ink-2 block text-sm">
                 Email
@@ -177,7 +194,7 @@ if (Astro.request.method === 'POST') {
 
                 <form method="POST">
                   <input type="hidden" name="intent" value="google" />
-                  <input type="hidden" name="next" value={next} />
+                  <input type="hidden" name={NEXT_PARAM} value={next} />
                   <button
                     type="submit"
                     class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"

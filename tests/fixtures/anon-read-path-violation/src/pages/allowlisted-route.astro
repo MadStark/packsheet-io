@@ -16,3 +16,23 @@ import '../lib/auth/index';
 ---
 
 <p>allowlisted route</p>
+
+<!--
+  The benign `<script>`, which used to turn this whole suite red.
+
+  Astro lifts a page `<script>` into a module of its own, whose id is this file's path
+  plus `?astro&type=script&index=0&lang.ts` — and it IS browser code, so the client pass
+  transforms it. The graph walker stripped every query suffix, which collapsed that
+  module onto this page's own id and put an AUTH_CONSUMERS entry into `clientIds`.
+  Invariant D then reported an allowlisted server-only page as having shipped the auth SDK
+  to every visitor, over a console.log. See `stripQuery` for the mirror-image hole the
+  same collapse opened on Invariant A.
+
+  This page rather than a new one on purpose: it is the fixture's allowlisted entry, so it
+  is the file where the false positive was worst — and where a regression would be caught
+  by an assertion that already exists ("does NOT flag an allowlisted server-only page")
+  rather than only by the one written for it.
+-->
+<script>
+  console.log('a page script that has nothing to do with auth');
+</script>

@@ -84,9 +84,11 @@
       "workers_dev": false,
 
       // Production must have exactly one URL. Version preview URLs are a per-PR
-      // review affordance and staging turns them on below; on production they
-      // would be an unlisted, unindexed, un-gated copy of the live site — the
-      // same shape of problem as the Azure hostname, self-inflicted.
+      // review affordance, and this project stopped having per-PR previews — so
+      // they are off here AND off on staging below, rather than off here and on
+      // there as this comment used to say. On production one would be an
+      // unlisted, unindexed, un-gated copy of the live site — the same shape of
+      // problem as the Azure hostname, self-inflicted.
       "preview_urls": false,
 
       // The hostname is declared here rather than clicked into a dashboard, so the

@@ -25,12 +25,15 @@ export default defineConfig({
   // so there is no server-side session store in that design at all.
   session: false,
 
-  // Every page is prerendered today, so this build is a pile of static files
-  // that the Worker serves through its assets binding. The adapter is here
-  // anyway, ahead of the first on-demand route, because it is what makes
-  // `export const prerender = false` a one-line change rather than a
-  // migration — and because `wrangler dev` then runs the same `workerd` that
-  // production runs, which is half the reason for being on Workers at all.
+  // Most pages are still prerendered and served straight off the assets
+  // binding, which is the point: the landing page and robots.txt reach a
+  // visitor without the Worker executing at all. PK-19 added the first routes
+  // that cannot be — sign-in, sign-up, /account and the two /auth/* endpoints
+  // all read a request body or write session cookies — so the adapter, which
+  // was here ahead of them precisely so `export const prerender = false` would
+  // be a one-line change rather than a migration, is now doing that job as
+  // well as the assets one. `wrangler dev` runs the same `workerd` production
+  // runs, which is half the reason for being on Workers at all.
   //
   // Astro's adapter layer is the exit door: swapping hosts is this import and
   // the wrangler config, nothing under src/.

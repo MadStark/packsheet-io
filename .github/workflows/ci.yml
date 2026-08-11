@@ -71,9 +71,13 @@ jobs:
         with:
           version: 2.113.0
 
-      # Starts the stack and waits for it. Shared with both deploy workflows, because all
-      # three run `npm test` and the suite refuses to skip its row-level-security tests
-      # when there is no database.
+      # Starts the stack, waits for it, and exports its API URL and publishable key as
+      # PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY for every step after it. Shared
+      # with both deploy workflows, because all three run `npm test`: the suite refuses
+      # to skip its row-level-security tests when there is no database, and PK-19's
+      # auth-flow tests refuse to run at all without those two variables. Both halves
+      # live in the action rather than here so a fourth workflow cannot acquire one and
+      # miss the other.
       - uses: ./.github/actions/local-database
 
       # Vitest, kept as its own step rather than folded into `npm run check` so the

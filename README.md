@@ -54,11 +54,20 @@ free of an auth check is both a performance and a hosting-cost decision: auth pr
 by monthly active user, and 250k of these anonymous reads counted as MAUs would cost
 thousands of dollars a month against a compute bill in the single digits. All auth SDK usage is
 required to go through one choke point, `src/lib/auth/`, and `tests/anonymous-read-path.test.ts`
-builds the site and fails if **any** module outside that directory imports into it, or imports
-an auth SDK directly. It is an edge rule, not a "can an anonymous route reach it" rule: a
+builds the site and fails if a module outside that directory imports into it, or imports an
+auth SDK directly. It is an edge rule, not a "can an anonymous route reach it" rule: a
 `client:only` island's import is stripped from the server module, so a route-rooted walk would
-miss the one case that costs the most. It runs in CI's required `check` job, which is a
-different thing from the `npm run check` script — the job runs the script _and_ the tests.
+miss the one case that costs the most. The modules genuinely entitled to import auth — six of
+them, since PK-19 — are enumerated one line at a time in `AUTH_CONSUMERS` in that file, and
+each entry is checked rather than trusted: it must name a file that exists, must still hold
+the import it was granted for, and must never reach a browser. That last one is separately
+enforced over the whole client bundle, not just over the allowlist: no module a browser
+downloads may be, or import, any `@supabase/*` package. Nothing needs Supabase in a browser
+today — the anonymous read path uses it on the SERVER, where one rendered response can be
+cached for every reader — so that is a rule the codebase can keep, and the failure message
+says what to do when a ticket genuinely needs to change it. All of it runs in CI's required
+`check` job, which is a different thing from the `npm run check` script — the job runs the
+script _and_ the tests.
 
 ## Development
 
@@ -70,8 +79,15 @@ out of step. If you use `nvm`, `fnm`, `mise` or `asdf`, it is picked up automati
 nvm use          # or: fnm use / mise install
 npm install
 cp .env.example .env
+npm run db:start                     # this worktree's own Supabase stack
+# copy API_URL and PUBLISHABLE_KEY from its output into .env, as
+# PUBLIC_SUPABASE_URL and PUBLIC_SUPABASE_ANON_KEY — see .env.example
 npm run dev      # http://localhost:4321
 ```
+
+Those two values are not optional and there is no default for them: every worktree runs
+its own stack on its own ports, so the right values are specific to your checkout. Without
+them the auth routes answer 500 and `npm test` fails at `tests/auth-flow.test.ts` saying so.
 
 Node 22 is the current LTS line and is what builds every artifact that reaches staging
 and production. Running a different major will still work for most things, and npm will
@@ -94,8 +110,9 @@ locally is necessary but not sufficient. Run both before opening a pull request.
 ### Reproducing staging and production locally
 
 Changes travel **local → staging → live**, and the local stage can impersonate either of
-the other two. There is exactly one environment-dependent behaviour in the codebase —
-`PUBLIC_SITE_ENV`, which decides whether the site is indexable:
+the other two. `PUBLIC_SITE_ENV` is the environment-dependent behaviour that changes what
+the built HTML SAYS — it decides whether the site is indexable — and it is the one these
+scripts reproduce:
 
 ```bash
 npm run build             # local: robots.txt disallows everything
@@ -114,9 +131,12 @@ build produces, and CI does not yet assert it.
 
 ### The one thing staging cannot reproduce
 
-`PUBLIC_SITE_ENV` is the only environment-dependent behaviour in the **codebase**, and the
-local stage can reproduce all of it. What the local stage cannot reproduce is the gate in
-front of staging itself:
+`PUBLIC_SITE_ENV` is reproducible locally, and so is the other build-time switch PK-19
+added: `PUBLIC_GOOGLE_AUTH_ENABLED` decides whether the "Continue with Google" control is
+compiled in at all, and setting it in `.env` reproduces either answer exactly. What is
+environment-dependent and NOT reproducible is which Supabase project a build points at —
+production and staging have separate ones, with separate data — and, more sharply, the
+gate in front of staging itself:
 
 **`staging.packsheet.io` sits behind Cloudflare Access.** An unlisted visitor is stopped at
 the edge and the Worker never executes — so staging is not "unindexed and hopefully
@@ -191,12 +211,17 @@ that environment's Supabase project:
   values `.env.example` describes for local development, but for the hosted project.
   Vite inlines every `PUBLIC_`-prefixed variable into the client bundle at **build**
   time, so these have to be present before `npm run build` runs, not merely before the
-  deploy step — see the `Build` step's own env block in `deploy-staging.yml` /
-  `deploy-production.yml`. Both are safe to hold as plain secrets rather than anything
-  more careful: they are public by design (see `src/lib/auth/index.ts`'s doc comment
-  for the key that is NOT this one), scoped per environment purely so staging and
-  production build against their own separate Supabase projects rather than because
-  either value is sensitive on its own.
+  deploy step. They belong on the `Build` step's own `env:` and **nowhere else** — not at
+  job level, not at workflow level. That is not tidiness: the same job runs `npm test` a
+  few steps earlier, and that suite creates users and deletes accounts. A step-level
+  `env:` cannot reach a step that already ran, which is the entire separation between
+  the destructive suite and a hosted project; `tests/deploy-workers.test.ts` asserts the
+  scoping and `tests/rls-enabled.test.ts` asserts that nothing above step level sets
+  them. Both values are safe to hold as plain secrets rather than anything more careful:
+  they are public by design (see `src/lib/auth/index.ts`'s doc comment for the key that
+  is NOT this one), scoped per environment purely so staging and production build against
+  their own separate Supabase projects rather than because either value is sensitive on
+  its own.
 - `PUBLIC_GOOGLE_AUTH_ENABLED` — same build-time mechanism as the pair above,
   alongside them in both workflows' `Build` step, gating whether the "Continue with
   Google" button is compiled into the built site at all (see
@@ -240,13 +265,23 @@ There is no `supabase/seed.sql`, so a reset leaves you with an empty database. T
 was deliberate while there was no schema to seed against; now that the core tables
 exist it is simply not written yet.
 
-**`npm test` needs that stack running.** Part of the suite exercises row-level security
-by querying the database as the `anon` and `authenticated` roles, which nothing can
-stand in for — a policy is a SQL expression, and only Postgres can say what it does. Those
-tests fail, with the command to fix it, when there is no database. They deliberately do
-not skip: a guardrail that reports green while not running is worse than no guardrail,
-and this one is what stands between a private pack and the public internet. CI starts the
-stack in the same job for the same reason.
+**`npm test` needs that stack running, and needs `.env` pointing at it.** Part of the
+suite exercises row-level security by querying the database as the `anon` and
+`authenticated` roles, which nothing can stand in for — a policy is a SQL expression, and
+only Postgres can say what it does. Another part signs users up, signs them in and deletes
+accounts through the real module in `src/lib/auth/`. Both fail, with the command to fix
+it, when there is no database or no `PUBLIC_SUPABASE_*` pair. They deliberately do not
+skip: a guardrail that reports green while not running is worse than no guardrail, and
+these are what stand between a private pack and the public internet.
+
+CI never reads a `.env`. `.github/actions/local-database` starts the stack **and** exports
+that stack's own URL and publishable key under those two names, so every workflow that
+runs the suite is pointed at a throwaway database by construction. That is a safety
+property rather than a convenience: the suite deletes accounts, and the two deploy
+workflows run it in the same job that holds the hosted Supabase secrets. Those secrets are
+set on the `Build` step's own `env:` and nowhere else — a step-level scope cannot reach the
+`npm test` step that ran before it — and both halves are asserted in
+`tests/rls-enabled.test.ts` and `tests/deploy-workers.test.ts`.
 
 ```bash
 npm run db:start && npm test
@@ -258,8 +293,8 @@ Row-level security is the authorization boundary, not a second opinion on one. A
 pack is unreachable with the `anon` key because the database returns zero rows for it,
 so a bug in the share page cannot leak one.
 
-Two things follow, and both are enforced by `tests/rls-enabled.test.ts` across every
-table in `public` rather than by review:
+Three things follow, and all three are enforced by `tests/rls-enabled.test.ts` across
+every table and function in `public` rather than by review:
 
 - **A new table must enable RLS and carry policies in the migration that creates it.**
   Not in a follow-up — a table shipped without policies is not "unprotected pending
@@ -274,6 +309,14 @@ table in `public` rather than by review:
   anonymous RPC endpoint the moment it exists. This matters most for the one function
   people reach for under pressure: a `SECURITY DEFINER` helper added to break policy
   recursion would sit on the anonymous surface running as its owner.
+
+  The exception, because there is one and pretending otherwise would make the rule read
+  as broken: a function that IS the API rather than a helper — `delete_own_account()`,
+  which `src/lib/auth/index.ts` calls as an RPC — has to live in a schema PostgREST
+  serves, so `public` is correct placement. What makes it safe is the explicit
+  `revoke … from public` / `grant execute … to authenticated` block, which the rule's
+  own reasoning is what motivates. A definer function anywhere must also pin
+  `search_path`; that is swept too.
 
 Two things this does **not** yet do, so they are not mistaken for solved:
 
@@ -291,8 +334,11 @@ Two things this does **not** yet do, so they are not mistaken for solved:
 
 ### What still is not covered
 
-The production deploy checks that `packsheet.io` answers 200 with HTML and an indexable
-`robots.txt` immediately after each release, so a broken release is loud within a minute.
+The production deploy checks that `packsheet.io` answers 200 with HTML, serves an
+indexable `robots.txt`, and redirects a signed-out visitor from `/account` to `/sign-in` —
+that last one being the check that proves the Worker ran at all rather than the assets
+binding alone, which is what a missing Supabase secret would otherwise hide. So a broken
+release is loud within a minute.
 Nothing checks **between** releases: if something breaks on a quiet Tuesday, no deploy runs
 to notice. An external uptime monitor is the missing third leg, and is not yet set up.
 

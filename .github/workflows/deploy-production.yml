@@ -74,6 +74,15 @@ jobs:
       # what protects the artifact.
       #
       # This is the last gate before production. Nothing downstream re-checks.
+      #
+      # THIS STEP HAS NO `env:` AND MUST NEVER ACQUIRE ONE NAMING A HOSTED SECRET. The
+      # suite creates users and deletes accounts; the local stack the action above
+      # started is the only thing it may ever do that to, and this is the workflow where
+      # getting that wrong deletes real people's accounts. It reaches the local stack
+      # because the action exported PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY into
+      # `$GITHUB_ENV`, and it stays pointed there because production's own hosted values
+      # are set on the Build step's own `env:` below — a step-level scope, which cannot
+      # reach backwards to this one. tests/deploy-workers.test.ts asserts both halves.
       - run: npm test
 
       # Before the build and before the deploy, so the schema a release needs is in

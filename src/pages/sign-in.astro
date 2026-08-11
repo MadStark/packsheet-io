@@ -10,14 +10,18 @@ import {
   AUTH_CALLBACK_PATH,
   GOOGLE_AUTH_ENABLED,
   googleAuthUnavailableMessage,
+  nextFromForm,
+  NEXT_PARAM,
   SIGN_UP_PATH,
   safeNextPath,
 } from '../lib/auth-routes';
 
 // `next` is trusted nowhere near its raw form — see safeNextPath's own comment for the
-// open-redirect it closes. Read once, reused for the redirect target, the hidden form
-// field (so a POST carries the same value the GET arrived with) and the sign-up link.
-const next = safeNextPath(Astro.url.searchParams.get('next'));
+// open-redirect it closes. Seeded from the query string here, which is what a GET has,
+// and re-read from the submitted form in the POST branch below (see nextFromForm). One
+// value from then on: the redirect target, the hidden field the next submission will
+// carry, and the sign-up link.
+let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
 
 // Set by src/pages/auth/callback.ts redirecting back here after a failed OAuth
 // exchange — see that file. Never Supabase's or Google's own error text, which is a
@@ -36,6 +40,12 @@ let errorMessage: string | null = oauthFailed
 // that pair.
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
+  // Re-read from the submitted form, falling back to the query string. The hidden field
+  // below is the carrier; the query string is the safety net for a form that lost it.
+  // See nextFromForm in src/lib/auth-routes.ts for why the field is read rather than
+  // deleted, and note that both sources go through safeNextPath — a hidden field is not
+  // a trusted one.
+  next = nextFromForm(form, Astro.url);
   const intent = form.get('intent');
 
   if (intent === 'google') {
@@ -49,7 +59,7 @@ if (Astro.request.method === 'POST') {
       errorMessage = googleAuthUnavailableMessage('in');
     } else {
       const callbackUrl = new URL(AUTH_CALLBACK_PATH, Astro.url.origin);
-      callbackUrl.searchParams.set('next', next);
+      callbackUrl.searchParams.set(NEXT_PARAM, next);
       const result = await getGoogleAuthorizationUrl({
         cookies: Astro.cookies,
         request: Astro.request,
@@ -98,7 +108,7 @@ if (Astro.request.method === 'POST') {
     }
 
     <form method="POST" class="mt-8 space-y-4">
-      <input type="hidden" name="next" value={next} />
+      <input type="hidden" name={NEXT_PARAM} value={next} />
       <div>
         <label for="email" class="text-ink-2 block text-sm">Email</label>
         <input
@@ -145,7 +155,7 @@ if (Astro.request.method === 'POST') {
 
           <form method="POST">
             <input type="hidden" name="intent" value="google" />
-            <input type="hidden" name="next" value={next} />
+            <input type="hidden" name={NEXT_PARAM} value={next} />
             <button
               type="submit"
               class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"

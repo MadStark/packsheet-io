@@ -3,8 +3,8 @@
  *
  * This module is the ONLY place in the codebase that is allowed to import or
  * re-export an authentication SDK. Every other module — every page, every layout,
- * every component, middleware in either spelling Astro accepts (`src/middleware.ts`
- * or `src/middleware/index.ts`) if one is ever added — must reach it by going
+ * every component, and middleware in either spelling Astro accepts (`src/middleware.ts`,
+ * which this project now has, or `src/middleware/index.ts`) — must reach it by going
  * through here.
  *
  * Why this matters more than the usual "keep your SDK usage in one place" advice:
@@ -30,6 +30,18 @@
  * pass. That is what keeps the list from being a hole. Whatever ends up on it, the auth
  * SDK cannot be served to a visitor, because a module served to a visitor is one the
  * client pass transformed and that rule reports it.
+ *
+ * Invariant D has a second half, added after a review shipped the whole GoTrue stack to
+ * every anonymous reader with the rule above green: NO module in the client pass may BE,
+ * or import, any `@supabase/*` package. The first half is anchored on this directory and
+ * that allowlist, and neither is touched by a component that writes
+ * `import { createBrowserClient } from '@supabase/ssr'` and hydrates itself — the SDK is
+ * an ordinary runtime dependency now, so the choke point is not the only door to it. Note
+ * that this is NOT a ban on `@supabase/*` outside this directory: that would contradict
+ * the Ref 55 decision recorded below and break the share page before it is written. It is
+ * a rule about the RUNTIME. Nothing needs Supabase in a browser today; when something
+ * genuinely does, the failure message says in as many words that it is a deliberate
+ * revisit rather than a build to get past.
  *
  * It separately fails if `@clerk/*` is imported by ANY module in that graph other than
  * one in this directory — not merely by a first-party module under src/. That scoping
@@ -110,11 +122,12 @@
  * exempt; anywhere else, describe the key rather than naming it.
  *
  * And it is NAME-BOUND. It knows the spellings listed in PRIVILEGED_KEY_PATTERNS in that
- * test file and no others, and this project has not yet chosen the name its secret will
- * ship under — there is no Supabase entry in .env.example and no such secret in
- * wrangler.jsonc. Whoever adds one must check the name against that list and add it if it
- * is missing. A name-bound rule that does not know the name in use is not a weaker
- * guardrail; it is a permanently green one, while the key ships.
+ * test file and no others, and this project still holds no privileged Supabase secret in
+ * any environment for it to have been checked against — every Supabase value .env.example
+ * and the two deploy workflows carry is a PUBLIC_ one (the project URL and the publishable
+ * anon key), and wrangler.jsonc declares no such secret. Whoever introduces one must check its name against that list and
+ * add it if it is missing. A name-bound rule that does not know the name in use is not a
+ * weaker guardrail; it is a permanently green one, while the key ships.
  *
  * The corollary of an edge rule, and the thing to get right when adding files here:
  * this directory must contain NOTHING that an anonymous route could legitimately
@@ -141,12 +154,16 @@
  * The SDK is installed and this file is its only caller, which is what keeps Invariant
  * A meaningful rather than aspirational: everything below reaches Supabase through
  * `createServerClient`, and nothing outside this directory reaches any of it except
- * through the functions exported here — and, today, nothing outside this directory
- * reaches them at all, because AUTH_CONSUMERS is still empty and the routes that will
- * use these functions are a later task's. The API is
- * deliberately thin: build a request-scoped client, perform one auth operation, hand
- * back a result. Nothing here accumulates state across requests, and nothing here is a
- * place to grow a second, parallel copy of what `@supabase/supabase-js` already does.
+ * through the functions exported here. Six modules do now — `src/middleware.ts`, the
+ * sign-in, sign-up and account pages, and the two `/auth/*` endpoints — each named on
+ * AUTH_CONSUMERS with a comment saying what it does with auth, and each server-only. The
+ * API is deliberately thin: build a request-scoped client, perform one auth operation,
+ * hand back a result. Nothing here accumulates state across requests, and nothing here is
+ * a place to grow a second, parallel copy of what `@supabase/supabase-js` already does.
+ *
+ * One export is not an operation: `signUpErrorMessage`, a pure function from an error CODE
+ * to the sentence a visitor is shown. It is exported so the account-enumeration rule it
+ * enforces can be asserted from outside this module rather than read off the source.
  *
  * Failures a caller can expect in normal operation — a wrong password, an expired
  * code, a duplicate sign-up — are returned as `{ ok: false, error }` rather than
@@ -191,6 +208,110 @@ export type AuthResult<T = unknown> = ({ ok: true } & T) | { ok: false; error: s
  * told which half was wrong to try again.
  */
 const BAD_CREDENTIALS_MESSAGE = 'Incorrect email or password.';
+
+/**
+ * The single message shown for every sign-up this project will not complete, whatever
+ * the reason — including, and especially, "that address is already registered".
+ *
+ * WHY THIS IS NOT THE SAME QUESTION AS THE PARAGRAPH ABOVE, and why an earlier version of
+ * this file was wrong to treat it as a milder one. It used to return Supabase's own
+ * `error.message` verbatim here, reasoning that a project's "Confirm email" setting
+ * already governs whether a duplicate address is disclosed. That reasoning is sound and
+ * the conclusion does not follow, because THIS project has confirmations OFF
+ * (`enable_confirmations = false` in supabase/config.toml). With confirmations on, GoTrue
+ * deliberately answers a duplicate sign-up with a fake success and sends a "you already
+ * have an account" email, so nothing leaks to the form. With them off there is nobody to
+ * email, so it answers `422 user_already_exists` — and a form that renders that string
+ * back is an oracle: type an address, read the answer, learn whether that person has an
+ * account here. Free, unauthenticated, one request per guess, on the one page designed to
+ * accept a stranger's input. The neutral sign-in message above closed exactly this hole
+ * one function down; the sign-up form reopened it.
+ *
+ * It says "sign in instead" for every failure rather than only for the duplicate one,
+ * which is what keeps it from being a hint. A visitor who genuinely does have an account
+ * is told the useful thing; a visitor who does not is told the same thing, and learns
+ * nothing from being told it.
+ *
+ * WHAT THIS DOES NOT CLOSE, stated here rather than left for somebody to discover and
+ * treat as a regression. With confirmations off, a duplicate address fails and a fresh one
+ * succeeds — so the OUTCOME still distinguishes them however carefully the message is
+ * worded, and no amount of copy-editing changes that. Closing it completely means
+ * answering a duplicate sign-up with the same "check your inbox" screen a genuine pending
+ * sign-up gets, which is what GoTrue does when confirmations are ON and is the reason
+ * turning them on is the real fix. That is a product decision with a real cost — somebody
+ * who already has an account is told to wait for an email that will not arrive — and it
+ * belongs to whoever turns confirmations on rather than being smuggled in here. What this
+ * constant does close is the free-text half: the response no longer NAMES the reason, so
+ * the oracle costs an attacker a full request per guess and yields one bit rather than a
+ * sentence, and no provider string reaches a visitor from this path at all.
+ */
+const SIGN_UP_UNAVAILABLE_MESSAGE =
+  'We could not create an account with those details. If you already have an account, sign ' +
+  'in instead.';
+
+/**
+ * The exception, and the reason this is a mapping rather than one flat message. A password
+ * the server rejects as too weak is a fact about what the visitor just typed, not about
+ * who else is registered here — telling them costs nothing and NOT telling them is a form
+ * that refuses without saying why, which people retry with the same password.
+ *
+ * Written here rather than relayed, for the rule this whole block exists to keep: never
+ * put a provider's own error text in front of a visitor. Supabase's phrasing for this
+ * changes between versions, is not written for this audience, and — the part that
+ * matters — nothing about a string arriving from an auth server makes it safe to render
+ * once somebody decides a different branch may reach the same code path.
+ *
+ * The "6" matches `auth.minimum_password_length` in supabase/config.toml and the
+ * `minlength="6"` on the sign-up form. Three copies of one number is worse than one, and
+ * the alternative is worse still: the length is a server setting, not something a browser
+ * bundle may read, and inventing a way to plumb it here would put a Supabase config lookup
+ * on a page render to save a literal.
+ */
+const WEAK_PASSWORD_MESSAGE =
+  'That password is too weak. Use at least 6 characters — length matters more than ' +
+  'punctuation.';
+
+/** The other non-enumerating failure worth naming: the address is not a usable one. Says
+ *  nothing about whether it is registered, because it is a judgement about the string the
+ *  visitor typed rather than about the accounts table. */
+const INVALID_EMAIL_MESSAGE = 'That does not look like an email address we can use.';
+
+/** Rate limiting, which a visitor can act on (wait) and which discloses nothing. Without
+ *  this the neutral message above would send somebody who has simply tried three times in
+ *  a minute to a sign-in page they have no account on. */
+const TOO_MANY_ATTEMPTS_MESSAGE = 'Too many attempts just now. Wait a minute and try again.';
+
+/**
+ * What a visitor is told about a failed sign-up, chosen from the error's CODE and never
+ * from its text.
+ *
+ * The default is the neutral message, so a code this function has not heard of — a new
+ * one, a provider-specific one, anything GoTrue adds later — discloses nothing rather
+ * than falling through to whatever the server happened to say. That polarity is the whole
+ * design: an unrecognised failure must be silent about the accounts table, not verbose.
+ *
+ * `user_already_exists` and `email_exists` are deliberately absent from the switch. They
+ * are the enumeration case, they take the default, and they are named here so that
+ * somebody adding a case for them has to read this sentence first.
+ *
+ * Exported, unlike everything else in this file that is not an operation, so that
+ * tests/auth-flow.test.ts can assert the mapping from OUTSIDE the module — that an
+ * unrecognised code and the duplicate-address code produce the identical sentence is the
+ * property that matters, and reading it off the source is not the same as pinning it.
+ */
+export function signUpErrorMessage(code: string | undefined): string {
+  switch (code) {
+    case 'weak_password':
+      return WEAK_PASSWORD_MESSAGE;
+    case 'email_address_invalid':
+      return INVALID_EMAIL_MESSAGE;
+    case 'over_email_send_rate_limit':
+    case 'over_request_rate_limit':
+      return TOO_MANY_ATTEMPTS_MESSAGE;
+    default:
+      return SIGN_UP_UNAVAILABLE_MESSAGE;
+  }
+}
 
 /**
  * Reads a public Supabase configuration value at CALL time rather than at module load.
@@ -458,11 +579,12 @@ export async function signUpWithPassword(params: {
     email: params.email,
     password: params.password,
   });
-  // Not routed through BAD_CREDENTIALS_MESSAGE: sign-up failures (a weak password, a
-  // rate limit) are not the enumeration-sensitive case sign-in is, and Supabase's own
-  // "Confirm email" setting already governs whether a duplicate address is disclosed
-  // here — that is a project setting, not something this function should second-guess.
-  if (error) return { ok: false, error: error.message };
+  // Mapped from the error CODE, never relayed from its text — see signUpErrorMessage and
+  // SIGN_UP_UNAVAILABLE_MESSAGE above. This function used to return `error.message`
+  // verbatim on the reasoning that sign-up is not the enumeration-sensitive case sign-in
+  // is; with `enable_confirmations = false` it is exactly that case, and the form was an
+  // account-enumeration oracle for as long as it was.
+  if (error) return { ok: false, error: signUpErrorMessage(error.code) };
   return { ok: true, user: data.user };
 }
 
@@ -519,6 +641,27 @@ export async function exchangeCodeForSession(params: {
   return { ok: true, user: data.user };
 }
 
+/**
+ * Ends THIS device's session and nothing else.
+ *
+ * `scope: 'local'` is passed explicitly because `supabase-js` defaults to `'global'`,
+ * which revokes every refresh token the user holds — so clicking "Sign out" on a library
+ * computer would also sign them out of their phone, their laptop and any tab they left
+ * open, silently, with no indication that is what the button did. That is not what "sign
+ * out" means to the person pressing it, and a default is a poor reason to mean something
+ * else.
+ *
+ * WHAT IS GIVEN UP BY NOT DOING IT GLOBALLY, said plainly because there is a real case for
+ * the other choice: a global sign-out is the "I think somebody has my session" button, and
+ * this is not it. The thing to build for that is a deliberate, labelled "sign out
+ * everywhere" control on the account page — which can call this same module with the other
+ * scope — rather than making the ordinary control do it invisibly. Changing a password
+ * already revokes other sessions on Supabase's side, which covers the compromise case
+ * people actually reach for.
+ *
+ * `'local'` still revokes this session's own refresh token server-side, so the cookies
+ * cleared below cannot be replayed. It is not a client-only forget.
+ */
 export async function signOut({
   cookies,
   request,
@@ -527,7 +670,7 @@ export async function signOut({
   request: Request;
 }): Promise<AuthResult> {
   const client = createAuthClient(cookies, request);
-  const { error } = await client.auth.signOut();
+  const { error } = await client.auth.signOut({ scope: 'local' });
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
@@ -541,10 +684,14 @@ export async function signOut({
  * else" guarantee from Postgres itself, the same way row-level security gets it for
  * ordinary reads and writes — no elevated key ever has to exist for this to work.
  *
- * The migration that creates `delete_own_account` is another task's job; this function
- * is written against that contract (a zero-argument RPC, callable by `authenticated`,
- * that deletes the calling user and everything RLS says belongs to them) so that both
- * halves can land independently and meet in the middle.
+ * The migration that creates it landed with this function, in
+ * supabase/migrations/20260811000000_account_deletion.sql — the two were written against
+ * one contract (a zero-argument RPC, callable by `authenticated`, that deletes the calling
+ * user and everything they own) so they could land independently and meet in the middle,
+ * and they have. Read that migration before changing this call: it explains why the
+ * function deletes five tables by name rather than letting `auth.users` cascade, and why
+ * widening its signature to take a target id would turn a self-service delete into an
+ * unauthenticated one.
  */
 export async function deleteOwnAccount({
   cookies,
