@@ -377,6 +377,49 @@ export async function adminSqlWith<T extends Record<string, unknown> = Record<st
   }
 }
 
+/** The signature `inRolledBackTransaction` hands to its callback. */
+export type AdminSql = <T extends Record<string, unknown> = Record<string, unknown>>(
+  text: string,
+  params?: unknown[],
+) => Promise<T[]>;
+
+/**
+ * One connection, one transaction, always rolled back.
+ *
+ * For assertions that cannot be made by reading the catalogue, because the question is
+ * about an object that does not exist yet: "what would a function created in `public`
+ * right now be granted to?" is not answerable from `pg_proc` — the answer lives in
+ * `pg_default_acl`, and reading that raw means reimplementing Postgres's own
+ * default-privilege resolution in TypeScript and being wrong about it. Creating the
+ * object and asking `has_function_privilege` measures the thing itself.
+ *
+ * ROLLBACK rather than a `drop` at the end, so a failing assertion in the middle still
+ * leaves nothing behind — a probe function stranded in `public` would be picked up by
+ * the catalogue sweeps in rls-enabled.test.ts and fail every later run for the wrong
+ * reason. The rollback is nested inside its own `try` so that `end()` runs even if the
+ * rollback itself fails; nothing is swallowed.
+ */
+export async function inRolledBackTransaction<T>(run: (sql: AdminSql) => Promise<T>): Promise<T> {
+  const client = new pg.Client({ connectionString: localDatabase().dbUrl });
+  await client.connect();
+
+  const sql: AdminSql = async <R extends Record<string, unknown>>(
+    text: string,
+    params: unknown[] = [],
+  ) => (await client.query(text, params)).rows as R[];
+
+  try {
+    await client.query('begin');
+    return await run(sql);
+  } finally {
+    try {
+      await client.query('rollback');
+    } finally {
+      await client.end();
+    }
+  }
+}
+
 /**
  * The pack tree, ordered, as one PostgREST request.
  *

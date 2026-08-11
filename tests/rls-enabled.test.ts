@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { adminSql } from './support/local-database';
+import { adminSql, inRolledBackTransaction } from './support/local-database';
 
 /**
  * The sweep: what must be true of EVERY table in `public`, not just today's four.
@@ -208,6 +208,166 @@ describe('no function in public is callable by anon', () => {
       .filter((f) => f.anon_can_execute)
       .map((f) => f.function_name);
     expect(callable).toEqual([]);
+  });
+});
+
+/**
+ * The sweep above is correct and, until PK-57, could not see the environment it guards.
+ *
+ * `public.delete_own_account()` shipped to `packsheet-staging` EXECUTE-able by `anon`
+ * while the assertion directly above this comment stayed green — because it runs against
+ * the LOCAL stack, and the two databases did not agree about what a newly created
+ * function is granted to. Measured on the same day, on the same migration:
+ *
+ *     local     delete_own_account  {postgres=X/postgres,authenticated=X/postgres}
+ *     staging   delete_own_account  {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}
+ *
+ * The difference is `pg_default_acl`. A hosted Supabase project ships with
+ *
+ *     alter default privileges in schema public
+ *       grant execute on functions to anon, authenticated, service_role;
+ *
+ * so a function is created there with `anon=X` attached as a NAMED grant, on top of the
+ * PUBLIC grant every `create function` carries. The migration's `revoke all on function
+ * ... from public` removed one of those two and read as though it had removed both. The
+ * local stack's own defaults are narrower — no named grant on functions at all — so
+ * locally the same revoke really was sufficient, and the test really did pass.
+ *
+ * `20260811120000_public_grant_hardening.sql` removes those default privileges, which is
+ * what lets the sweep above mean the same thing in both places. Everything below exists
+ * to keep that true: an assertion on the defaults themselves, and — because reading
+ * `pg_default_acl` and predicting Postgres's resolution from it is exactly the kind of
+ * reasoning that produced this bug — a probe that creates a real object and measures it.
+ *
+ * These run against whatever database the suite is pointed at. Against staging as it
+ * stood when PK-57 was written, the probe fails.
+ */
+describe('nothing created in public is granted to a Data API role by default', () => {
+  /** The three roles PostgREST can authenticate a request as. */
+  const DATA_API_ROLES = ['anon', 'authenticated', 'service_role'] as const;
+
+  /**
+   * `postgres` is the role migrations are applied as — `supabase db push` connects as it,
+   * and every object in `public` on both hosted projects is owned by it — so its entry is
+   * the one that decides what this project's own migrations create.
+   *
+   * The `supabase_admin` entry is deliberately out of scope. It is not ours to alter
+   * (`postgres` is not a member of it on a hosted project) and it governs only objects
+   * created BY `supabase_admin`, which nothing in this repository does. If the platform
+   * ever creates one in `public` anyway, the catalogue sweeps above are what see it —
+   * they ask about objects that exist, not about defaults.
+   */
+  const MIGRATION_ROLE = 'postgres';
+
+  const defaultPrivileges = () =>
+    adminSql<{ grantor: string; object_type: string; acl: string }>(
+      `select pg_get_userbyid(d.defaclrole) as grantor,
+              d.defaclobjtype::text as object_type,
+              d.defaclacl::text as acl
+         from pg_default_acl d
+         join pg_namespace n on n.oid = d.defaclnamespace
+        where n.nspname = 'public'`,
+    );
+
+  // The guard this file demands of every sweep. An empty result would pass the assertion
+  // below having inspected nothing — and here that is a reachable state rather than a
+  // theoretical one: it is what the schema looks like if the hardening migration's
+  // `alter default privileges` statements never ran.
+  it('finds default privilege entries for public, so the sweep is not passing over nothing', async () => {
+    const ours = (await defaultPrivileges()).filter((e) => e.grantor === MIGRATION_ROLE);
+    expect(
+      ours.length,
+      `no pg_default_acl entry in public for ${MIGRATION_ROLE} — did the hardening migration run?`,
+    ).toBeGreaterThan(0);
+  });
+
+  it('leaves no standing grant to anon, authenticated or service_role', async () => {
+    const offending = (await defaultPrivileges())
+      .filter((e) => e.grantor === MIGRATION_ROLE)
+      .filter((e) => DATA_API_ROLES.some((role) => e.acl.includes(`${role}=`)));
+    expect(offending).toEqual([]);
+  });
+
+  /**
+   * The probe, and the assertion PK-57 actually turns on.
+   *
+   * Two measurements of one function, in a transaction that is thrown away:
+   *
+   *   1. Before any revoke, `anon` CAN execute it. That is the guard — not a nicety. If a
+   *      fresh function in `public` were unreachable by anon to begin with, this probe
+   *      could never fail and the assertion below would prove nothing. It is also the
+   *      property that makes a FORGOTTEN revoke loud: the sweep at the top of this
+   *      section catches it on the next CI run rather than after a deploy. That reach is
+   *      the built-in PUBLIC grant, which the hardening migration deliberately leaves
+   *      alone for exactly this reason.
+   *
+   *   2. After `revoke all ... from public` — the idiom every migration in this
+   *      repository uses — `anon` CANNOT. This is the half that was false on staging,
+   *      where a named `anon=X` survived the revoke and no local test could see it.
+   */
+  it('leaves a function in public reachable only through PUBLIC, so revoking PUBLIC is enough', async () => {
+    await inRolledBackTransaction(async (sql) => {
+      await sql(
+        `create function public.__anon_grant_probe() returns int language sql as 'select 1'`,
+      );
+
+      const measure = () =>
+        sql<{ acl: string | null; anon_can_execute: boolean }>(
+          `select p.proacl::text as acl,
+                  has_function_privilege('anon', p.oid, 'EXECUTE') as anon_can_execute
+             from pg_proc p
+             join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public' and p.proname = '__anon_grant_probe'`,
+        );
+
+      const [born] = await measure();
+      expect(
+        born?.anon_can_execute,
+        'a function created in public was not anon-executable even before any revoke, so this probe cannot fail and proves nothing',
+      ).toBe(true);
+
+      await sql('revoke all on function public.__anon_grant_probe() from public');
+
+      const [revoked] = await measure();
+      expect(
+        revoked?.anon_can_execute,
+        `revoking PUBLIC left anon holding EXECUTE by name — acl ${revoked?.acl}. This is the hosted default privileges being back; see 20260811120000_public_grant_hardening.sql.`,
+      ).toBe(false);
+    });
+  });
+
+  /**
+   * The same question about tables, which is where it bites harder.
+   *
+   * A hosted project's default privileges hand `anon` `arwdDxtm` on a new table in
+   * `public` — TRUNCATE included, which row level security cannot refuse. That is why the
+   * core-schema migration has to open its grants block with four `revoke all on
+   * public.<table> from anon, authenticated, service_role` lines, and why a fifth table
+   * added without a fifth revoke would be a hole no policy could close.
+   *
+   * The local stack was never identical here either: its defaults granted `anon` `Dxtm`
+   * — no read or write, but TRUNCATE and MAINTAIN, both of which the grants sweep above
+   * treats as unacceptable on an existing table and neither of which anything checked on
+   * a future one.
+   */
+  it('leaves a table created in public with nothing at all for anon', async () => {
+    await inRolledBackTransaction(async (sql) => {
+      await sql('create table public.__anon_grant_probe (id int)');
+
+      const [row] = await sql<{ acl: string | null; privileges: string[] }>(
+        `select c.relacl::text as acl,
+                array(
+                  select privilege
+                    from unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) as privilege
+                   where has_table_privilege('anon', c.oid, privilege)
+                ) as privileges
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'public' and c.relname = '__anon_grant_probe'`,
+      );
+
+      expect(row?.privileges, `a new table in public arrives with acl ${row?.acl}`).toEqual([]);
+    });
   });
 });
 
