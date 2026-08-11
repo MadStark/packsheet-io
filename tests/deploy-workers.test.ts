@@ -119,6 +119,8 @@ const isTest = (s: Step) => executable(s.run).trim() === 'npm test';
 const isWranglerAction = (s: Step) => (s.uses ?? '').startsWith('cloudflare/wrangler-action');
 const isMigrate = (s: Step) => /(^|\/|\s)supabase(\.sh)? db push\b/.test(executable(s.run));
 const isVerify = (s: Step) => executable(s.run).includes('verify-release.sh');
+/** PK-57: the anonymous RPC call made against the hosted project after `db push`. */
+const isAnonRpcCheck = (s: Step) => /rpc\/delete_own_account/.test(executable(s.run));
 
 /**
  * The two deploy workflows. There is no third: per-pull-request previews were
@@ -323,11 +325,26 @@ describe('environment selection', () => {
     },
   );
 
+  /**
+   * PK-57 added the second step that legitimately needs these: the anonymous RPC call
+   * that asks the just-migrated project whether `anon` was refused. Asking a hosted
+   * project a question about a hosted project cannot be done without naming it.
+   *
+   * The exception is narrow on purpose, and none of what this rule protects is given up.
+   * It is keyed on the predicate rather than on a step name, so it cannot be widened by
+   * renaming a step into it. The check still has to carry the pair on its OWN `env:` —
+   * hoisting to job or workflow level remains a failure here and in
+   * tests/rls-enabled.test.ts, which is the edit that would point the account-deleting
+   * suite at production. And the check runs after `npm test`, asserted in "step order",
+   * so even a step-scoped value cannot reach backwards to it.
+   */
+  const mayNameTheHostedProject = (step: Step) => isBuild(step) || isAnonRpcCheck(step);
+
   it.each(DEPLOYS)(
-    'sets it on the Build step alone in $file, so npm test never sees a hosted project',
+    'sets it on the build and hosted-check steps alone in $file, so npm test never sees a hosted project',
     ({ file, job }) => {
       const elsewhere = stepsOf(file, job)
-        .filter((step) => !isBuild(step))
+        .filter((step) => !mayNameTheHostedProject(step))
         .flatMap((step) =>
           Object.keys(step.env ?? {})
             .filter((name) => SUPABASE_BUILD_INPUTS.includes(name))
@@ -430,6 +447,47 @@ describe('step order', () => {
     const step = stepsOf(file, job).find(isMigrate);
     expect(step?.env?.PROJECT_REF).toBe('${{ secrets.SUPABASE_PROJECT_REF }}');
     expect(executable(step?.run)).not.toMatch(/[a-z]{20}/); // no bare project ref inline
+  });
+
+  /**
+   * PK-57: the only check in this repository that looks at a HOSTED project.
+   *
+   * Every database guardrail runs inside `npm test`, which is pointed at a throwaway
+   * local stack by construction — rls-enabled.test.ts asserts that from two directions,
+   * because pointing the account-deleting suite at a real project is the worse failure.
+   * The cost is that nothing observes the database a release just migrated, and PK-57 is
+   * what that costs: a sweep forbidding anon EXECUTE on functions in `public` stayed green
+   * locally for as long as it took someone to ask staging directly.
+   *
+   * Keyed on `db push` rather than on a filename, like every other rule here, so a third
+   * workflow that migrates a project inherits the obligation instead of having to
+   * remember it. Asserted for ORDER as well as existence: run before the push and it
+   * would be reporting on the previous release's schema.
+   */
+  it.each(DEPLOYS)('$file asks the hosted project whether anon was refused', ({ file, job }) => {
+    const steps = stepsOf(file, job);
+    const migrate = steps.findIndex(isMigrate);
+    const check = steps.findIndex(isAnonRpcCheck);
+
+    expect(migrate).toBeGreaterThanOrEqual(0);
+    expect(check, 'no step calls the RPC anonymously after db push').toBeGreaterThan(migrate);
+
+    const step = steps[check];
+    // Its own env, never inherited — the same step-level scoping that keeps `npm test`
+    // away from a hosted project. And no service-role key anywhere near it: the question
+    // is what an anonymous stranger can do, so a privileged key would answer the wrong one.
+    expect(step.env?.PUBLIC_SUPABASE_URL).toBe('${{ secrets.PUBLIC_SUPABASE_URL }}');
+    expect(step.env?.PUBLIC_SUPABASE_ANON_KEY).toBe('${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}');
+    expect(JSON.stringify(step.env ?? {})).not.toMatch(/SERVICE_ROLE|SECRET_KEY/);
+
+    // A 2xx must fail the job. This is the assertion the whole step exists for: staging
+    // answered 204 to exactly this request while every test was green.
+    expect(executable(step.run)).toMatch(/exit 1/);
+
+    // Neither excused nor conditional — one line away from a gate that reports and never
+    // blocks, which is the shape this suite exists to refuse.
+    expect(step['continue-on-error']).toBeUndefined();
+    expect(step.if).toBeUndefined();
   });
 });
 

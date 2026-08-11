@@ -104,6 +104,56 @@ jobs:
           scripts/supabase.sh link --project-ref "$PROJECT_REF"
           scripts/supabase.sh db push
 
+      # The half of PK-57 that nothing in this repository could reach.
+      #
+      # `npm test` above runs against the throwaway local stack — deliberately, and
+      # asserted from two directions in tests/rls-enabled.test.ts — which means every
+      # database guardrail this project has is blind to the project it just migrated.
+      # That gap IS PK-57: the sweep forbidding anon EXECUTE on functions in `public`
+      # reported green locally while `delete_own_account()` was anon-callable on staging,
+      # because the two databases disagreed about what a new function is granted to.
+      # 20260811120000_public_grant_hardening.sql removes the disagreement; this step is
+      # what notices if it ever returns, on the only database where it can.
+      #
+      # The publishable key and nothing else — no JWT, no service-role key — because that
+      # is precisely the request a stranger can make, which is the question being asked.
+      # Safe against production as well as staging: with no JWT `auth.uid()` is null, so
+      # the function's five statements match nothing even if the grant is wrong. A 2xx is
+      # the bug itself (staging answered 204), and a 404 means the migrations this job
+      # just reported pushing are not actually there.
+      #
+      # Anything else — 401, 403 — is the refusal we want, and is NOT enumerated as a
+      # pass list: a check that fails closed on an unfamiliar status would block releases
+      # the day PostgREST changes a code, and this step exists to catch a grant, not to
+      # police status codes.
+      - name: Verify anon cannot reach the account-deletion RPC
+        env:
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -X POST "$PUBLIC_SUPABASE_URL/rest/v1/rpc/delete_own_account" \
+            -H "apikey: $PUBLIC_SUPABASE_ANON_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{}' -o anon-rpc-body.json -w '%{http_code}')
+          echo "HTTP $status"
+          cat anon-rpc-body.json || true
+          echo
+          rm -f anon-rpc-body.json
+          case "$status" in
+            2*)
+              echo "::error::anon executed public.delete_own_account() (HTTP $status). PK-57 has regressed — the named grant is back."
+              exit 1
+              ;;
+            404)
+              echo "::error::public.delete_own_account() is not on this project (HTTP 404), but db push reported success."
+              exit 1
+              ;;
+            *)
+              echo "anon was refused with HTTP $status, as required."
+              ;;
+          esac
+
       - name: Build
         env:
           # Deliberately not "production", so robots.txt emits Disallow: / and staging

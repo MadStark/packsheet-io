@@ -107,6 +107,44 @@ jobs:
           scripts/supabase.sh link --project-ref "$PROJECT_REF"
           scripts/supabase.sh db push
 
+      # See the long note on the same step in deploy-staging.yml. In short: `npm test`
+      # above only ever sees the throwaway local stack, so every database guardrail this
+      # project has is blind to the project it just migrated — which is exactly how PK-57
+      # shipped. This asks the hosted project the one question the local suite cannot.
+      #
+      # Production reaches this step carrying more risk than staging, not less: it is at
+      # the baseline migration today, so this run is the one that first creates
+      # `public.delete_own_account()` there. Anonymous, with the publishable key only —
+      # `auth.uid()` is null without a JWT, so nothing is deleted even if the grant is
+      # wrong; a 2xx IS the wrong grant, and a 404 means the push did not land.
+      - name: Verify anon cannot reach the account-deletion RPC
+        env:
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -X POST "$PUBLIC_SUPABASE_URL/rest/v1/rpc/delete_own_account" \
+            -H "apikey: $PUBLIC_SUPABASE_ANON_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{}' -o anon-rpc-body.json -w '%{http_code}')
+          echo "HTTP $status"
+          cat anon-rpc-body.json || true
+          echo
+          rm -f anon-rpc-body.json
+          case "$status" in
+            2*)
+              echo "::error::anon executed public.delete_own_account() (HTTP $status). PK-57 has regressed — the named grant is back."
+              exit 1
+              ;;
+            404)
+              echo "::error::public.delete_own_account() is not on this project (HTTP 404), but db push reported success."
+              exit 1
+              ;;
+            *)
+              echo "anon was refused with HTTP $status, as required."
+              ;;
+          esac
+
       - name: Build
         env:
           # PUBLIC_SITE_ENV drives robots.txt. Only the literal string "production"
