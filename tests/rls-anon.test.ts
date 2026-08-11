@@ -4,7 +4,6 @@ import {
   countingFetch,
   createUser,
   packTreeQuery,
-  toOne,
   type TestUser,
 } from './support/local-database';
 import { createPack, type PackFixture } from './support/fixtures';
@@ -191,8 +190,7 @@ describe('a pack with 40 items loads in one round trip', () => {
     expect(categories).toHaveLength(1);
     expect(categories[0].pack_items).toHaveLength(40);
     // Embedded through to the closet, so nothing needs a second query for names.
-    const gear = toOne<{ name: string }>(categories[0].pack_items[0].gear_items);
-    expect(gear.name).toBeTruthy();
+    expect(categories[0].pack_items[0].gear_items?.name).toBeTruthy();
   });
 });
 
@@ -221,7 +219,6 @@ describe('the frozen snapshot carries only what renders the item', () => {
     expect(data?.snapshot).not.toHaveProperty('notes');
     expect(data?.snapshot).not.toHaveProperty('url');
     // Still a usable display record.
-    expect(data?.snapshot.name).toBe('Gear 1');
-    expect(data?.snapshot.weight_unit).toBe('g');
+    expect(data?.snapshot).toMatchObject({ name: 'Gear 1', weight_unit: 'g' });
   });
 });

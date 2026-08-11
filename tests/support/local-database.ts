@@ -44,8 +44,19 @@ import { spawnSync } from 'node:child_process';
 import { createHmac, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
+import type { Database } from '../../src/lib/database.types';
+import { POSTGREST_MAJOR, type PacksheetClient } from '../../src/lib/supabase';
+
+/**
+ * Re-exported so the fixtures and the tests have one name to reach for. The type itself
+ * lives in src/lib/, not here: the schema and the PostgREST version it carries are facts
+ * about the database, and will be just as true for the query code Refs 4 and 37 write.
+ * Declaring it in tests/ would guarantee a second, hand-written copy later — and a
+ * hand-written copy is the one thing the drift check cannot see.
+ */
+export type { PacksheetClient };
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -231,9 +242,13 @@ const clientOptions = (accessToken?: string, fetchImpl?: typeof fetch) => ({
 });
 
 /** A stranger: exactly what a browser loading a share page has. */
-export function anonClient(fetchImpl?: typeof fetch): SupabaseClient {
+export function anonClient(fetchImpl?: typeof fetch): PacksheetClient {
   const { apiUrl, anonKey } = localDatabase();
-  return createClient(apiUrl, anonKey, clientOptions(undefined, fetchImpl));
+  return createClient<Database, { PostgrestVersion: typeof POSTGREST_MAJOR }>(
+    apiUrl,
+    anonKey,
+    clientOptions(undefined, fetchImpl),
+  );
 }
 
 /**
@@ -257,7 +272,7 @@ export interface TestUser {
   id: string;
   email: string;
   /** Authenticated as this user, through PostgREST, under RLS. */
-  client: SupabaseClient;
+  client: PacksheetClient;
 }
 
 /**
@@ -276,36 +291,12 @@ export async function createUser(label = 'user'): Promise<TestUser> {
   return {
     id,
     email,
-    client: createClient(apiUrl, anonKey, clientOptions(mintAccessToken(id, jwtSecret))),
+    client: createClient<Database, { PostgrestVersion: typeof POSTGREST_MAJOR }>(
+      apiUrl,
+      anonKey,
+      clientOptions(mintAccessToken(id, jwtSecret)),
+    ),
   };
-}
-
-/**
- * Read a to-one embed.
- *
- * `select('gear_items(name)')` across a many-to-one foreign key returns a single
- * OBJECT from PostgREST, but supabase-js cannot know that without a generated
- * `Database` type: with an untyped client it falls back to inferring an array for
- * every embed, and `data.gear_items.name` is a compile error against a runtime value
- * that is exactly what it looks like.
- *
- * Generating those types is Ref 52 ("wire supabase gen types typescript into CI so
- * schema drift fails the build"), which is a separate, Ready ticket. This is the seam
- * until it lands — one named place to delete, rather than a cast at each call site.
- */
-export function toOne<T>(embedded: unknown): T {
-  // Checked, because an unchecked cast here would launder the two values it is most
-  // likely to be handed. `undefined` arrives whenever a `.single()` above it errored,
-  // and turns into `Cannot read properties of undefined` several lines later; an ARRAY
-  // arrives if the embed ever becomes to-many, which is precisely the confusion this
-  // helper exists to paper over, and would surface as `expected undefined to be ...`
-  // rather than as the schema change it is.
-  if (embedded === null || typeof embedded !== 'object' || Array.isArray(embedded)) {
-    throw new Error(
-      `Expected a to-one embed, got ${Array.isArray(embedded) ? 'an array' : String(embedded)}`,
-    );
-  }
-  return embedded as T;
 }
 
 /**
@@ -394,7 +385,7 @@ export async function adminSqlWith<T extends Record<string, unknown> = Record<st
  * Without an explicit order PostgREST emits no ORDER BY at all — which would leave the
  * ordering index, and the `position` column itself, as decoration.
  */
-export function packTreeQuery(client: SupabaseClient, slug: string) {
+export function packTreeQuery(client: PacksheetClient, slug: string) {
   return client
     .from('packs')
     .select(PACK_TREE_SELECT)

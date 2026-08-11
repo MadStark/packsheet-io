@@ -181,6 +181,7 @@ npm run db:start     # this worktree's Postgres, Auth, PostgREST, Studio
 npm run db:status
 npm run db:reset     # replay every migration from empty
 npm run db:stop
+npm run db:types     # regenerate src/lib/database.types.ts from that stack
 npm run db -- migration new <name>   # any other CLI command
 ```
 
@@ -205,6 +206,49 @@ migration is another migration.
 There is no `supabase/seed.sql`, so a reset leaves you with an empty database. That
 was deliberate while there was no schema to seed against; now that the core tables
 exist it is simply not written yet.
+
+#### Generated types
+
+`src/lib/database.types.ts` is generated from the schema by `npm run db:types` and
+committed. It is what makes `supabase-js` describe rows rather than hand back `any`: a
+column renamed in a migration otherwise goes on type-checking at every call site that
+still says the old name, and returns `undefined` at request time on the page a stranger
+is reading.
+
+So the file has to be regenerated whenever a migration changes a table, and
+`tests/database-types.test.ts` fails when it has not been — comparing the committed file
+against types generated from the schema in your local stack, and printing the diff and
+`npm run db:types` when they differ. It compares rather than rewrites, on purpose: a CI
+step that regenerated the file quietly would keep the types correct and leave the call
+sites naming columns that no longer exist, which is the breakage the check exists to
+find. For the same reason, `scripts/database-types.sh` compares by default and only
+writes when asked by name.
+
+"The schema in your local stack" is deliberately not the same claim as "the migrations".
+A stack one migration behind agrees with the committed types about a schema nobody has,
+which is a green tick rather than a guardrail — so the script refuses to generate or
+compare until `supabase migration list` says the stack is level with
+`supabase/migrations/`, and tells you to `npm run db:reset` when it is not. It also
+refuses a generation that came back describing no tables at all: `supabase gen types`
+exits 0 emitting `Database = {}` against a database whose migrations did not apply, and
+that agrees with a committed file generated the same way.
+
+Generation runs against the **local** stack rather than a hosted project on purpose.
+Generated from hosted, this would report drift whenever somebody had hand-edited that
+database — a real problem, but a different one, arriving on the pull request of whoever
+pushed next.
+
+The file is excluded from Prettier and ESLint and committed byte for byte as the CLI
+emits it — formatting it would make the committed content a function of the Prettier
+version too, so a Prettier upgrade would read as a schema change. `tsc --noEmit` still
+reads it, which is the point of having it.
+
+One fact in this chain is hand-written rather than generated: `POSTGREST_MAJOR` in
+`src/lib/supabase.ts`. `supabase gen types` does not emit the PostgREST version, so
+supabase-js otherwise assumes 12 and decides what queries compile on that basis, against
+a Data API running 14. That number is the one claim the drift check cannot verify — it
+compares generated output against generated output, never against the running server — so
+it is pinned separately, against the `Server` header the API reports.
 
 **`npm test` needs that stack running.** Part of the suite exercises row-level security
 by querying the database as the `anon` and `authenticated` roles, which nothing can
