@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { adminSql } from './support/local-database';
+import { adminSql, inRolledBackTransaction } from './support/local-database';
 
 /**
  * The sweep: what must be true of EVERY table in `public`, not just today's four.
@@ -208,6 +208,282 @@ describe('no function in public is callable by anon', () => {
       .filter((f) => f.anon_can_execute)
       .map((f) => f.function_name);
     expect(callable).toEqual([]);
+  });
+});
+
+/**
+ * The sweep above is correct and, until PK-57, could not see the environment it guards.
+ *
+ * `public.delete_own_account()` shipped to `packsheet-staging` EXECUTE-able by `anon`
+ * while the assertion directly above this comment stayed green — because it runs against
+ * the LOCAL stack, and the two databases did not agree about what a newly created
+ * function is granted to. Measured on the same day, on the same migration:
+ *
+ *     local     delete_own_account  {postgres=X/postgres,authenticated=X/postgres}
+ *     staging   delete_own_account  {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}
+ *
+ * The difference is `pg_default_acl`. A hosted Supabase project ships with
+ *
+ *     alter default privileges in schema public
+ *       grant execute on functions to anon, authenticated, service_role;
+ *
+ * so a function is created there with `anon=X` attached as a NAMED grant, on top of the
+ * PUBLIC grant every `create function` carries. The migration's `revoke all on function
+ * ... from public` removed one of those two and read as though it had removed both. The
+ * local stack's own defaults are narrower — no named grant on functions at all — so
+ * locally the same revoke really was sufficient, and the test really did pass.
+ *
+ * `20260811120000_public_grant_hardening.sql` removes those default privileges, which is
+ * what lets the sweep above mean the same thing in both places. Everything below exists
+ * to keep that true: an assertion on the defaults themselves, and — because reading
+ * `pg_default_acl` and predicting Postgres's resolution from it is exactly the kind of
+ * reasoning that produced this bug — a probe that creates a real object and measures it.
+ *
+ * These run against whatever database the suite is pointed at. Against staging as it
+ * stood when PK-57 was written, the probe fails.
+ */
+describe('nothing created in public is granted to a Data API role by default', () => {
+  /** The three roles PostgREST can authenticate a request as. */
+  const DATA_API_ROLES = ['anon', 'authenticated', 'service_role'] as const;
+
+  /**
+   * `postgres` is the role migrations are applied as — `supabase db push` connects as it,
+   * and every object in `public` on both hosted projects is owned by it — so its entry is
+   * the one that decides what this project's own migrations create.
+   *
+   * The `supabase_admin` entry is deliberately out of scope. It is not ours to alter
+   * (`postgres` is not a member of it on a hosted project) and it governs only objects
+   * created BY `supabase_admin`, which nothing in this repository does. If the platform
+   * ever creates one in `public` anyway, the catalogue sweeps above are what see it —
+   * they ask about objects that exist, not about defaults.
+   */
+  const MIGRATION_ROLE = 'postgres';
+
+  /**
+   * `defaclnamespace = 0` is not a null-safety nicety — it is a whole second way to write
+   * the grant this section exists to forbid.
+   *
+   * `alter default privileges in schema public grant ... ` stores the schema's oid.
+   * `alter default privileges grant ...`, with no `in schema` at all, stores 0 and
+   * applies to EVERY schema, `public` included. An inner join on `pg_namespace` drops
+   * those rows silently, and the hardening migration — which only ever writes `in schema
+   * public` — cannot remove them either. So one line typed into the hosted SQL editor
+   * without `in schema` would make every new function in `public` anon-executable while
+   * this sweep reported green. Neither project has such a row today; the left join is
+   * what keeps that a fact rather than an assumption.
+   */
+  const defaultPrivileges = () =>
+    adminSql<{ grantor: string; object_type: string; scope: string; acl: string }>(
+      `select pg_get_userbyid(d.defaclrole) as grantor,
+              d.defaclobjtype::text as object_type,
+              coalesce(n.nspname, 'every schema') as scope,
+              d.defaclacl::text as acl
+         from pg_default_acl d
+    left join pg_namespace n on n.oid = d.defaclnamespace
+        where n.nspname = 'public' or d.defaclnamespace = 0`,
+    );
+
+  /**
+   * The guard this file demands of every sweep — but read what it does and does not say.
+   *
+   * These entries are created by the PLATFORM's grant when the project is provisioned,
+   * not by anything in this repository, and they survive the hardening migration because
+   * revoking three roles from them leaves `{postgres=…}` behind rather than emptying the
+   * row. A revoke-only `alter default privileges` creates no row where none existed, so
+   * their ABSENCE means this database never had the defaults to begin with — in which
+   * case the sweep below is inspecting nothing and must not report a pass. It does not
+   * mean the migration failed to run, and an earlier version of this message said so and
+   * would have sent the next reader after the wrong cause.
+   */
+  it('finds default privilege entries for public, so the sweep is not passing over nothing', async () => {
+    const ours = (await defaultPrivileges()).filter((e) => e.grantor === MIGRATION_ROLE);
+    expect(
+      ours.length,
+      `no pg_default_acl entry reaching public for ${MIGRATION_ROLE}: this database never had the platform defaults, so the sweep below would pass having checked nothing`,
+    ).toBeGreaterThan(0);
+  });
+
+  it('leaves no standing grant to anon, authenticated or service_role', async () => {
+    const offending = (await defaultPrivileges())
+      .filter((e) => e.grantor === MIGRATION_ROLE)
+      .filter((e) => DATA_API_ROLES.some((role) => e.acl.includes(`${role}=`)));
+    expect(offending).toEqual([]);
+  });
+
+  /**
+   * The probe — and an honest note about which database it can catch PK-57 on.
+   *
+   * Two measurements of one function, in a transaction that is thrown away:
+   *
+   *   1. Before any revoke, `anon` CAN execute it. That is the guard — not a nicety. If a
+   *      fresh function in `public` were unreachable by anon to begin with, this probe
+   *      could never fail and the assertion below would prove nothing. It is also the
+   *      property that makes a FORGOTTEN revoke loud: the sweep at the top of this
+   *      section catches it on the next CI run rather than after a deploy. That reach is
+   *      the built-in PUBLIC grant, which the hardening migration deliberately leaves
+   *      alone for exactly this reason.
+   *
+   *   2. After `revoke all ... from public` — the idiom every migration in this
+   *      repository uses — `anon` CANNOT. This is the half that was false on staging,
+   *      where a named `anon=X` survived the revoke and no local test could see it.
+   *
+   * WHERE THIS DOES AND DOES NOT FIRE. Pointed at a hosted project in the state PK-57
+   * describes, step 2 fails. Pointed at the LOCAL stack it is green both before and
+   * after the fix, because the CLI already revokes the function default locally — the
+   * pre-fix local entry is `{postgres=X/postgres}`, with no named `anon` to survive
+   * anything. So this is not the assertion that would have caught PK-57 in CI; the
+   * static check in tests/migration-hygiene.test.ts is, and it needs no database at all.
+   * What this one does is make the CONVENTION checkable wherever the suite is aimed, and
+   * keep it checkable if the platform defaults ever come back.
+   */
+  it('leaves a function in public reachable only through PUBLIC, so revoking PUBLIC is enough', async () => {
+    await inRolledBackTransaction(async (sql) => {
+      await sql(
+        `create function public.__anon_grant_probe() returns int language sql as 'select 1'`,
+      );
+
+      // Separating "I could not measure" from "I measured, and it is bad". Without this,
+      // a probe whose object is not where the catalogue query looks reports the PK-57
+      // regression message with `acl undefined` — the most alarming line in the suite,
+      // produced by a condition that has nothing to do with grants.
+      const measure = async (phase: string) => {
+        const [row] = await sql<{ acl: string | null; anon_can_execute: boolean }>(
+          `select p.proacl::text as acl,
+                  has_function_privilege('anon', p.oid, 'EXECUTE') as anon_can_execute
+             from pg_proc p
+             join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public' and p.proname = '__anon_grant_probe'`,
+        );
+        expect(
+          row,
+          `the probe function is not in public ${phase} — the probe did not measure a privilege, it failed to find its own object`,
+        ).toBeDefined();
+        return row;
+      };
+
+      const born = await measure('immediately after being created');
+      expect(
+        born.anon_can_execute,
+        'a function created in public was not anon-executable even before any revoke, so this probe cannot fail and proves nothing',
+      ).toBe(true);
+
+      await sql('revoke all on function public.__anon_grant_probe() from public');
+
+      const revoked = await measure('after revoking PUBLIC');
+      expect(
+        revoked.anon_can_execute,
+        `revoking PUBLIC left anon holding EXECUTE by name — acl ${revoked.acl}. This is the hosted default privileges being back; see 20260811120000_public_grant_hardening.sql.`,
+      ).toBe(false);
+    });
+  });
+
+  /**
+   * The same question about tables, which is where it bites harder.
+   *
+   * A hosted project's default privileges hand `anon` `arwdDxtm` on a new table in
+   * `public` — TRUNCATE included, which row level security cannot refuse. That is why the
+   * core-schema migration has to open its grants block with four `revoke all on
+   * public.<table> from anon, authenticated, service_role` lines, and why a fifth table
+   * added without a fifth revoke would be a hole no policy could close.
+   *
+   * The local stack was never identical here either: its defaults granted `anon` `Dxtm`
+   * — no read or write, but TRUNCATE and MAINTAIN, both of which the grants sweep above
+   * treats as unacceptable on an existing table and neither of which anything checked on
+   * a future one.
+   */
+  it('leaves a table created in public with nothing at all for anon', async () => {
+    await inRolledBackTransaction(async (sql) => {
+      await sql('create table public.__anon_grant_probe (id int)');
+
+      const [row] = await sql<{ acl: string | null; anon: string[]; owner: string[] }>(
+        `select c.relacl::text as acl,
+                array(
+                  select privilege
+                    from unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) as privilege
+                   where has_table_privilege('anon', c.oid, privilege)
+                ) as anon,
+                array(
+                  select privilege
+                    from unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) as privilege
+                   where has_table_privilege($1, c.oid, privilege)
+                ) as owner
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'public' and c.relname = '__anon_grant_probe'`,
+        [MIGRATION_ROLE],
+      );
+
+      expect(
+        row,
+        'the probe table is not in public — the probe did not measure a privilege, it failed to find its own object',
+      ).toBeDefined();
+
+      // The same "this probe can fail" guard the function probe above carries, in the
+      // only form available here: there is no before-and-after to compare, so what is
+      // asserted instead is that `has_table_privilege` over this oid answers TRUE for
+      // somebody. Without it, a query that silently stopped matching anything would
+      // report an empty privilege list for anon and read as a pass.
+      expect(
+        row.owner,
+        `has_table_privilege reports nothing for ${MIGRATION_ROLE} on a table it just created, so an empty result for anon proves nothing`,
+      ).not.toEqual([]);
+
+      expect(row.anon, `a new table in public arrives with acl ${row.acl}`).toEqual([]);
+    });
+  });
+
+  /**
+   * The assumption the migration rests on, asserted rather than argued.
+   *
+   * `revoke` only removes grants made by the current role (or one it belongs to), and
+   * `alter default privileges` without `for role` only reaches the current role's own
+   * entry. Both of the hardening migration's halves therefore only work on objects that
+   * `postgres` owns — which is every object in `public` today, on both hosted projects
+   * and locally. If the platform, or a future migration run under a different role, ever
+   * put an object in `public` owned by something else, the migration's sweep would
+   * remove nothing from it and still report success.
+   *
+   * The sweeps above would catch the resulting grant, so this is not a hole; it is the
+   * premise being written down where it can go red instead of being reasoned about again.
+   */
+  it('has nothing in public owned by a role the migrations cannot revoke from', async () => {
+    const objects = await adminSql<{ name: string; owner: string; kind: string }>(
+      `select relname as name, pg_get_userbyid(relowner) as owner, relkind::text as kind
+         from pg_class c
+         join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'S')
+      union all
+       select proname, pg_get_userbyid(proowner), 'f'
+         from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public'`,
+    );
+
+    expect(objects.length, 'no objects found in public at all').toBeGreaterThan(0);
+    expect(objects.filter((o) => o.owner !== MIGRATION_ROLE)).toEqual([]);
+  });
+
+  /**
+   * The grant that IS wanted, pinned to exactly one role.
+   *
+   * The sweep at the top of this file asks only about `anon`, so it is satisfied by a
+   * `delete_own_account()` that `service_role` can also call — which is the state both
+   * hosted projects were in, and which the hardening migration deliberately ends. The
+   * reasoning is in that migration: `auth.uid()` is null for a service-role token exactly
+   * as it is for the publishable key, so the call would be the same no-op, and this
+   * project has decided never to hold a service-role key at all. A standing grant to a
+   * key that should not exist is a grant nobody is auditing.
+   */
+  it('grants delete_own_account to authenticated and to no other Data API role', async () => {
+    const [row] = await adminSql<Record<(typeof DATA_API_ROLES)[number], boolean>>(
+      `select has_function_privilege('anon', 'public.delete_own_account()', 'EXECUTE') as anon,
+              has_function_privilege('authenticated', 'public.delete_own_account()', 'EXECUTE') as authenticated,
+              has_function_privilege('service_role', 'public.delete_own_account()', 'EXECUTE') as service_role`,
+    );
+
+    expect(row.authenticated, 'authenticated cannot call it — the feature is broken').toBe(true);
+    expect(row.anon).toBe(false);
+    expect(row.service_role).toBe(false);
   });
 });
 
