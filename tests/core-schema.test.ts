@@ -505,6 +505,37 @@ describe('the constrained columns refuse values outside their domain', () => {
     expect(position.error?.code).toBe('23514');
   });
 
+  // The engine-side half of this rule lives in src/lib/totals.ts, which throws on an
+  // item flagged both worn and consumable because base, worn and consumable must
+  // partition the pack exactly. This is the schema's half of the same rule — and it
+  // must refuse only the combination, not either flag alone, which is why both halves
+  // are asserted here: a constraint that accidentally forbade `worn` by itself would
+  // still pass a test that checked only the refusal.
+  it('refuses an item flagged both worn and consumable, but accepts either alone', async () => {
+    const pack = await createPack(owner, { itemCount: 1 });
+
+    const both = await owner.client
+      .from('pack_items')
+      .update({ worn: true, consumable: true })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(both.error?.code).toBe('23514');
+
+    const wornOnly = await owner.client
+      .from('pack_items')
+      .update({ worn: true, consumable: false })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(wornOnly.error).toBeNull();
+
+    const consumableOnly = await owner.client
+      .from('pack_items')
+      .update({ worn: false, consumable: true })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(consumableOnly.error).toBeNull();
+  });
+
   // The shape check on snapshot. Without it `{}` satisfies reference-or-snapshot, and
   // an item that renders as nothing is one PATCH away through the ordinary Data API.
   it('refuses a snapshot that could not render the item', async () => {
