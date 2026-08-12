@@ -463,15 +463,37 @@ enabled = true
 # block (this file's top-level values, with anything set here layered on top) and
 # pushes that. A key this block does not mention is not "left alone" on the hosted
 # project; it is silently SET to whatever the top-level value happens to be, because
-# the top-level values in this file are deliberately LOCAL DEV settings (Mailpit on
-# `local_smtp`, `site_url = "http://localhost:4321"`, `enable_confirmations = false`,
-# `max_frequency = "1s"`, `[auth.rate_limit] email_sent = 2`). Every one of those five
-# is therefore re-stated explicitly below for both remotes — not because TOML requires
-# it, but because omitting even one of them is a silent, unannounced reset of a live
-# project to a localhost value, indistinguishable in the diff from "no change to that
-# key". tests/supabase-remote-config.test.ts pins all five for every `[remotes.*]`
-# block this file defines, specifically so a third remote added later inherits the
-# guardrail without anyone having to remember to extend a hand-written list.
+# the top-level values in this file are deliberately LOCAL DEV settings. There are SIX
+# of those, and each has its own outage shape:
+#
+#   1. Mailpit on `local_smtp` rather than a configured `[auth.email.smtp]` — hosted
+#      mail stops being sent to anyone at all.
+#   2. `site_url = "http://localhost:4321"` — every link inside every confirmation and
+#      reset email points at a laptop nobody else can reach.
+#   3. `enable_confirmations = false` — anyone can sign in as anyone else's unverified
+#      address.
+#   4. `max_frequency = "1s"` — the per-address floor between sends effectively goes.
+#   5. `[auth.rate_limit] email_sent = 2` — hosted auth mail is capped at TWO AN HOUR,
+#      which is the exact fault PK-56 exists to fix, reinstated in silence.
+#   6. `additional_redirect_urls` — a hosted project's allow-list is replaced by the two
+#      LOOPBACK callback URLs above, so its own origin is no longer on its own
+#      allow-list and GoTrue quietly falls back to `site_url` for every redirect.
+#
+# Every one of those six is therefore re-stated explicitly below for both remotes — not
+# because TOML requires it, but because omitting even one of them is a silent,
+# unannounced reset of a live project to a localhost value, indistinguishable in the
+# diff from "no change to that key". tests/supabase-remote-config.test.ts pins all six
+# for every `[remotes.*]` block this file defines, specifically so a third remote added
+# later inherits the guardrail without anyone having to remember to extend a
+# hand-written list.
+#
+# IT DID NOT ALWAYS PIN ALL SIX, and this comment claimed it did. Until the PK-56 review
+# the per-remote checks covered four of them and said "five"; numbers 5 and 6 above — the
+# two whose leak is quietest — were pinned by nothing, so deleting
+# `[remotes.production.auth.rate_limit]` would have capped production auth mail at two an
+# hour with a green build. If you are adding a seventh local-only value, add the
+# assertion in the same commit and correct the count here; a list in prose that nothing
+# executes is how this drifted the first time.
 #
 # The nesting below is ordinary TOML table nesting with `remotes.<name>.` prepended to
 # the path the top-level key already uses — `[auth.email.smtp]` above becomes
@@ -524,9 +546,10 @@ additional_redirect_urls = [
 enable_confirmations = true
 # Overrides the top-level `"1s"`, which is a local-only value meant to make manual
 # testing fast against Mailpit. GoTrue's own default is 60 seconds; with the hourly cap
-# below deliberately opened up, this per-address floor becomes one of only two real
-# limits left on how fast confirmation/reset email can be sent (see the rate_limit
-# comment below for the other).
+# below deliberately opened up, this per-address floor is the ONLY limit left on how
+# fast RESET email can be sent, and one of two on confirmation email. See the
+# `[remotes.staging.auth.rate_limit]` comment below for why those two differ and for
+# what the remaining exposure on reset mail actually is.
 max_frequency = "60s"
 
 [remotes.staging.auth.email.smtp]
@@ -548,13 +571,36 @@ sender_name = "Packsheet"
 # legitimately send in an hour — the product owner's decision is that Supabase must NOT
 # be the thing that limits how much confirmation/reset email goes out. Resend's own
 # quota is the ceiling instead, and Resend alerts automatically at 80% and 100% of it,
-# which this repository cannot see or enforce from here. With this cap effectively
-# disabled, the two guards actually doing the limiting work are `sign_in_sign_ups`
-# above (signup/sign-in requests per IP, per 5 minutes — unrelated to email but the
-# thing that makes triggering confirmation email expensive in the first place) and
-# `max_frequency` on `[remotes.staging.auth.email]` above (the per-address floor
-# between sends). Losing either of those two while this stays at 100000 removes the
-# only real limiter left.
+# which this repository cannot see or enforce from here.
+#
+# WHICH GUARDS ACTUALLY REMAIN, corrected in the PK-56 review because the earlier
+# version of this comment named a guard that does not cover half of what it was cited
+# for. The three limits in play, and the endpoints each one really reaches:
+#
+#   - `email_sent` (this key): project-wide, per hour, and the ONLY one of the three
+#     that reaches `/recover`. It also reaches `/signup` and `/user`. Set to 100000
+#     here, i.e. deliberately not a limit.
+#   - `sign_in_sign_ups` (top-level, 30 per 5 minutes per IP): `/signup` and `/token`
+#     ONLY. It never sees `/recover` — tests/auth-flow.test.ts's RATE LIMITS section
+#     says the same thing from the other direction, which is how the discrepancy was
+#     found.
+#   - `max_frequency` on `[remotes.staging.auth.email]` above: 60 seconds between sends
+#     TO THE SAME ADDRESS, on both `/signup` and `/recover`.
+#
+# So the two kinds of mail are NOT equally defended, and saying "the two guards" glossed
+# exactly that. CONFIRMATION mail has two: a stranger has to get through
+# `sign_in_sign_ups` per IP, and then the per-address floor. RESET mail has ONE — the
+# per-address floor — and that is all.
+#
+# THE RESIDUAL EXPOSURE, PLAINLY: `max_frequency` is per address, so it does not compose
+# across addresses. One machine, one IP, working through a list of N addresses draws N
+# reset emails a minute out of this project, for as long as it likes, and nothing in
+# this file stops it or even slows it down. That is accepted rather than overlooked —
+# the product owner's decision above is what puts the ceiling at Resend's quota, and
+# Resend's 80%/100% alerts are where it gets noticed. Do not "fix" it by lowering this
+# number; if it ever needs fixing, the thing to add is a captcha (`[auth.captcha]`,
+# commented out above) or a limiter in front of src/pages/forgot-password.astro, both of
+# which bound the sender rather than the project's ability to send.
 email_sent = 100000
 
 [remotes.production]
@@ -583,8 +629,16 @@ admin_email = "noreply@mail.packsheet.io"
 sender_name = "Packsheet"
 
 [remotes.production.auth.rate_limit]
-# Same reasoning as staging's block above: Resend's quota and its 80%/100% alerts are
-# the intended ceiling, not this number. The two guards that remain load-bearing are
-# `sign_in_sign_ups` (per IP) and `max_frequency` on `[remotes.production.auth.email]`
-# above (per address).
+# Same reasoning, and the same correction, as staging's block above: Resend's quota and
+# its 80%/100% alerts are the intended ceiling, not this number.
+#
+# What remains load-bearing is asymmetric between the two kinds of mail, which is the
+# part the earlier wording got wrong here too. CONFIRMATION mail is bounded by
+# `sign_in_sign_ups` (top-level, 30 per 5 minutes per IP, covering `/signup` and
+# `/token`) and by `max_frequency` on `[remotes.production.auth.email]` above (60s per
+# address). RESET mail is bounded by `max_frequency` and by NOTHING ELSE —
+# `sign_in_sign_ups` does not cover `/recover`, and this key, which does, is switched
+# off here on purpose. Since that floor is per address rather than per IP, a list of N
+# addresses yields N reset emails a minute from a single machine. Read staging's block
+# above for the full argument and for what to add if that ever has to change.
 email_sent = 100000

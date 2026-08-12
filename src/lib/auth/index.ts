@@ -899,6 +899,17 @@ export async function requestPasswordReset(params: {
  * `AUTH_CALLBACK_PATH` before the visitor ever reaches the form, so the link itself is the
  * proof of address, and the form has nothing left to identify.
  *
+ * THE MISSING "CURRENT PASSWORD" IS THE ONE OF THE THREE WITH A SECURITY ARGUMENT ON BOTH
+ * SIDES, and it was reviewed rather than defaulted (PK-56 review): holding a session is
+ * sufficient here, so a stolen session can change a password and revoke the owner's other
+ * sessions. The reasoning for accepting that — chiefly that the same session can already
+ * call `deleteOwnAccount` below, and that the forgot-password journey is by definition
+ * made of people who do not know their current password — and, more usefully, the two
+ * things that would REVERSE it, are written out in full in the doc comment at the top of
+ * src/pages/update-password.astro. Read that before adding a second caller: the realistic
+ * trigger for change is this function being reached from a signed-in settings screen,
+ * where the argument does not hold.
+ *
  * That also means a caller must not treat "there is no session" as this function's problem
  * to report: `src/pages/update-password.astro` checks `Astro.locals.user` and renders a
  * neutral expired-link state instead of posting into this at all. What remains for

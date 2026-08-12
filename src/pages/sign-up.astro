@@ -6,7 +6,9 @@ export const prerender = false;
 import Layout from '../layouts/Layout.astro';
 import { getGoogleAuthorizationUrl, getUser, signUpWithPassword } from '../lib/auth';
 import {
+  AUTH_CALLBACK_FAILED_MESSAGE,
   AUTH_CALLBACK_PATH,
+  AUTH_ERROR_PARAM,
   googleAuthUnavailableMessage,
   nextFromForm,
   NEXT_PARAM,
@@ -19,11 +21,15 @@ import {
 // submitted form below, and never trusted in its raw form from either source.
 let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
 
-const oauthFailed = Astro.url.searchParams.has('oauth_error');
+// The same shared, provider-neutral sentence sign-in.astro renders, for the same reason —
+// see AUTH_CALLBACK_FAILED_MESSAGE in src/lib/auth-routes.ts. Nothing in
+// src/pages/auth/callback.ts currently bounces to THIS page (every failure there goes to
+// SIGN_IN_PATH), so this branch is defensive rather than reachable; it uses the shared
+// constant anyway, because a second hand-typed wording is exactly how the two pages drift
+// and how "with Google" survived on a leg that had no Google in it.
+const authCallbackFailed = Astro.url.searchParams.has(AUTH_ERROR_PARAM);
 
-let errorMessage: string | null = oauthFailed
-  ? 'Something went wrong signing up with Google. Please try again, or use email and password below.'
-  : null;
+let errorMessage: string | null = authCallbackFailed ? AUTH_CALLBACK_FAILED_MESSAGE : null;
 
 // Shown instead of redirecting when sign-up succeeded but did NOT itself produce a
 // session — i.e. the Supabase project this build talks to has "Confirm email" on and the

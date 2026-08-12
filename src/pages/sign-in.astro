@@ -7,7 +7,9 @@ export const prerender = false;
 import Layout from '../layouts/Layout.astro';
 import { getGoogleAuthorizationUrl, signInWithPassword } from '../lib/auth';
 import {
+  AUTH_CALLBACK_FAILED_MESSAGE,
   AUTH_CALLBACK_PATH,
+  AUTH_ERROR_PARAM,
   FORGOT_PASSWORD_PATH,
   googleAuthUnavailableMessage,
   nextFromForm,
@@ -23,14 +25,21 @@ import {
 // carry, and the sign-up link.
 let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
 
-// Set by src/pages/auth/callback.ts redirecting back here after a failed OAuth
-// exchange — see that file. Never Supabase's or Google's own error text, which is a
+// Set by src/pages/auth/callback.ts redirecting back here after a callback it could not
+// complete — see that file. Never Supabase's or Google's own error text, which is a
 // neutral message away from disclosing implementation detail to whoever is looking.
-const oauthFailed = Astro.url.searchParams.has('oauth_error');
+//
+// THE MESSAGE IS IMPORTED RATHER THAN TYPED HERE, and no longer names Google, because
+// since PK-56 that callback route is also the return leg for the emailed SIGN-UP
+// CONFIRMATION link — a journey with no OAuth provider anywhere in it, which used to be
+// answered on this page with "something went wrong signing in with Google". Same reason
+// googleAuthUnavailableMessage lives in src/lib/auth-routes.ts rather than in two
+// frontmatters: the rule about what this may and may not say belongs somewhere a test can
+// pin it. See AUTH_CALLBACK_FAILED_MESSAGE's own comment, and
+// tests/auth-callback-failed-message.test.ts.
+const authCallbackFailed = Astro.url.searchParams.has(AUTH_ERROR_PARAM);
 
-let errorMessage: string | null = oauthFailed
-  ? 'Something went wrong signing in with Google. Please try again, or use email and password below.'
-  : null;
+let errorMessage: string | null = authCallbackFailed ? AUTH_CALLBACK_FAILED_MESSAGE : null;
 
 // CSRF: this POST relies on Astro's on-demand origin check (security.checkOrigin,
 // on by default and set explicitly in astro.config.mjs — see the comment there),

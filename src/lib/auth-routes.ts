@@ -168,3 +168,60 @@ export function nextFromForm(form: FormData, url: URL): string {
 export function googleAuthUnavailableMessage(action: 'in' | 'up'): string {
   return `Google sign-${action} is not available right now. Use email and password below.`;
 }
+
+/**
+ * The query parameter `src/pages/auth/callback.ts` sets on its bounce back to
+ * SIGN_IN_PATH when it could not complete a callback, and which sign-in.astro and
+ * sign-up.astro render AUTH_CALLBACK_FAILED_MESSAGE for.
+ *
+ * `auth_error`, not `oauth_error`, and the rename is the actual fix rather than tidying
+ * (PK-56 review). The old name was accurate when Google's return leg was the only thing
+ * that reached that route; since PK-56 the same route also completes the SIGN-UP
+ * CONFIRMATION link and the PASSWORD-RESET link, neither of which involves an OAuth
+ * provider at all. A parameter called `oauth_error` is what made naming Google in the
+ * copy look reasonable to write and then survive review — see the message below.
+ */
+export const AUTH_ERROR_PARAM = 'auth_error';
+
+/**
+ * What a visitor is told when `src/pages/auth/callback.ts` could not complete the
+ * callback and sent them to the sign-in page.
+ *
+ * IT MUST NOT NAME GOOGLE, and that is the defect this constant exists to fix rather
+ * than a preference. Before PK-56, one flow reached AUTH_CALLBACK_PATH — Google's return
+ * leg — and both pages hard-coded "Something went wrong signing in with Google", which
+ * was true. PK-56 pointed two more flows at the same route: the emailed SIGN-UP
+ * CONFIRMATION link and the emailed PASSWORD-RESET link. The reset leg got its own
+ * destination (callback.ts routes a failed exchange whose `next` is UPDATE_PASSWORD_PATH
+ * to the update-password page, which renders the expired-link state it already owns), but
+ * the confirmation leg did not and could not: `signUpWithPassword` deliberately builds
+ * that link with NO `?next=` (see its own comment for why a stale destination is worse
+ * than none), so `next` falls back to ACCOUNT_PATH and a failed confirmation exchange
+ * landed on the sign-in page being told about Google. Google was not involved anywhere in
+ * that journey.
+ *
+ * THAT WAS MISLEADING COPY AND NOT A LOCKOUT, which is worth stating because it decides
+ * how much this needed to change. The confirmation link points at GoTrue's own `/verify`
+ * endpoint, which marks the address confirmed and only THEN redirects to this project's
+ * callback route with a one-time code. So by the time anything here can fail, the account
+ * is already confirmed and the person can simply sign in with the password they chose;
+ * what was broken was being told an untrue reason for it. Hence a wording fix rather than
+ * a new route.
+ *
+ * WHY ONE SENTENCE FOR EVERY LEG rather than a message per flow. This route cannot tell
+ * the legs apart at the point of failure without a marker travelling in the emailed link,
+ * and adding one is not free: the local `additional_redirect_urls` in supabase/config.toml
+ * are EXACT URLs with no `?*` wildcard, so a new query parameter on a confirmation link
+ * would be rejected by GoTrue's allow-list and silently fall back to `site_url`. The
+ * honest alternative is a sentence that is true whichever leg failed, which is what this
+ * is: it names the real causes (expired, already used, opened in another browser, or
+ * cancelled at a provider) without asserting which one happened, claims nothing about
+ * whether an account was confirmed, and always leaves the sign-in form as the way
+ * forward. Pinned by tests/auth-callback-failed-message.test.ts, alongside
+ * `googleAuthUnavailableMessage` above — which DOES name Google, correctly, because it is
+ * shown only when the call to Google itself failed.
+ */
+export const AUTH_CALLBACK_FAILED_MESSAGE =
+  'We could not finish signing you in. That happens when a link has expired, has already ' +
+  'been used, or was opened in a different browser from the one that asked for it — and ' +
+  'when a sign-in is cancelled on the provider’s own screen. Sign in below to continue.';

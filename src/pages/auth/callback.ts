@@ -1,6 +1,11 @@
 import type { APIRoute } from 'astro';
 import { exchangeCodeForSession } from '../../lib/auth';
-import { safeNextPath, SIGN_IN_PATH, UPDATE_PASSWORD_PATH } from '../../lib/auth-routes';
+import {
+  AUTH_ERROR_PARAM,
+  safeNextPath,
+  SIGN_IN_PATH,
+  UPDATE_PASSWORD_PATH,
+} from '../../lib/auth-routes';
 
 // On-demand: this is the PKCE/OAuth return leg. It reads a query param and writes
 // session cookies, neither of which a prerendered file can do.
@@ -30,7 +35,7 @@ export const GET: APIRoute = async ({ url, cookies, request, redirect }) => {
   const next = safeNextPath(url.searchParams.get('next'));
 
   if (!code) {
-    return redirect(`${SIGN_IN_PATH}?oauth_error=1`, 303);
+    return redirect(`${SIGN_IN_PATH}?${AUTH_ERROR_PARAM}=1`, 303);
   }
 
   const result = await exchangeCodeForSession({ cookies, request, code });
@@ -41,7 +46,7 @@ export const GET: APIRoute = async ({ url, cookies, request, redirect }) => {
     // jars): a password-reset link opened in a DIFFERENT browser from the one that asked
     // for it has no PKCE verifier to present, so the exchange fails — and that is the
     // single most ordinary way for it to fail, because people request a reset on a laptop
-    // and open their mail on a phone. Sent to `?oauth_error=1`, those people were told
+    // and open their mail on a phone. Sent to the sign-in page, those people were told
     // "something went wrong signing in with Google", about a link that has nothing to do
     // with Google, on a page with no way back into the reset flow.
     //
@@ -53,7 +58,18 @@ export const GET: APIRoute = async ({ url, cookies, request, redirect }) => {
     // string is the open redirect safeNextPath exists to prevent, re-invented on the
     // error path.
     if (next === UPDATE_PASSWORD_PATH) return redirect(UPDATE_PASSWORD_PATH, 303);
-    return redirect(`${SIGN_IN_PATH}?oauth_error=1`, 303);
+    // AND THE BRANCH ABOVE FIXED ONLY ONE OF THE TWO NEW FLOWS, which the PK-56 review
+    // caught and this line is the other half of. `signUpWithPassword` builds the
+    // confirmation link with NO `?next=` on purpose (see its own comment), so a failed
+    // SIGN-UP confirmation exchange has `next === ACCOUNT_PATH` and lands here, not above
+    // — where the copy used to name Google for a journey Google was never part of. It is
+    // deliberately still this destination: GoTrue's `/verify` has already marked the
+    // address confirmed by the time it redirects here with a code, so the account is
+    // usable and the sign-in form IS the route forward. What was wrong was only what the
+    // page said, so the fix is AUTH_CALLBACK_FAILED_MESSAGE — one sentence that is true
+    // of every leg that arrives here, Google's included. See that constant in
+    // src/lib/auth-routes.ts for why the legs are not told apart with a marker.
+    return redirect(`${SIGN_IN_PATH}?${AUTH_ERROR_PARAM}=1`, 303);
   }
 
   return redirect(next, 303);

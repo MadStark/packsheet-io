@@ -9,15 +9,31 @@ import { fileURLToPath } from 'node:url';
  * `supabase config push` does not push a diff. It resolves the WHOLE `auth` block —
  * this file's top-level values, with whatever a `[remotes.<name>]` block sets layered
  * on top — and pushes THAT to the hosted project named by that block's `project_id`.
- * The top-level values in this file are deliberately LOCAL DEV settings: no
- * confirmation email (`enable_confirmations = false`), a one-second resend floor
- * (`max_frequency = "1s"`), a two-per-hour cap (`[auth.rate_limit] email_sent = 2`),
- * and `site_url = "http://localhost:4321"`. A `[remotes.*]` block that forgets to
- * restate even one of those does not leave the hosted project's existing setting
- * alone — it silently RESETS that one key to the local value, indistinguishable in a
- * diff from "no change". That is a live outage — hosted confirmation email going
- * dark, or a hosted project's redirect allow-list narrowing to a hostname nothing
- * external can reach — that produces no error, no failed step and no red build.
+ * The top-level values in supabase/config.toml are deliberately LOCAL DEV settings, and
+ * there are SIX of them a remote must therefore restate: Mailpit rather than
+ * `[auth.email.smtp]`, `site_url = "http://localhost:4321"`, no confirmation email
+ * (`enable_confirmations = false`), a one-second resend floor (`max_frequency = "1s"`),
+ * a two-per-hour cap (`[auth.rate_limit] email_sent = 2`), and an
+ * `additional_redirect_urls` allow-list containing nothing but two LOOPBACK callback
+ * URLs. A `[remotes.*]` block that forgets to restate even one of those does not leave
+ * the hosted project's existing setting alone — it silently RESETS that one key to the
+ * local value, indistinguishable in a diff from "no change". That is a live outage —
+ * hosted confirmation email going dark, or a hosted project's redirect allow-list
+ * narrowing to a hostname nothing external can reach — that produces no error, no
+ * failed step and no red build.
+ *
+ * ALL SIX ARE PINNED BELOW, AND UNTIL THE PK-56 REVIEW ONLY FOUR WERE — while this
+ * comment and config.toml's both claimed "all five". The two that were missing are the
+ * two whose leak is quietest, which is exactly why nobody noticed they were missing:
+ *
+ *   - `[auth.rate_limit] email_sent`. Delete `[remotes.production.auth.rate_limit]`, or
+ *     add a third remote without one, and hosted auth mail silently goes back to TWO
+ *     PER HOUR — the precise bug this whole ticket exists to fix, reinstated with CI
+ *     green.
+ *   - `auth.additional_redirect_urls`. Same deletion replaces a hosted project's
+ *     allow-list with this file's two loopback URLs, so the hosted origin is no longer
+ *     on its own allow-list at all and GoTrue quietly falls back to `site_url` for every
+ *     redirect it is asked to make.
  *
  * This file is the check that stands where CI would otherwise have nothing: it reads
  * supabase/config.toml, finds every `[remotes.*]` block that exists (not a
@@ -208,6 +224,86 @@ describe('every [remotes.*] block overrides what config push would otherwise res
     const adminEmail = get(remotes, name, 'auth', 'email', 'smtp', 'admin_email');
     expect(adminEmail, `${name} has no auth.email.smtp.admin_email`).toBeTypeOf('string');
     expect(adminEmail as string).toMatch(/@mail\.packsheet\.io$/);
+  });
+
+  /**
+   * The hourly email cap, added in the PK-56 review. Nothing checked this before, and it
+   * is the one key on the list whose silent reversion recreates the ORIGINAL fault: with
+   * `[remotes.<name>.auth.rate_limit]` absent, `config push` sends the top-level `2`, and
+   * a hosted project sends two auth emails an hour and then stops — no error, nothing in
+   * the deploy log, and a signup queue that simply goes quiet.
+   *
+   * Compared against whatever the top-level block ACTUALLY says rather than a hard-coded
+   * `2`, so that raising or lowering the local value can never make this check agree with
+   * it by coincidence. The `toBeGreaterThan` is the second half and the more important
+   * one: `not.toBe(2)` alone is satisfied by `3`, which is the same outage one digit
+   * along. The specific figure below is not a claim about the right cap — the product
+   * owner's decision (see the config.toml comments) is that Supabase is not the send
+   * limiter at all, and Resend's quota is the real ceiling — it is only far enough above
+   * the local value that no edit drifting back toward local dev can pass.
+   */
+  it.each(names)('%s: the hourly email cap is not the local dev value', (name) => {
+    const localCap = get(config, 'auth', 'rate_limit', 'email_sent');
+    expect(localCap, 'the top-level [auth.rate_limit] email_sent has gone').toBeTypeOf('number');
+
+    const cap = get(remotes, name, 'auth', 'rate_limit', 'email_sent');
+    expect(cap, `${name} has no auth.rate_limit.email_sent override`).toBeTypeOf('number');
+    expect(cap, `${name} inherits the local cap of ${String(localCap)}`).not.toBe(localCap);
+    expect(cap as number).toBeGreaterThan(1000);
+  });
+
+  /**
+   * The redirect allow-list, also added in the PK-56 review, and the one whose failure is
+   * the least like the others: inheriting the top-level value here is not a hosted project
+   * being made TOO PERMISSIVE, it is a hosted project being made unreachable. The
+   * top-level list is two loopback callback URLs and nothing else, so a remote that omits
+   * this override ships an allow-list that does not contain its own origin, and GoTrue
+   * answers every redirect it is asked for by silently falling back to `site_url`.
+   *
+   * WHY THIS IS NOT "no entry may mention localhost", which is the obvious rule and the
+   * wrong one here. `[remotes.staging]` keeps loopback entries ON PURPOSE and says so at
+   * length in its own comment — developers point `astro dev` (4321) and `wrangler dev`
+   * (8787) at the staging project, so those entries are the feature. A blanket ban would
+   * be a check this repository's own reviewed configuration fails, i.e. a check that gets
+   * deleted rather than obeyed. The two properties below hold for both remotes as written
+   * AND fail the moment either override is removed:
+   *
+   *   - the list admits this remote's own `site_url` origin, which the loopback-only
+   *     top-level list never can, for any remote;
+   *   - nothing on it is plaintext `http://` to a host that is not a loopback address, so
+   *     the deliberate developer entries are allowed and a `http://staging.packsheet.io`
+   *     (or any other cleartext host, where a one-time code would cross the network in the
+   *     open) is not.
+   */
+  it.each(names)('%s: the redirect allow-list is its own, and admits its own origin', (name) => {
+    const siteUrl = get(remotes, name, 'auth', 'site_url');
+    expect(siteUrl, `${name} has no auth.site_url to check the allow-list against`).toBeTypeOf(
+      'string',
+    );
+
+    const urls = get(remotes, name, 'auth', 'additional_redirect_urls');
+    expect(urls, `${name} has no auth.additional_redirect_urls override`).toBeInstanceOf(Array);
+    const entries = urls as TomlValue[];
+    expect(entries, `${name}'s allow-list is empty`).not.toEqual([]);
+    for (const entry of entries) {
+      expect(entry, `${name} has a non-string entry in additional_redirect_urls`).toBeTypeOf(
+        'string',
+      );
+    }
+
+    const strings = entries as string[];
+    expect(
+      strings.some((entry) => entry.startsWith(`${siteUrl as string}/`)),
+      `${name}'s allow-list does not admit its own site_url (${String(siteUrl)}): ${JSON.stringify(strings)}`,
+    ).toBe(true);
+
+    for (const entry of strings) {
+      if (entry.startsWith('https://')) continue;
+      expect(
+        entry,
+        `${name} allows a cleartext redirect target that is not a loopback address`,
+      ).toMatch(/^http:\/\/(localhost|127\.0\.0\.1)(:|\/)/);
+    }
   });
 });
 

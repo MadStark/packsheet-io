@@ -66,14 +66,38 @@
  *
  * PK-56's two blocks add two of those sign-ups and two of those sign-ins. The reset
  * REQUESTS themselves are not on that budget at all — `/recover` is not a sign-in or a
- * sign-up — and what governs them instead is `[auth.email] max_frequency`, a per-ADDRESS
- * floor between sends: 1 second locally, 60 on both hosted projects. That is deliberate
- * rather than incidental to the reset block below, which asks twice for the same address
- * on purpose. `[auth.rate_limit] email_sent` does not apply here, whatever the local value
- * says: its own comment in config.toml records that it requires `[auth.email.smtp]`, which
- * the local stack does not use — it mails through `[local_smtp]` (Mailpit) instead. So a
- * fresh random address per run never inherits a previous run's budget, and nothing in this
- * file goes red on a third `npm test` within an hour.
+ * sign-up, so `sign_in_sign_ups` never sees one — and what governs them instead is
+ * `[auth.email] max_frequency`, a per-ADDRESS floor between sends: 1 second locally, 60 on
+ * both hosted projects. That is deliberate rather than incidental to the reset block
+ * below, which asks twice for the same address on purpose.
+ *
+ * `[auth.rate_limit] email_sent = 2` is the OTHER limit that would bite here if it applied
+ * — it is the one project-wide cap that does cover `/recover` — and it does not apply,
+ * because the CLI never passes this file's value to the local GoTrue. That is now VERIFIED
+ * rather than inferred, and the correction is worth recording: this paragraph used to rest
+ * on the config comment's "Requires auth.email.smtp to be enabled", read as "the local
+ * stack has no SMTP". The local stack DOES have SMTP wired into GoTrue — Mailpit, via
+ * `[local_smtp]` — so that reading was wrong even though the conclusion was right. What
+ * the container is actually running, with `email_sent = 2` in supabase/config.toml and
+ * Supabase CLI 2.113.0:
+ *
+ *     $ docker inspect supabase_auth_<stack> \
+ *         --format '{{range .Config.Env}}{{println .}}{{end}}' \
+ *       | grep -E 'EMAIL_SENT|SMTP_HOST|SMTP_MAX_FREQ'
+ *     GOTRUE_SMTP_HOST=supabase_inbucket_<stack>
+ *     GOTRUE_SMTP_MAX_FREQUENCY=1s
+ *     GOTRUE_RATE_LIMIT_EMAIL_SENT=360000
+ *
+ * 360000, not 2. SMTP is present and `max_frequency` passes through verbatim, which is
+ * exactly why the paragraph above rests on THAT limit and not on this one; the hourly cap
+ * is the single value the CLI substitutes, because the sender is Mailpit rather than a
+ * configured `[auth.email.smtp]`. The claim here is only what that output shows — not that
+ * the CLI is contractually obliged to keep doing it. If a future CLI stops substituting,
+ * this file's reset block is where it will go red first, and re-running the command above
+ * is how to confirm that is what happened.
+ *
+ * So a fresh random address per run never inherits a previous run's budget, and nothing in
+ * this file goes red on a third `npm test` within an hour.
  *
  * What this file avoids is the shape that actually burns the budget: creating a fresh
  * user inside every individual `it` rather than once per `describe`'s `beforeAll`. If a
@@ -593,9 +617,29 @@ describe('asking for a password-reset email', () => {
    * without it. That is also why the expired-link copy on src/pages/update-password.astro
    * says "only in the browser that asked": a reset link opened somewhere else has no
    * verifier to present.
+   *
+   * ASSERTED BY NAME, which it was not until the PK-56 review. The original assertion was
+   * `entries().length > 0` — "some cookie was written" — which is true of a session cookie,
+   * a chunked session fragment, or anything else `@supabase/ssr` felt like setting, none
+   * of which is a PKCE verifier. The test's name and the comment above were the only place
+   * the actual claim existed, and neither is executable.
+   *
+   * The name to match on is a SUFFIX, because the prefix is not stable: `@supabase/ssr`
+   * derives it from the project ref in PUBLIC_SUPABASE_URL, so this stack writes
+   * `sb-127-auth-token-code-verifier` (the URL is a loopback address) and a hosted project
+   * writes `sb-<ref>-auth-token-code-verifier`. `-code-verifier` is the part that says what
+   * the cookie IS rather than which project it belongs to. Observed on this stack, for the
+   * record: a reset request writes three names, all ending `-code-verifier`, and no session
+   * cookie at all — which is itself the reason the old assertion was so easy to satisfy by
+   * accident in the OTHER blocks of this file, where a sign-up does write one.
    */
   it('leaves this browser the PKCE verifier the emailed link will be exchanged against', () => {
-    expect(requestJar.entries().length).toBeGreaterThan(0);
+    const names = requestJar.entries().map(([name]) => name);
+    expect(names, 'the reset request wrote no cookies at all').not.toEqual([]);
+    expect(
+      names.filter((name) => /^sb-.+-code-verifier$/.test(name)),
+      `no PKCE code-verifier cookie among ${JSON.stringify(names)}`,
+    ).not.toEqual([]);
   });
 });
 
