@@ -1,0 +1,426 @@
+---
+// On-demand: this page requires a session, reads Astro.locals.user, and both restores
+// and permanently deletes gear_items on POST — none of which a prerendered file can do.
+// See src/middleware.ts for why GEAR_PATH carries the no-store rule the same way
+// /account does, and src/pages/gear/index.astro for the page this one shares its shape
+// with — restore and permanent-delete both go through parseBulkAction from
+// src/lib/gear/bulk.ts, the same validator the closet list's own bulk actions use.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import GearNav from '../../components/GearNav.astro';
+import { createAuthClient } from '../../lib/auth';
+import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { GEAR_PATH, GEAR_TRASH_PATH, gearItemPath } from '../../lib/gear/routes';
+import { GEAR_TRASH_SELECT } from '../../lib/gear/query';
+import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
+import {
+  BULK_FORM_FIELD,
+  BULK_INTENT,
+  PERMANENT_DELETE_CONFIRMATION_FIELD,
+  PERMANENT_DELETE_CONFIRMATION_MISMATCH_MESSAGE,
+  confirmsPermanentDeletion,
+  parseBulkAction,
+} from '../../lib/gear/bulk';
+
+// src/middleware.ts has already resolved this with a verified getUser() call; reading
+// it here rather than calling getUser() again is the whole point of doing it once in
+// middleware. A null user redirects to sign-in with `next` set back to this exact URL,
+// so signing in returns here rather than dropping the visitor on the trash's default.
+const user = Astro.locals.user;
+if (!user) {
+  const next = `${Astro.url.pathname}${Astro.url.search}`;
+  return Astro.redirect(`${SIGN_IN_PATH}?next=${encodeURIComponent(next)}`);
+}
+
+// CSRF: same protection as sign-in.astro and src/pages/gear/index.astro — Astro's
+// on-demand origin check (security.checkOrigin, set explicitly in astro.config.mjs)
+// plus the session cookie's sameSite: 'lax'. No separate CSRF token is needed on top of
+// that pair for the same reason it isn't on those pages.
+const client = createAuthClient(Astro.cookies, Astro.request);
+
+// Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts
+// and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
+const GENERIC_WRITE_ERROR = 'Something went wrong updating your trash. Please try again.';
+
+let actionError: string | null = null;
+/** Set only for an unconfirmed or incorrectly-confirmed `bulk-delete-permanently`
+ *  submission — the strongest gate on this page, mirroring `pendingDelete` on
+ *  src/pages/gear/index.astro but requiring the visitor to type the confirmation word
+ *  as well as click through, since this is the one truly irreversible action anywhere
+ *  in the gear closet. `mismatch` distinguishes "hasn't confirmed yet" (the ordinary
+ *  first submission) from "typed something, and it was wrong" (show the mismatch
+ *  message rather than pretending nothing happened). */
+let pendingPermanentDelete: { readonly ids: readonly string[]; readonly mismatch: boolean } | null =
+  null;
+
+// ---------------------------------------------------------------------------
+// POST: restore, or permanently delete (with the two-step, TYPED confirmation the
+// ticket asks for — see confirmsPermanentDeletion's own module comment for why a fixed
+// word rather than the account page's email-address pattern). Every mutating branch
+// redirects with 303, mirroring src/pages/gear/index.astro's own "Method discipline".
+// ---------------------------------------------------------------------------
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const result = parseBulkAction(form);
+
+  if (!result.ok) {
+    actionError = Object.values(result.errors)[0] ?? 'Choose a valid action.';
+  } else {
+    const action = result.action;
+    const ids = [...action.ids];
+
+    if (action.intent === BULK_INTENT.restore) {
+      // No explicit `.eq('user_id', ...)` — mirrors src/pages/gear/index.astro's own
+      // bulk writes, which rely on RLS (gear_items_update_own) alone. `.not('deleted_at',
+      // 'is', null)` is the load-bearing guard here: it confines this action to rows
+      // that are actually in the trash, so a stale or crafted id for an already-active
+      // item cannot be "restored" into touching updated_at for no reason.
+      const { error } = await client
+        .from('gear_items')
+        .update({ deleted_at: null })
+        .in('id', ids)
+        .not('deleted_at', 'is', null);
+      if (error) {
+        actionError = GENERIC_WRITE_ERROR;
+      } else {
+        return Astro.redirect(GEAR_TRASH_PATH, 303);
+      }
+    } else if (action.intent === BULK_INTENT.deletePermanently) {
+      const confirmed = form.get(BULK_FORM_FIELD.confirm) === '1';
+      const typedRaw = form.get(PERMANENT_DELETE_CONFIRMATION_FIELD);
+      const typed = typeof typedRaw === 'string' ? typedRaw : null;
+
+      if (!confirmed || !confirmsPermanentDeletion(typed)) {
+        // The first submission (confirmed === false) reveals the panel with no error —
+        // nothing was typed wrong, nothing has been typed at all yet. A second
+        // submission that DID set confirmed but typed the wrong word gets the mismatch
+        // message instead, the same distinction CONFIRMATION_MISMATCH_MESSAGE draws on
+        // the account page.
+        pendingPermanentDelete = { ids, mismatch: confirmed };
+      } else {
+        // A real DELETE — the one genuinely irreversible action in this feature.
+        // gear_items_snapshot_before_delete (core_schema.sql) fires for each row and
+        // freezes it into any pack_items still referencing it; the warning naming that
+        // is shown BEFORE this point, in the confirmation panel below, not after.
+        // No explicit `.eq('user_id', ...)`: RLS (gear_items_delete_own) already
+        // confines this to the visitor's own rows, mirroring every other write on this
+        // page and on src/pages/gear/index.astro.
+        const { error } = await client.from('gear_items').delete().in('id', ids);
+        if (error) {
+          actionError = GENERIC_WRITE_ERROR;
+        } else {
+          return Astro.redirect(GEAR_TRASH_PATH, 303);
+        }
+      }
+    } else {
+      // set-category / set-status / soft-delete: valid BULK_INTENT values, but this
+      // page renders no control that posts any of them — they belong to
+      // src/pages/gear/index.astro. Reachable only by a hand-crafted or stale request,
+      // reported the same way an unrecognised intent is rather than silently no-opped.
+      actionError = 'Choose a valid action.';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET (and the render that follows every POST that did not redirect): the trashed
+// items, most recently deleted first.
+//
+// `.eq('user_id', user.id)` IS LOAD-BEARING, not belt-and-braces — see the identical
+// comment on src/pages/gear/index.astro. gear_items_select_via_public_pack is granted
+// to authenticated visitors too, so a plain `.select()` relying on RLS alone could
+// return a stranger's gear the moment it sits on their own public pack — "your trash"
+// silently showing somebody else's item. That policy has no bearing on which rows are
+// actually IN the trash (a public pack cannot reference a soft-deleted item's current
+// state either way), but the explicit filter is the query saying "my trash" rather than
+// leaning on a policy whose purpose is a different page entirely.
+// ---------------------------------------------------------------------------
+const { data: rows, error: loadError } = await client
+  .from('gear_items')
+  .select(GEAR_TRASH_SELECT)
+  .eq('user_id', user.id)
+  .not('deleted_at', 'is', null)
+  .order('deleted_at', { ascending: false })
+  .order('id', { ascending: true });
+
+const loadErrorMessage = loadError
+  ? 'Something went wrong loading your trash. Please try again.'
+  : null;
+const items = rows ?? [];
+
+// Named back for the confirmation panel below, from the SAME rows this render already
+// fetched — not a second query. An id `parseBulkAction` validated but that no longer
+// names a row here (deleted by another tab between the two submissions) is simply
+// absent from `pendingNames`, and the panel still shows a correct, if shorter, list.
+const pendingNames: readonly string[] = pendingPermanentDelete
+  ? items.filter((row) => pendingPermanentDelete!.ids.includes(row.id)).map((row) => row.name)
+  : [];
+---
+
+<Layout
+  title="Trash — Packsheet"
+  description="Restore or permanently delete gear from your Packsheet closet."
+>
+  <GearNav />
+  <main class="mx-auto max-w-5xl px-6 py-10">
+    <h1 class="text-3xl">Trash</h1>
+
+    {
+      actionError && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {actionError}
+        </p>
+      )
+    }
+
+    {
+      loadErrorMessage && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {loadErrorMessage}
+        </p>
+      )
+    }
+
+    {
+      loadErrorMessage ? null : pendingPermanentDelete ? (
+        <div class="border-rust/40 bg-rust/10 mt-6 rounded-[var(--r)] border px-5 py-4">
+          <h2 class="text-rust text-lg">
+            Permanently delete {pendingPermanentDelete.ids.length} item
+            {pendingPermanentDelete.ids.length === 1 ? '' : 's'}?
+          </h2>
+          <p class="text-ink-2 mt-2 text-sm">
+            This cannot be undone
+            {pendingNames.length > 0 && <>: {pendingNames.join(', ')}</>}. If any of these appear on
+            a saved pack, that pack keeps a frozen copy and is unlinked from your closet from this
+            point on.
+          </p>
+          {pendingPermanentDelete.mismatch && (
+            <p role="alert" class="text-rust mt-3 text-sm">
+              {PERMANENT_DELETE_CONFIRMATION_MISMATCH_MESSAGE}
+            </p>
+          )}
+          <form method="POST" class="mt-4 space-y-3">
+            <input
+              type="hidden"
+              name={BULK_FORM_FIELD.intent}
+              value={BULK_INTENT.deletePermanently}
+            />
+            <input type="hidden" name={BULK_FORM_FIELD.confirm} value="1" />
+            {pendingPermanentDelete.ids.map((id) => (
+              <input type="hidden" name={BULK_FORM_FIELD.id} value={id} />
+            ))}
+            <div>
+              <label for="permanent-delete-confirmation" class="text-ink-2 block text-sm">
+                Type DELETE to confirm
+              </label>
+              <input
+                id="permanent-delete-confirmation"
+                name={PERMANENT_DELETE_CONFIRMATION_FIELD}
+                type="text"
+                autocomplete="off"
+                aria-describedby={
+                  pendingPermanentDelete.mismatch ? 'permanent-delete-error' : undefined
+                }
+                aria-invalid={pendingPermanentDelete.mismatch ? 'true' : undefined}
+                class="border-hairline bg-surface text-ink aria-invalid:border-rust mt-1 w-full max-w-xs rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+              />
+              {pendingPermanentDelete.mismatch && (
+                <span id="permanent-delete-error" class="sr-only">
+                  {PERMANENT_DELETE_CONFIRMATION_MISMATCH_MESSAGE}
+                </span>
+              )}
+            </div>
+            <div class="flex gap-3">
+              <button
+                type="submit"
+                class="bg-rust rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-95"
+              >
+                Permanently delete
+              </button>
+              <a
+                href={GEAR_TRASH_PATH}
+                class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
+              >
+                Cancel
+              </a>
+            </div>
+          </form>
+        </div>
+      ) : items.length === 0 ? (
+        <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
+          <p class="text-ink-2">Your trash is empty.</p>
+          <a
+            href={GEAR_PATH}
+            class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+          >
+            Back to your closet
+          </a>
+        </div>
+      ) : (
+        <>
+          {/* Two kinds of form on this render, deliberately not nested — HTML forbids a
+              <form> inside another <form> (a nested start tag is simply dropped by the
+              parser, silently losing whatever it contained), which is exactly the shape
+              a "select some rows, then also click one row's own button" table would
+              naturally reach for. The fix used throughout this section is the `form`
+              attribute: every per-row Restore/Delete-permanently button below lives
+              inside the ONE bulk-select form (so its checkboxes have somewhere to be),
+              but points at its own tiny standalone form — rendered just below the
+              table, one pair per row — via `form="…"` rather than relying on DOM
+              nesting. A submit button naming a form by id belongs to THAT form, not to
+              its nearest ancestor, which is standard HTML5 form association and needs no
+              script to work. */}
+          <form method="POST" class="mt-6">
+            <div class="border-hairline bg-surface overflow-x-auto rounded-[var(--r)] border">
+              <table class="w-full text-left text-sm">
+                <caption class="sr-only">Trashed gear</caption>
+                <thead>
+                  <tr class="border-hairline text-ink-2 border-b">
+                    <th scope="col" class="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        id="select-all"
+                        aria-label="Select all items on this page"
+                        class="accent-blue"
+                      />
+                    </th>
+                    <th scope="col" class="px-3 py-2 font-medium">
+                      Name
+                    </th>
+                    <th scope="col" class="px-3 py-2 font-medium">
+                      Brand
+                    </th>
+                    <th scope="col" class="px-3 py-2 font-medium">
+                      Category
+                    </th>
+                    <th scope="col" class="px-3 py-2 font-medium">
+                      Status
+                    </th>
+                    <th scope="col" class="numeric px-3 py-2 font-medium">
+                      Qty
+                    </th>
+                    <th scope="col" class="numeric px-3 py-2 font-medium">
+                      Price
+                    </th>
+                    <th scope="col" class="px-3 py-2 font-medium">
+                      Deleted
+                    </th>
+                    <th scope="col" class="px-3 py-2">
+                      <span class="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item) => (
+                    <tr class="border-hairline hover:bg-sunk border-b last:border-b-0">
+                      <td class="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          name={BULK_FORM_FIELD.id}
+                          value={item.id}
+                          aria-label={`Select ${item.name}`}
+                          class="accent-blue"
+                        />
+                      </td>
+                      <td class="px-3 py-2">
+                        <a
+                          href={gearItemPath(item.id)}
+                          class="text-blue-deep hover:text-blue-ink underline"
+                        >
+                          {item.name}
+                        </a>
+                      </td>
+                      <td class="px-3 py-2">{item.brand ?? '—'}</td>
+                      <td class="px-3 py-2">{item.category ?? '—'}</td>
+                      <td class="px-3 py-2">{formatGearStatus(item.status)}</td>
+                      <td class="numeric px-3 py-2">{item.quantity}</td>
+                      <td class="numeric px-3 py-2">
+                        {formatGearPrice(item.price, item.currency)}
+                      </td>
+                      <td class="numeric px-3 py-2">{(item.deleted_at ?? '').slice(0, 10)}</td>
+                      <td class="px-3 py-2 text-right whitespace-nowrap">
+                        <button
+                          type="submit"
+                          form={`restore-${item.id}`}
+                          class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-2 py-1 text-xs font-medium transition-colors"
+                        >
+                          Restore
+                        </button>{' '}
+                        <button
+                          type="submit"
+                          form={`delete-permanently-${item.id}`}
+                          class="border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-2 py-1 text-xs font-medium transition-colors"
+                        >
+                          Delete permanently
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                name={BULK_FORM_FIELD.intent}
+                value={BULK_INTENT.restore}
+                class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+              >
+                Restore selected
+              </button>
+              <button
+                type="submit"
+                name={BULK_FORM_FIELD.intent}
+                value={BULK_INTENT.deletePermanently}
+                class="border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+              >
+                Delete selected permanently
+              </button>
+            </div>
+          </form>
+
+          {items.map((item) => (
+            <>
+              <form method="POST" id={`restore-${item.id}`}>
+                <input type="hidden" name={BULK_FORM_FIELD.intent} value={BULK_INTENT.restore} />
+                <input type="hidden" name={BULK_FORM_FIELD.id} value={item.id} />
+              </form>
+              <form method="POST" id={`delete-permanently-${item.id}`}>
+                <input
+                  type="hidden"
+                  name={BULK_FORM_FIELD.intent}
+                  value={BULK_INTENT.deletePermanently}
+                />
+                <input type="hidden" name={BULK_FORM_FIELD.id} value={item.id} />
+              </form>
+            </>
+          ))}
+        </>
+      )
+    }
+  </main>
+</Layout>
+
+<script>
+  // Progressive enhancement only: every action here is a real form submission and
+  // works with this script never running. All this does is let a visitor tick one box
+  // instead of every row's own checkbox individually — mirrors
+  // src/pages/gear/index.astro's identical script for the identical reason.
+  const selectAll = document.getElementById('select-all');
+  if (selectAll instanceof HTMLInputElement) {
+    selectAll.addEventListener('change', () => {
+      const checked = selectAll.checked;
+      document.querySelectorAll('input[type="checkbox"][name="id"]').forEach((box) => {
+        if (box instanceof HTMLInputElement) box.checked = checked;
+      });
+    });
+  }
+</script>

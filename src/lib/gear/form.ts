@@ -283,6 +283,44 @@ function getFormString(form: FormData, key: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * Reads every `GEAR_FORM_FIELD` off `form` as a bare string, with no validation at all
+ * — the same extraction `parseGearItemForm` does internally to build the `values` it
+ * returns alongside `errors` on a rejected submission, pulled out so a caller can get
+ * it WITHOUT re-running validation.
+ *
+ * WHY THIS IS NEEDED SEPARATELY FROM `parseGearItemForm`. That function only hands back
+ * a `GearFormValues` on the `ok: false` branch — a successful validation returns the
+ * parsed `GearItemInput` instead, because a page that is about to `.insert()`/`.update()`
+ * has no use for the unparsed strings. But a page still needs those exact strings back
+ * if validation succeeded and the WRITE itself then failed (a dropped connection, a
+ * constraint this parser does not mirror): the visitor's input was fine, the database
+ * call was not, and re-rendering the form should show back what they typed, not the
+ * blank state `EMPTY_GEAR_FORM_VALUES` would produce or a value reconstructed from the
+ * now-stale `GearItemInput` (whose numbers were already reformatted by validation, e.g.
+ * `'01'` becoming `1`). Calling `parseGearItemForm` a second time would work only by
+ * accident — it is pure, but relying on that accident to fish `values` back out of an
+ * `ok: false` result nobody asked it to produce is exactly the kind of coupling this
+ * function exists to avoid needing.
+ */
+export function rawGearFormValues(form: FormData): GearFormValues {
+  return {
+    name: getFormString(form, GEAR_FORM_FIELD.name),
+    quantity: getFormString(form, GEAR_FORM_FIELD.quantity),
+    weight: getFormString(form, GEAR_FORM_FIELD.weight),
+    weight_unit: getFormString(form, GEAR_FORM_FIELD.weightUnit),
+    price: getFormString(form, GEAR_FORM_FIELD.price),
+    currency: getFormString(form, GEAR_FORM_FIELD.currency),
+    volume_litres: getFormString(form, GEAR_FORM_FIELD.volumeLitres),
+    status: getFormString(form, GEAR_FORM_FIELD.status),
+    url: getFormString(form, GEAR_FORM_FIELD.url),
+    brand: getFormString(form, GEAR_FORM_FIELD.brand),
+    category: getFormString(form, GEAR_FORM_FIELD.category),
+    description: getFormString(form, GEAR_FORM_FIELD.description),
+    notes: getFormString(form, GEAR_FORM_FIELD.notes),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // parseGearItemForm
 // ---------------------------------------------------------------------------
@@ -305,21 +343,7 @@ function getFormString(form: FormData, key: string): string {
  * "you must provide a currency" for a currency that was, in fact, provided but wrong.
  */
 export function parseGearItemForm(form: FormData): GearFormResult {
-  const values: GearFormValues = {
-    name: getFormString(form, GEAR_FORM_FIELD.name),
-    quantity: getFormString(form, GEAR_FORM_FIELD.quantity),
-    weight: getFormString(form, GEAR_FORM_FIELD.weight),
-    weight_unit: getFormString(form, GEAR_FORM_FIELD.weightUnit),
-    price: getFormString(form, GEAR_FORM_FIELD.price),
-    currency: getFormString(form, GEAR_FORM_FIELD.currency),
-    volume_litres: getFormString(form, GEAR_FORM_FIELD.volumeLitres),
-    status: getFormString(form, GEAR_FORM_FIELD.status),
-    url: getFormString(form, GEAR_FORM_FIELD.url),
-    brand: getFormString(form, GEAR_FORM_FIELD.brand),
-    category: getFormString(form, GEAR_FORM_FIELD.category),
-    description: getFormString(form, GEAR_FORM_FIELD.description),
-    notes: getFormString(form, GEAR_FORM_FIELD.notes),
-  };
+  const values: GearFormValues = rawGearFormValues(form);
 
   const errors: Record<string, string> = {};
 
@@ -479,3 +503,36 @@ export function gearItemToFormValues(row: GearItemRow): GearFormValues {
     notes: row.notes ?? '',
   };
 }
+
+// ---------------------------------------------------------------------------
+// EMPTY_GEAR_FORM_VALUES
+// ---------------------------------------------------------------------------
+
+/**
+ * The blank state `src/pages/gear/new.astro` renders on a plain GET, before the visitor
+ * has typed anything. Not all-empty-strings: `quantity`, `weight`, `weight_unit` and
+ * `status` are `not null` columns with a database default (`1`, `0`, `'g'`, `'owned'`),
+ * and this form REQUIRES the visitor to supply a real value for each of those four
+ * rather than silently writing the column's default on an empty submission — see the
+ * module comment's "REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS" section. A blank text
+ * input for any of the four would make the very first render of this form already
+ * invalid, which is a strange way to greet somebody who has not done anything yet; a
+ * pre-filled value matching the column's own default is what `parseGearItemForm` will
+ * accept unchanged if the visitor never touches that field at all. Every other field is
+ * a nullable column with no default, so `''` — "not provided" — is the honest blank.
+ */
+export const EMPTY_GEAR_FORM_VALUES: GearFormValues = {
+  name: '',
+  quantity: '1',
+  weight: '0',
+  weight_unit: 'g',
+  price: '',
+  currency: '',
+  volume_litres: '',
+  status: 'owned',
+  url: '',
+  brand: '',
+  category: '',
+  description: '',
+  notes: '',
+};

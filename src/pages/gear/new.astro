@@ -1,0 +1,109 @@
+---
+// On-demand: this page requires a session, reads Astro.locals.user, inserts into
+// gear_items on POST and redirects — none of which a prerendered file can do. See
+// src/middleware.ts for why GEAR_PATH carries the no-store rule the same way /account
+// does, and src/pages/gear/index.astro for the page this one shares its shape with.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import GearNav from '../../components/GearNav.astro';
+import GearItemForm from '../../components/GearItemForm.astro';
+import { createAuthClient } from '../../lib/auth';
+import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
+import {
+  EMPTY_GEAR_FORM_VALUES,
+  parseGearItemForm,
+  rawGearFormValues,
+  type GearFormValues,
+} from '../../lib/gear/form';
+
+// src/middleware.ts has already resolved this with a verified getUser() call; reading
+// it here rather than calling getUser() again is the whole point of doing it once in
+// middleware. A null user redirects to sign-in with `next` set back to this exact URL,
+// so signing in returns here rather than dropping the visitor on the closet's default.
+const user = Astro.locals.user;
+if (!user) {
+  const next = `${Astro.url.pathname}${Astro.url.search}`;
+  return Astro.redirect(`${SIGN_IN_PATH}?next=${encodeURIComponent(next)}`);
+}
+
+// CSRF: same protection as sign-in.astro and src/pages/gear/index.astro — Astro's
+// on-demand origin check (security.checkOrigin, set explicitly in astro.config.mjs)
+// plus the session cookie's sameSite: 'lax'. No separate CSRF token is needed on top of
+// that pair for the same reason it isn't on those pages.
+const client = createAuthClient(Astro.cookies, Astro.request);
+
+// Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts
+// and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
+const GENERIC_WRITE_ERROR = 'Something went wrong adding this item. Please try again.';
+
+let values: GearFormValues = EMPTY_GEAR_FORM_VALUES;
+let errors: Readonly<Record<string, string>> = {};
+let writeError: string | null = null;
+
+// ---------------------------------------------------------------------------
+// POST: create the item.
+//
+// Method discipline: this page answers GET and POST, nothing else — Astro itself
+// returns 405 for any other method, since no other handler is exported. The one
+// mutating branch redirects with 303, so a refresh can never resubmit the insert.
+// ---------------------------------------------------------------------------
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const result = parseGearItemForm(form);
+
+  if (!result.ok) {
+    // Re-render with the visitor's own values and the errors describing what to fix —
+    // never clear a form someone has just filled in.
+    errors = result.errors;
+    values = result.values;
+  } else {
+    // No `user_id` in this payload: the column defaults from `auth.uid()` and
+    // `gear_items_insert_own` checks the same value (core_schema.sql:50-53), so a
+    // client that sends nothing gets the right answer and a client that sent someone
+    // else's id would have been refused rather than quietly corrected.
+    const { data, error } = await client
+      .from('gear_items')
+      .insert(result.values)
+      .select('id')
+      .single();
+
+    if (error || data === null) {
+      writeError = GENERIC_WRITE_ERROR;
+      // The submission validated; the database write did not. Re-render with exactly
+      // what the visitor typed — see rawGearFormValues's own comment for why this is
+      // the right values to show back, rather than the blank EMPTY_GEAR_FORM_VALUES or
+      // a value reconstructed from the already-reformatted GearItemInput.
+      values = rawGearFormValues(form);
+    } else {
+      return Astro.redirect(gearItemPath(data.id), 303);
+    }
+  }
+}
+---
+
+<Layout title="Add gear — Packsheet" description="Add a new item to your Packsheet gear closet.">
+  <GearNav />
+  <main class="mx-auto max-w-2xl px-6 py-10">
+    <h1 class="text-3xl">Add gear</h1>
+    <p class="text-ink-2 mt-2 text-sm">
+      Photos aren't supported yet — that's a separate piece of work still to come.
+    </p>
+
+    {
+      writeError && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {writeError}
+        </p>
+      )
+    }
+
+    <div class="mt-8">
+      <GearItemForm values={values} errors={errors} submitLabel="Add item" cancelHref={GEAR_PATH} />
+    </div>
+  </main>
+</Layout>

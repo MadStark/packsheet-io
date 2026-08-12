@@ -3,9 +3,11 @@ import {
   BULK_FORM_FIELD,
   BULK_INTENT,
   MAX_BULK_IDS,
+  confirmsPermanentDeletion,
   isBulkIntent,
   makeUndoToken,
   parseBulkAction,
+  parseUndoCount,
   parseUndoToken,
 } from '../src/lib/gear/bulk';
 
@@ -401,5 +403,95 @@ describe('parseUndoToken', () => {
 
   it('rejects lowercase z — not the exact shape toISOString() produces', () => {
     expect(parseUndoToken('2026-01-15T10:30:00.000z')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseUndoCount
+// ---------------------------------------------------------------------------
+
+describe('parseUndoCount', () => {
+  it('accepts a plain positive integer string', () => {
+    expect(parseUndoCount('12')).toBe(12);
+  });
+
+  it('accepts 1 — the smallest count a real bulk delete can ever produce', () => {
+    expect(parseUndoCount('1')).toBe(1);
+  });
+
+  it('rejects null — no count parameter was present in the URL at all', () => {
+    expect(parseUndoCount(null)).toBeNull();
+  });
+
+  it('rejects the empty string', () => {
+    expect(parseUndoCount('')).toBeNull();
+  });
+
+  it('rejects 0 — a bulk delete that moved nothing never redirects with a count at all', () => {
+    expect(parseUndoCount('0')).toBeNull();
+  });
+
+  it('rejects a negative number', () => {
+    expect(parseUndoCount('-1')).toBeNull();
+  });
+
+  it('rejects a decimal', () => {
+    expect(parseUndoCount('1.5')).toBeNull();
+  });
+
+  it('rejects scientific notation, mirroring parsePage in query.ts', () => {
+    expect(parseUndoCount('1e3')).toBeNull();
+  });
+
+  it('rejects free text', () => {
+    expect(parseUndoCount('Infinity')).toBeNull();
+    expect(parseUndoCount('NaN')).toBeNull();
+    expect(parseUndoCount('twelve')).toBeNull();
+  });
+
+  it('rejects a value with surrounding whitespace rather than trimming it', () => {
+    expect(parseUndoCount(' 12 ')).toBeNull();
+  });
+
+  it('rejects a number too large to be a safe integer', () => {
+    expect(parseUndoCount('99999999999999999999')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// confirmsPermanentDeletion
+// ---------------------------------------------------------------------------
+
+describe('confirmsPermanentDeletion', () => {
+  it('accepts the exact word DELETE', () => {
+    expect(confirmsPermanentDeletion('DELETE')).toBe(true);
+  });
+
+  it('is case-insensitive, mirroring confirmsAccountDeletion — autocapitalisation is a keyboard artefact, not evidence the visitor did not mean it', () => {
+    expect(confirmsPermanentDeletion('delete')).toBe(true);
+    expect(confirmsPermanentDeletion('Delete')).toBe(true);
+  });
+
+  it('ignores surrounding whitespace from a paste', () => {
+    expect(confirmsPermanentDeletion('  DELETE  ')).toBe(true);
+  });
+
+  it('rejects null — no confirmation field was present in the request at all', () => {
+    expect(confirmsPermanentDeletion(null)).toBe(false);
+  });
+
+  it('rejects undefined', () => {
+    expect(confirmsPermanentDeletion(undefined)).toBe(false);
+  });
+
+  it('rejects an empty or whitespace-only entry — the shape of an unfilled field, not a deliberate confirmation', () => {
+    expect(confirmsPermanentDeletion('')).toBe(false);
+    expect(confirmsPermanentDeletion('   ')).toBe(false);
+  });
+
+  it('rejects a near-miss that is not the exact word', () => {
+    expect(confirmsPermanentDeletion('DELET')).toBe(false);
+    expect(confirmsPermanentDeletion('DELETE ME')).toBe(false);
+    expect(confirmsPermanentDeletion('confirm')).toBe(false);
   });
 });

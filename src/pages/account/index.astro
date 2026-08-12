@@ -7,6 +7,7 @@ export const prerender = false;
 import Layout from '../../layouts/Layout.astro';
 import { deleteOwnAccount, signOut } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { GEAR_PATH } from '../../lib/gear/routes';
 import {
   confirmsAccountDeletion,
   CONFIRMATION_MISMATCH_MESSAGE,
@@ -87,6 +88,12 @@ if (Astro.request.method === 'POST') {
     <h1 class="mt-6 text-3xl">Your account</h1>
 
     <p class="text-ink-2 mt-4 text-sm">Signed in as <span class="text-ink">{user.email}</span></p>
+
+    <p class="mt-6 text-sm">
+      <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
+        Go to your gear closet
+      </a>
+    </p>
 
     <form method="POST" action="/auth/signout" class="mt-6">
       <button

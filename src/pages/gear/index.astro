@@ -1,0 +1,712 @@
+---
+// On-demand: this page requires a session, reads Astro.locals.user, mutates
+// gear_items on POST and redirects — none of which a prerendered file can do. See
+// src/middleware.ts for why GEAR_PATH carries the no-store rule the same way
+// /account does.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import GearNav from '../../components/GearNav.astro';
+import { createAuthClient } from '../../lib/auth';
+import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
+import {
+  GEAR_SELECT,
+  applyGearQuery,
+  gearQueryToSearchParams,
+  parseGearQuery,
+  sortLinkSearchParams,
+  type GearQuery,
+} from '../../lib/gear/query';
+import { GEAR_PAGE_SIZE, GEAR_STATUSES, type GearSortKey } from '../../lib/gear/fields';
+import {
+  BULK_FORM_FIELD,
+  BULK_INTENT,
+  UNDO_COUNT_PARAM,
+  UNDO_INTENT,
+  UNDO_PARAM,
+  makeUndoToken,
+  parseBulkAction,
+  parseUndoCount,
+  parseUndoToken,
+} from '../../lib/gear/bulk';
+import { extractGearOptions } from '../../lib/gear/options';
+import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
+import { WEIGHT_UNITS } from '../../lib/units';
+
+// src/middleware.ts has already resolved this with a verified getUser() call; reading
+// it here rather than calling getUser() again is the whole point of doing it once in
+// middleware. A null user redirects to sign-in with `next` set back to this exact URL
+// (path + query), so signing in returns to the same filtered/sorted/paginated view
+// rather than dropping the visitor on the closet's own default.
+const user = Astro.locals.user;
+if (!user) {
+  const next = `${Astro.url.pathname}${Astro.url.search}`;
+  return Astro.redirect(`${SIGN_IN_PATH}?next=${encodeURIComponent(next)}`);
+}
+
+// CSRF: same protection as sign-in.astro and account/index.astro — Astro's on-demand
+// origin check (security.checkOrigin, set explicitly in astro.config.mjs) plus the
+// session cookie's sameSite: 'lax'. No separate CSRF token is needed on top of that
+// pair for the same reason it isn't on those pages.
+const client = createAuthClient(Astro.cookies, Astro.request);
+
+// Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts
+// and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
+const GENERIC_LOAD_ERROR = 'Something went wrong loading your gear. Please try again.';
+const GENERIC_WRITE_ERROR = 'Something went wrong updating your gear. Please try again.';
+
+let bulkError: string | null = null;
+/** Set only for a `bulk-delete` submission that has not yet been confirmed — see
+ *  "Method discipline" below. Carries exactly the ids `parseBulkAction` validated, so
+ *  the confirmation form can re-post the identical, already-validated selection rather
+ *  than re-reading (and re-trusting) anything from the request a second time. */
+let pendingDelete: { readonly ids: readonly string[] } | null = null;
+
+// ---------------------------------------------------------------------------
+// POST: bulk actions and undo.
+//
+// Method discipline: this page answers GET and POST, nothing else — Astro itself
+// returns 405 for any other method, since no other handler is exported. Every
+// state-changing branch below redirects with 303, so a refresh can never resubmit a
+// mutation; the one branch that does NOT redirect (an unconfirmed bulk-delete) has not
+// changed anything yet, which is the entire point of it.
+// ---------------------------------------------------------------------------
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const rawIntent = form.get(BULK_FORM_FIELD.intent);
+
+  if (rawIntent === UNDO_INTENT) {
+    // Reject anything malformed rather than passing it to a query — parseUndoToken is
+    // total, so a missing, tampered or merely-plausible token all become `null` here
+    // rather than reaching `.eq('deleted_at', ...)`.
+    const rawToken = form.get(UNDO_PARAM);
+    const token = parseUndoToken(typeof rawToken === 'string' ? rawToken : null);
+    if (token !== null) {
+      await client.from('gear_items').update({ deleted_at: null }).eq('deleted_at', token);
+    }
+    // Redirect either way: a stale or forged token undoes nothing, but the visitor
+    // still gets a clean URL back rather than the undo banner's own POST target.
+    return Astro.redirect(GEAR_PATH, 303);
+  }
+
+  const result = parseBulkAction(form);
+  if (!result.ok) {
+    bulkError = Object.values(result.errors)[0] ?? 'Choose a valid bulk action.';
+  } else {
+    const action = result.action;
+    const ids = [...action.ids];
+
+    if (action.intent === BULK_INTENT.delete) {
+      // Bulk delete is destructive, so — following the house precedent in
+      // account/index.astro's own two-step account deletion — the first submission
+      // never writes anything. It only reveals a confirmation naming the count, built
+      // from the SAME validated `ids` the second submission will re-post as hidden
+      // fields. No client-side confirm() dialog anywhere in this.
+      const confirmed = form.get(BULK_FORM_FIELD.confirm) === '1';
+      if (!confirmed) {
+        pendingDelete = { ids };
+      } else {
+        const token = makeUndoToken();
+        // Guarded with .is('deleted_at', null): re-submitting an already-processed
+        // delete must not re-stamp rows an earlier batch already put in the trash with
+        // THIS batch's new token — see bulk.ts's own "THE CALLER MUST GUARD" comment.
+        const { error } = await client
+          .from('gear_items')
+          .update({ deleted_at: token })
+          .in('id', ids)
+          .is('deleted_at', null);
+        if (error) {
+          bulkError = GENERIC_WRITE_ERROR;
+        } else {
+          const redirectParams = new URLSearchParams(Astro.url.searchParams);
+          redirectParams.delete(UNDO_PARAM);
+          redirectParams.delete(UNDO_COUNT_PARAM);
+          redirectParams.set(UNDO_PARAM, token);
+          redirectParams.set(UNDO_COUNT_PARAM, String(ids.length));
+          return Astro.redirect(`${GEAR_PATH}?${redirectParams.toString()}`, 303);
+        }
+      }
+    } else if (action.intent === BULK_INTENT.setCategory) {
+      const { error } = await client
+        .from('gear_items')
+        .update({ category: action.category })
+        .in('id', ids)
+        .is('deleted_at', null);
+      if (error) {
+        bulkError = GENERIC_WRITE_ERROR;
+      } else {
+        return Astro.redirect(`${GEAR_PATH}${Astro.url.search}`, 303);
+      }
+    } else if (action.intent === BULK_INTENT.setStatus) {
+      const { error } = await client
+        .from('gear_items')
+        .update({ status: action.status })
+        .in('id', ids)
+        .is('deleted_at', null);
+      if (error) {
+        bulkError = GENERIC_WRITE_ERROR;
+      } else {
+        return Astro.redirect(`${GEAR_PATH}${Astro.url.search}`, 303);
+      }
+    } else {
+      // restore / delete-permanently: valid BULK_INTENT values, but they belong to
+      // GEAR_TRASH_PATH, not this page — this list never renders a control that posts
+      // either one. Reachable only by a hand-crafted or stale request, so it is
+      // reported the same way an unrecognised intent is, not silently no-opped.
+      bulkError = 'Choose a valid bulk action.';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET (and the render that follows every POST that did not redirect): parse the
+// query, fetch the filter options and the current page of rows.
+// ---------------------------------------------------------------------------
+const query: GearQuery = parseGearQuery(Astro.url.searchParams);
+
+// BOTH queries below are scoped with an explicit `.eq('user_id', user.id)`, and that
+// is not belt-and-braces — it is load-bearing. `gear_items` carries TWO permissive
+// SELECT policies (core_schema.sql): `gear_items_select_own` (owner only) and
+// `gear_items_select_via_public_pack`, granted to `anon, authenticated` alike so a
+// shared pack link can render the gear behind it. RLS policies are UNIONED, so a
+// plain `.select()` relying on RLS alone would return this visitor's own rows OR any
+// row that happens to sit on ANYONE's public pack — "Your gear closet" silently
+// showing a stranger's gear the moment that stranger publishes a pack. `applyGearQuery`
+// deliberately does not add this filter itself (see its own module comment on why it
+// only ever borrows an authenticated client rather than knowing who that client is
+// for); the page is what knows the signed-in visitor's id, so the page is where this
+// has to be added. Mutations further down do not need the same filter: `gear_items_
+// update_own`/`_delete_own` are scoped to `user_id = auth.uid()` with no "via public
+// pack" counterpart, so a write against another visitor's row already affects zero
+// rows under RLS alone.
+const { data: optionRows, error: optionsError } = await client
+  .from('gear_items')
+  .select('category, brand')
+  .eq('user_id', user.id)
+  .is('deleted_at', null);
+
+const {
+  data: rows,
+  error: listError,
+  count,
+} = await applyGearQuery(
+  client.from('gear_items').select(GEAR_SELECT, { count: 'exact' }).eq('user_id', user.id),
+  query,
+);
+
+const loadError = optionsError || listError ? GENERIC_LOAD_ERROR : null;
+const gearOptions = extractGearOptions(optionRows ?? []);
+const items = rows ?? [];
+const totalCount = count ?? 0;
+const totalPages = Math.max(1, Math.ceil(totalCount / GEAR_PAGE_SIZE));
+const rangeStart = totalCount === 0 ? 0 : (query.page - 1) * GEAR_PAGE_SIZE + 1;
+const rangeEnd = totalCount === 0 ? 0 : rangeStart + items.length - 1;
+
+// "The closet has no active items at all" is exactly optionRows being empty: that
+// query carries no filter beyond deleted_at is null, so an empty result there can only
+// mean there is nothing to filter — never that today's filters merely matched nothing.
+// This is what lets the two empty states below say two different, honest things
+// instead of collapsing "you have no gear" and "no gear matches these filters" into
+// one sentence that would be wrong for whichever case it wasn't written for.
+const closetIsEmpty = !loadError && (optionRows ?? []).length === 0;
+
+const hasActiveFilters =
+  query.search !== '' ||
+  query.categories.length > 0 ||
+  query.statuses.length > 0 ||
+  query.brands.length > 0 ||
+  query.minGrams !== null ||
+  query.maxGrams !== null;
+
+// The weight-range fields' own values, read back off gearQueryToSearchParams rather
+// than re-deriving a unit conversion here a second time — see that function's own
+// round-trip comment for why the two must agree.
+const currentParams = gearQueryToSearchParams(query);
+const wminValue = currentParams.get('wmin') ?? '';
+const wmaxValue = currentParams.get('wmax') ?? '';
+
+// The undo banner: only rendered for a token that survives validation — a malformed
+// or tampered `undo` param is silently ignored rather than shown to anybody, exactly
+// as parseUndoToken's own "reject anything malformed" contract promises the caller.
+const undoToken = parseUndoToken(Astro.url.searchParams.get(UNDO_PARAM));
+const undoCount = parseUndoCount(Astro.url.searchParams.get(UNDO_COUNT_PARAM));
+const undoMessage =
+  undoCount !== null
+    ? `${undoCount} item${undoCount === 1 ? '' : 's'} moved to the trash.`
+    : 'Items moved to the trash.';
+
+const SORT_COLUMNS: readonly { readonly key: GearSortKey; readonly label: string }[] = [
+  { key: 'name', label: 'Name' },
+  { key: 'weight', label: 'Weight' },
+  { key: 'price', label: 'Price' },
+  { key: 'added', label: 'Added' },
+];
+
+function sortHref(key: GearSortKey): string {
+  return `${GEAR_PATH}?${sortLinkSearchParams(query, key).toString()}`;
+}
+
+function sortAriaSort(key: GearSortKey): 'ascending' | 'descending' | undefined {
+  if (query.sort !== key) return undefined;
+  return query.direction === 'asc' ? 'ascending' : 'descending';
+}
+
+function sortIndicator(key: GearSortKey): string {
+  if (query.sort !== key) return '';
+  return query.direction === 'asc' ? ' ▲' : ' ▼';
+}
+
+function pageHref(page: number): string {
+  return `${GEAR_PATH}?${gearQueryToSearchParams({ ...query, page }).toString()}`;
+}
+---
+
+<Layout
+  title="Your gear closet — Packsheet"
+  description="Search, filter and manage the gear in your Packsheet closet."
+>
+  <GearNav />
+  <main class="mx-auto max-w-5xl px-6 py-10">
+    <h1 class="text-3xl">Your gear closet</h1>
+
+    {
+      undoToken && (
+        <div
+          role="status"
+          class="border-hairline bg-sunk text-ink mt-6 flex items-center justify-between gap-4 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          <p>{undoMessage}</p>
+          <form method="POST">
+            <input type="hidden" name={BULK_FORM_FIELD.intent} value={UNDO_INTENT} />
+            <input type="hidden" name={UNDO_PARAM} value={undoToken} />
+            <button
+              type="submit"
+              class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+            >
+              Undo
+            </button>
+          </form>
+        </div>
+      )
+    }
+
+    {
+      bulkError && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {bulkError}
+        </p>
+      )
+    }
+
+    {
+      loadError && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {loadError}
+        </p>
+      )
+    }
+
+    {
+      loadError ? null : pendingDelete ? (
+        <div class="border-rust/40 bg-rust/10 mt-6 rounded-[var(--r)] border px-5 py-4">
+          <h2 class="text-rust text-lg">Confirm delete</h2>
+          <p class="text-ink-2 mt-2 text-sm">
+            Move {pendingDelete.ids.length} item{pendingDelete.ids.length === 1 ? '' : 's'} to the
+            trash? You can undo this from the closet list right after.
+          </p>
+          <form method="POST" class="mt-4 flex gap-3">
+            <input type="hidden" name={BULK_FORM_FIELD.intent} value={BULK_INTENT.delete} />
+            <input type="hidden" name={BULK_FORM_FIELD.confirm} value="1" />
+            {pendingDelete.ids.map((id) => (
+              <input type="hidden" name={BULK_FORM_FIELD.id} value={id} />
+            ))}
+            <button
+              type="submit"
+              class="bg-rust rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-95"
+            >
+              Move to trash
+            </button>
+            <a
+              href={`${GEAR_PATH}${Astro.url.search}`}
+              class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
+            >
+              Cancel
+            </a>
+          </form>
+        </div>
+      ) : closetIsEmpty ? (
+        <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
+          <p class="text-ink-2">Your closet is empty.</p>
+          <a
+            href={GEAR_NEW_PATH}
+            class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+          >
+            Add your first item
+          </a>
+        </div>
+      ) : (
+        <>
+          {/* Filters — a single GET form, so applying them is a plain, bookmarkable
+              navigation. sort/dir are carried as hidden fields so changing a filter
+              does not silently reset the visitor's chosen sort; page is deliberately
+              NOT carried, since a new filter set changes what "page 3" even means. */}
+          <form
+            method="GET"
+            action={GEAR_PATH}
+            class="border-hairline bg-surface mt-6 rounded-[var(--r)] border p-5"
+          >
+            <div class="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+              <div class="sm:col-span-2 lg:col-span-4">
+                <label for="q" class="text-ink-2 block text-sm">
+                  Search
+                </label>
+                <input
+                  id="q"
+                  name="q"
+                  type="search"
+                  value={query.search}
+                  placeholder="Search name or brand"
+                  class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+                />
+              </div>
+
+              {gearOptions.categories.length > 0 && (
+                <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
+                  <legend class="text-ink-2 px-1 text-sm">Category</legend>
+                  <div class="mt-1 flex max-h-32 flex-col gap-1 overflow-y-auto">
+                    {gearOptions.categories.map((category) => (
+                      <label class="text-ink flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          name="category"
+                          value={category}
+                          checked={query.categories.includes(category)}
+                          class="accent-blue"
+                        />
+                        {category}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
+
+              <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
+                <legend class="text-ink-2 px-1 text-sm">Status</legend>
+                <div class="mt-1 flex flex-col gap-1">
+                  {GEAR_STATUSES.map((status) => (
+                    <label class="text-ink flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        name="status"
+                        value={status}
+                        checked={query.statuses.includes(status)}
+                        class="accent-blue"
+                      />
+                      {formatGearStatus(status)}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              {gearOptions.brands.length > 0 && (
+                <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
+                  <legend class="text-ink-2 px-1 text-sm">Brand</legend>
+                  <div class="mt-1 flex max-h-32 flex-col gap-1 overflow-y-auto">
+                    {gearOptions.brands.map((brand) => (
+                      <label class="text-ink flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          name="brand"
+                          value={brand}
+                          checked={query.brands.includes(brand)}
+                          class="accent-blue"
+                        />
+                        {brand}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
+
+              <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
+                <legend class="text-ink-2 px-1 text-sm">Weight range</legend>
+                <div class="mt-1 flex items-center gap-2">
+                  <label for="wmin" class="sr-only">
+                    Minimum weight
+                  </label>
+                  <input
+                    id="wmin"
+                    name="wmin"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={wminValue}
+                    placeholder="Min"
+                    class="border-hairline bg-surface text-ink w-full rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
+                  />
+                  <label for="wmax" class="sr-only">
+                    Maximum weight
+                  </label>
+                  <input
+                    id="wmax"
+                    name="wmax"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={wmaxValue}
+                    placeholder="Max"
+                    class="border-hairline bg-surface text-ink w-full rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
+                  />
+                  <label for="wunit" class="sr-only">
+                    Weight unit
+                  </label>
+                  <select
+                    id="wunit"
+                    name="wunit"
+                    class="border-hairline bg-surface text-ink rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
+                  >
+                    {WEIGHT_UNITS.map((unit) => (
+                      <option value={unit} selected={unit === query.weightUnit}>
+                        {unit}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </fieldset>
+            </div>
+
+            <input type="hidden" name="sort" value={query.sort} />
+            <input type="hidden" name="dir" value={query.direction} />
+
+            <div class="mt-4 flex items-center gap-3">
+              <button
+                type="submit"
+                class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+              >
+                Apply filters
+              </button>
+              {hasActiveFilters && (
+                <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline">
+                  Clear filters
+                </a>
+              )}
+            </div>
+          </form>
+
+          {items.length === 0 ? (
+            <div class="border-hairline bg-surface mt-6 rounded-[var(--r)] border px-6 py-12 text-center">
+              <p class="text-ink-2">No items match these filters.</p>
+              <a
+                href={GEAR_PATH}
+                class="text-blue-deep hover:text-blue-ink mt-2 inline-block text-sm underline"
+              >
+                Clear filters
+              </a>
+            </div>
+          ) : (
+            <>
+              <form method="POST" class="mt-6">
+                <div class="border-hairline bg-surface overflow-x-auto rounded-[var(--r)] border">
+                  <table class="w-full text-left text-sm">
+                    <caption class="sr-only">Your gear closet</caption>
+                    <thead>
+                      <tr class="border-hairline text-ink-2 border-b">
+                        <th scope="col" class="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            id="select-all"
+                            aria-label="Select all items on this page"
+                            class="accent-blue"
+                          />
+                        </th>
+                        {SORT_COLUMNS.slice(0, 1).map(({ key, label }) => (
+                          <th
+                            scope="col"
+                            aria-sort={sortAriaSort(key)}
+                            class="px-3 py-2 font-medium"
+                          >
+                            <a href={sortHref(key)} class="hover:text-ink text-ink-2">
+                              {label}
+                              {sortIndicator(key)}
+                            </a>
+                          </th>
+                        ))}
+                        <th scope="col" class="px-3 py-2 font-medium">
+                          Brand
+                        </th>
+                        <th scope="col" class="px-3 py-2 font-medium">
+                          Category
+                        </th>
+                        <th scope="col" class="px-3 py-2 font-medium">
+                          Status
+                        </th>
+                        <th scope="col" class="px-3 py-2 font-medium">
+                          Qty
+                        </th>
+                        {SORT_COLUMNS.slice(1).map(({ key, label }) => (
+                          <th
+                            scope="col"
+                            aria-sort={sortAriaSort(key)}
+                            class="px-3 py-2 font-medium"
+                          >
+                            <a href={sortHref(key)} class="hover:text-ink text-ink-2">
+                              {label}
+                              {sortIndicator(key)}
+                            </a>
+                          </th>
+                        ))}
+                        <th scope="col" class="px-3 py-2 font-medium">
+                          <span class="sr-only">Photo</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((item) => (
+                        <tr class="border-hairline hover:bg-sunk border-b last:border-b-0">
+                          <td class="px-3 py-2">
+                            <input
+                              type="checkbox"
+                              name={BULK_FORM_FIELD.id}
+                              value={item.id}
+                              aria-label={`Select ${item.name}`}
+                              class="accent-blue"
+                            />
+                          </td>
+                          <td class="px-3 py-2">
+                            <a
+                              href={gearItemPath(item.id)}
+                              class="text-blue-deep hover:text-blue-ink underline"
+                            >
+                              {item.name}
+                            </a>
+                          </td>
+                          <td class="px-3 py-2">{item.brand ?? '—'}</td>
+                          <td class="px-3 py-2">{item.category ?? '—'}</td>
+                          <td class="px-3 py-2">{formatGearStatus(item.status)}</td>
+                          <td class="numeric px-3 py-2">{item.quantity}</td>
+                          <td class="numeric px-3 py-2">
+                            {item.weight} {item.weight_unit}
+                          </td>
+                          <td class="numeric px-3 py-2">
+                            {formatGearPrice(item.price, item.currency)}
+                          </td>
+                          <td class="numeric px-3 py-2">{item.created_at.slice(0, 10)}</td>
+                          <td class="px-3 py-2">
+                            {item.photo_path ? (
+                              <span
+                                class="border-hairline bg-sunk text-ink-3 inline-flex h-8 w-8 items-center justify-center rounded-[var(--r-sm)] border text-[10px] font-medium"
+                                aria-hidden="true"
+                              >
+                                IMG
+                              </span>
+                            ) : null}
+                            <span class="sr-only">
+                              {item.photo_path ? 'Has a photo' : 'No photo'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="mt-4 flex flex-wrap items-center gap-3">
+                  <input
+                    id="bulk-category"
+                    name={BULK_FORM_FIELD.category}
+                    type="text"
+                    placeholder="New category"
+                    aria-label="New category for selected items"
+                    class="border-hairline bg-surface text-ink rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
+                  />
+                  <button
+                    type="submit"
+                    name={BULK_FORM_FIELD.intent}
+                    value={BULK_INTENT.setCategory}
+                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+                  >
+                    Set category
+                  </button>
+
+                  <select
+                    id="bulk-status"
+                    name={BULK_FORM_FIELD.status}
+                    aria-label="New status for selected items"
+                    class="border-hairline bg-surface text-ink rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
+                  >
+                    {GEAR_STATUSES.map((status) => (
+                      <option value={status}>{formatGearStatus(status)}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="submit"
+                    name={BULK_FORM_FIELD.intent}
+                    value={BULK_INTENT.setStatus}
+                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+                  >
+                    Set status
+                  </button>
+
+                  <button
+                    type="submit"
+                    name={BULK_FORM_FIELD.intent}
+                    value={BULK_INTENT.delete}
+                    class="border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+                  >
+                    Delete selected
+                  </button>
+                </div>
+              </form>
+
+              <nav aria-label="Pagination" class="mt-4 flex items-center justify-between gap-4">
+                <p class="text-ink-2 text-sm">
+                  Showing {rangeStart}–{rangeEnd} of {totalCount}
+                </p>
+                <div class="flex gap-2">
+                  {query.page > 1 && (
+                    <a
+                      href={pageHref(query.page - 1)}
+                      class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm transition-colors"
+                    >
+                      Previous
+                    </a>
+                  )}
+                  {query.page < totalPages && (
+                    <a
+                      href={pageHref(query.page + 1)}
+                      class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm transition-colors"
+                    >
+                      Next
+                    </a>
+                  )}
+                </div>
+              </nav>
+            </>
+          )}
+        </>
+      )
+    }
+  </main>
+</Layout>
+
+<script>
+  // Progressive enhancement only: every bulk action is a real form submission and
+  // works with this script never running. All this does is let a visitor tick one box
+  // instead of every row's own checkbox individually.
+  const selectAll = document.getElementById('select-all');
+  if (selectAll instanceof HTMLInputElement) {
+    selectAll.addEventListener('change', () => {
+      const checked = selectAll.checked;
+      document.querySelectorAll('input[type="checkbox"][name="id"]').forEach((box) => {
+        if (box instanceof HTMLInputElement) box.checked = checked;
+      });
+    });
+  }
+</script>

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   gearQueryToSearchParams,
   parseGearQuery,
+  sortLinkSearchParams,
   MAX_GEAR_PAGE,
   type GearQuery,
 } from '../src/lib/gear/query';
@@ -495,5 +496,65 @@ describe('gearQueryToSearchParams / parseGearQuery: round trip', () => {
     const first = parseGearQuery(PARAMS([['q', 'z'.repeat(MAX_SEARCH_LENGTH + 20)]]));
     const reparsed = parseGearQuery(gearQueryToSearchParams(first));
     expect(reparsed).toEqual(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sortLinkSearchParams
+// ---------------------------------------------------------------------------
+
+describe('sortLinkSearchParams', () => {
+  it('clicking a column that is not the active sort sets it as sort, ascending', () => {
+    const query: GearQuery = { ...DEFAULT_QUERY, sort: 'name', direction: 'asc' };
+    const result = parseGearQuery(sortLinkSearchParams(query, 'weight'));
+    expect(result.sort).toBe('weight');
+    expect(result.direction).toBe('asc');
+  });
+
+  it('clicking the currently-ascending active column toggles it to descending', () => {
+    const query: GearQuery = { ...DEFAULT_QUERY, sort: 'price', direction: 'asc' };
+    const result = parseGearQuery(sortLinkSearchParams(query, 'price'));
+    expect(result.sort).toBe('price');
+    expect(result.direction).toBe('desc');
+  });
+
+  it('clicking the currently-descending active column toggles it back to ascending', () => {
+    const query: GearQuery = { ...DEFAULT_QUERY, sort: 'price', direction: 'desc' };
+    const result = parseGearQuery(sortLinkSearchParams(query, 'price'));
+    expect(result.sort).toBe('price');
+    expect(result.direction).toBe('asc');
+  });
+
+  it('resets page to 1 — a stale offset into a differently-ordered result set is not the same "page 3"', () => {
+    const query: GearQuery = { ...DEFAULT_QUERY, sort: 'name', direction: 'asc', page: 7 };
+    const result = parseGearQuery(sortLinkSearchParams(query, 'added'));
+    expect(result.page).toBe(1);
+  });
+
+  it('switching to a new column resets it to ascending even if the previous column was descending', () => {
+    const query: GearQuery = { ...DEFAULT_QUERY, sort: 'name', direction: 'desc' };
+    const result = parseGearQuery(sortLinkSearchParams(query, 'added'));
+    expect(result.sort).toBe('added');
+    expect(result.direction).toBe('asc');
+  });
+
+  it('carries every other filter through unchanged', () => {
+    const query: GearQuery = {
+      ...DEFAULT_QUERY,
+      search: 'quilt',
+      categories: ['Sleep'],
+      statuses: ['owned'],
+      brands: ['Enlightened Equipment'],
+      minGrams: 400,
+      maxGrams: 900,
+      weightUnit: 'g',
+    };
+    const result = parseGearQuery(sortLinkSearchParams(query, 'weight'));
+    expect(result.search).toBe('quilt');
+    expect(result.categories).toEqual(['Sleep']);
+    expect(result.statuses).toEqual(['owned']);
+    expect(result.brands).toEqual(['Enlightened Equipment']);
+    expect(result.minGrams).toBe(400);
+    expect(result.maxGrams).toBe(900);
   });
 });

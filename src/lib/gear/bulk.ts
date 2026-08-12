@@ -59,11 +59,33 @@ export const BULK_FORM_FIELD = {
   id: 'id',
   category: 'category',
   status: 'status',
+  // The closet list's two-step bulk delete (mirroring the confirm-delete pattern in
+  // src/pages/account/index.astro): the first `bulk-delete` submission carries no
+  // `confirm` field and only reveals a confirmation naming the selection; the second,
+  // re-submitted with the same ids and `confirm=1`, is the one that actually writes
+  // `deleted_at`. There is no BULK_INTENT for "confirm" — it is the same intent,
+  // gated by this one extra field, so the id-parsing rules above apply identically to
+  // both submissions rather than needing a second, parallel validation path.
+  confirm: 'confirm',
 } as const;
 
 /** The query-string parameter the closet list is redirected to after a bulk soft
  *  delete, carrying the stamp `parseUndoToken` validates back on the "Undo" link. */
 export const UNDO_PARAM = 'undo';
+
+/** The `intent` value the undo banner's own form posts. Distinct from `BULK_INTENT`
+ *  (and not added to it) because undo does not select ids from the row checkboxes the
+ *  way every `BulkAction` does — it names a token instead, so `parseBulkAction` is not
+ *  the right validator for it and a caller branches on this constant before ever
+ *  reaching that function. */
+export const UNDO_INTENT = 'undo';
+
+/** The query-string parameter carrying how many items a bulk soft delete moved to the
+ *  trash, alongside `UNDO_PARAM`, so the banner can say "12 items moved to the trash"
+ *  without a second database round trip just to count them back. Read through
+ *  `parseUndoCount` before being rendered — see that function for why a value the
+ *  visitor's own address bar can edit is not trusted merely for being a number. */
+export const UNDO_COUNT_PARAM = 'count';
 
 // ---------------------------------------------------------------------------
 // Ids
@@ -287,4 +309,75 @@ export function parseUndoToken(raw: string | null): string | null {
   if (parsed.toISOString() !== raw) return null;
 
   return raw;
+}
+
+/**
+ * Validates the `count` query parameter (`UNDO_COUNT_PARAM`) the undo banner reads
+ * back — total over any string, the same promise every other parser in this module
+ * family makes over untrusted input from a URL a visitor's own address bar can edit.
+ *
+ * This value is NEVER used to decide which rows to touch — only `parseUndoToken`'s
+ * result is, in the `deleted_at = $token` update — so a forged or nonsensical count
+ * cannot widen what Undo restores. Its only job is display: "N items moved to the
+ * trash" on a banner. Validating it anyway, rather than rendering whatever string
+ * arrived, keeps a hand-edited `?count=-1` or `?count=Infinity` from reaching that
+ * sentence as literal text; `null` here means the page falls back to a generic
+ * message that says nothing wrong.
+ */
+export function parseUndoCount(raw: string | null): number | null {
+  if (raw === null) return null;
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) return null;
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// The permanent-delete confirmation gate
+// ---------------------------------------------------------------------------
+
+/**
+ * The gate in front of `BULK_INTENT.deletePermanently` on `src/pages/gear/trash.astro`
+ * — the one truly irreversible action anywhere in the gear closet. Everything else this
+ * module validates (`parseBulkAction`, the undo token) is about WHICH rows a request
+ * may touch; this is about whether the visitor meant to touch them at all, mirroring
+ * `confirmsAccountDeletion` in `src/lib/account-deletion.ts` — see that module's own
+ * "WHAT THE GATE IS FOR" section, which applies unchanged here: this is not a password,
+ * it is deliberateness.
+ *
+ * WHY A FIXED WORD RATHER THAN THE ACCOUNT PAGE'S OWN EMAIL-ADDRESS PATTERN. That
+ * pattern works because there is exactly one natural string to type back — the visitor's
+ * own address, already on screen. A permanent-delete selection here names no single
+ * thing: it can be one item or an arbitrary batch of them, with no shared name, and
+ * asking for "the name of the first selected item" would make the gate about spelling a
+ * near-arbitrary string correctly rather than about meaning it. Typing the fixed word
+ * `DELETE` — the same convention GitHub's own repository-deletion dialog uses for the
+ * batch case — asks for exactly one deliberate act, independent of what or how much is
+ * selected, while the page itself still names the count and the pack-freezing
+ * consequence next to the input (see `trash.astro`).
+ */
+export const PERMANENT_DELETE_CONFIRMATION_FIELD = 'confirmation';
+
+/** The exact word `confirmsPermanentDeletion` requires — see that function for the case
+ *  and whitespace tolerance applied around it. */
+export const PERMANENT_DELETE_CONFIRMATION_WORD = 'DELETE';
+
+/** Shown when the typed word does not match. Says what to do, not how close the typed
+ *  text came — same reasoning as `CONFIRMATION_MISMATCH_MESSAGE` in
+ *  `src/lib/account-deletion.ts`. */
+export const PERMANENT_DELETE_CONFIRMATION_MISMATCH_MESSAGE =
+  'Type DELETE to confirm. This cannot be undone.';
+
+/**
+ * Whether a typed confirmation authorises a permanent delete. Case and surrounding
+ * whitespace are ignored — a trailing space from a paste, or autocapitalisation turning
+ * `delete` into `Delete`, is a keyboard artefact, not evidence the visitor did not mean
+ * it, mirroring `confirmsAccountDeletion`'s identical tolerance for the identical
+ * reason. An empty or whitespace-only entry never confirms: that is the shape of a form
+ * submitted without the field being filled in at all (a double submit, a crafted POST,
+ * a browser restoring a page), and it is the single most likely accidental input there
+ * is.
+ */
+export function confirmsPermanentDeletion(typed: string | null | undefined): boolean {
+  return (typed ?? '').trim().toUpperCase() === PERMANENT_DELETE_CONFIRMATION_WORD;
 }

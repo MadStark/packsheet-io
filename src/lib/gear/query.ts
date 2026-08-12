@@ -292,6 +292,34 @@ export function gearQueryToSearchParams(query: GearQuery): URLSearchParams {
 }
 
 // ---------------------------------------------------------------------------
+// sortLinkSearchParams
+// ---------------------------------------------------------------------------
+
+/**
+ * The `URLSearchParams` a sortable column header on the closet list should link to:
+ * `sort` set to `key`, `direction` TOGGLED if `key` is already the active sort column
+ * or reset to `'asc'` for a column that was not, `page` reset to 1, and every other
+ * filter carried through unchanged via `gearQueryToSearchParams`.
+ *
+ * `page` IS RESET, DELIBERATELY. A stale offset into a differently-ordered result set
+ * is not "page 3" of anything the visitor asked for — row 101-150 sorted by name and
+ * row 101-150 sorted by price are, in general, two entirely different sets of items,
+ * so keeping the same page number across a sort change would silently show the wrong
+ * slice rather than an honest first page of the new order.
+ *
+ * Lives here rather than in the page template for the same reason every other rule in
+ * this module does: `vitest.config.ts:64` excludes `src/pages/`, and "which direction
+ * does clicking an already-active column head toggle to" is exactly the kind of small
+ * decision that is easy to get backwards and impossible to pin with a test if it were
+ * written in frontmatter.
+ */
+export function sortLinkSearchParams(query: GearQuery, key: GearSortKey): URLSearchParams {
+  const direction: 'asc' | 'desc' =
+    query.sort === key && query.direction === 'asc' ? 'desc' : 'asc';
+  return gearQueryToSearchParams({ ...query, sort: key, direction, page: 1 });
+}
+
+// ---------------------------------------------------------------------------
 // buildSearchFilter
 // ---------------------------------------------------------------------------
 
@@ -380,6 +408,23 @@ export function buildSearchFilter(search: string): string {
  *  that never renders them. */
 export const GEAR_SELECT =
   'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at';
+
+/** The columns `src/pages/gear/[id].astro` needs: every `GEAR_FORM_FIELD` (so
+ *  `gearItemToFormValues` can pre-fill the edit form) plus `id`, `photo_path` and
+ *  `created_at` for the parts of the page that are not the form itself. Unlike
+ *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes`, `url` and
+ *  `volume_litres` — the very fields that comment says a list row has no business
+ *  fetching — because a detail/edit page is exactly the view that renders them. */
+export const GEAR_DETAIL_SELECT =
+  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, volume_litres, url, notes, status, photo_path, created_at';
+
+/** The columns `src/pages/gear/trash.astro` needs: the same list-row shape as
+ *  `GEAR_SELECT` plus `deleted_at`, which every trash row needs and no active-closet row
+ *  (`GEAR_SELECT`'s own consumers) ever renders — that column is `null` by definition
+ *  wherever `GEAR_SELECT` is used, since every one of those queries is guarded with
+ *  `.is('deleted_at', null)`. */
+export const GEAR_TRASH_SELECT =
+  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at, deleted_at';
 
 /**
  * The exact shape `client.from('gear_items').select(GEAR_SELECT)` produces, derived

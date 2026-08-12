@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  EMPTY_GEAR_FORM_VALUES,
   GEAR_FORM_FIELD,
   gearItemToFormValues,
   parseGearItemForm,
+  rawGearFormValues,
   type GearFormValues,
   type GearItemRow,
 } from '../src/lib/gear/form';
@@ -650,5 +652,62 @@ describe('gearItemToFormValues', () => {
   it('renders weight without padding to WEIGHT_DECIMALS', () => {
     const values = gearItemToFormValues({ ...FULL_ROW, weight: 4.4 });
     expect(values.weight).toBe('4.4');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EMPTY_GEAR_FORM_VALUES: the blank state src/pages/gear/new.astro renders on GET
+// ---------------------------------------------------------------------------
+
+describe('EMPTY_GEAR_FORM_VALUES', () => {
+  it('parses successfully once a name is filled in — the four pre-filled defaults are already valid', () => {
+    // name is the one not-null field EMPTY_GEAR_FORM_VALUES leaves blank on purpose
+    // (there is no honest default for it) — everything else must already be
+    // acceptable to parseGearItemForm exactly as shipped, since that is what the very
+    // first render of the "add gear" form submits if the visitor changes nothing else.
+    const result = parseGearItemForm(formData({ ...EMPTY_GEAR_FORM_VALUES, name: 'Tent' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.values.quantity).toBe(1);
+      expect(result.values.weight).toBe(0);
+      expect(result.values.weight_unit).toBe('g');
+      expect(result.values.status).toBe('owned');
+    }
+  });
+
+  it('fails only on the blank name when submitted completely unchanged', () => {
+    const result = parseGearItemForm(formData(EMPTY_GEAR_FORM_VALUES));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(Object.keys(result.errors)).toEqual(['name']);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rawGearFormValues
+// ---------------------------------------------------------------------------
+
+describe('rawGearFormValues', () => {
+  it('reads every field back as a bare string, with no validation at all', () => {
+    const form = formData({ ...VALID, quantity: 'not-a-number', weight: '-5' });
+    const values = rawGearFormValues(form);
+    expect(values.quantity).toBe('not-a-number');
+    expect(values.weight).toBe('-5');
+    expect(values.name).toBe(VALID.name);
+  });
+
+  it('agrees with the `values` a failed parseGearItemForm returns for the same form', () => {
+    const form = formData({ ...VALID, name: '' });
+    const result = parseGearItemForm(form);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(rawGearFormValues(form)).toEqual(result.values);
+    }
+  });
+
+  it('reads a missing field as an empty string, not the literal "null"', () => {
+    const values = rawGearFormValues(formDataMissing('brand'));
+    expect(values.brand).toBe('');
   });
 });

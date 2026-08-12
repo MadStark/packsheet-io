@@ -1,0 +1,326 @@
+---
+// The gear item create/edit form (PK-4), shared by src/pages/gear/new.astro and
+// src/pages/gear/[id].astro so the two pages cannot silently drift apart on field
+// names, labels, error wiring or markup — the entire reason this exists as one
+// component rather than two copies. It renders every editable `gear_items` field
+// EXCEPT a photo: Ref 10 owns the photo upload and no storage exists yet, so there is
+// deliberately no file input here — its absence is a decision, not an oversight.
+//
+// KEEP THIS A PLAIN .astro COMPONENT, mirroring GearNav's own rule. It takes no
+// `client:*` directive anywhere it is used and must never gain one: every field here
+// works with JavaScript disabled because the whole form is a real POST, and nothing in
+// it needs a browser-side decision to render or to submit.
+//
+// NO DECISION-MAKING LIVES HERE. Every prop this component reads is already a decided
+// value — `values` and `errors` come from `parseGearItemForm` or `gearItemToFormValues`
+// in src/lib/gear/form.ts, both covered by tests/gear-form.test.ts. This component only
+// arranges markup around them; see that module's own "WHY THIS LIVES IN src/lib/ RATHER
+// THAN IN THE PAGE" for why the validation itself could not live here instead.
+import { GEAR_FORM_FIELD, type GearFormValues } from '../lib/gear/form';
+import { GEAR_STATUSES } from '../lib/gear/fields';
+import { formatGearStatus } from '../lib/gear/format';
+import { WEIGHT_UNITS } from '../lib/units';
+
+interface Props {
+  values: GearFormValues;
+  errors: Readonly<Record<string, string>>;
+  submitLabel: string;
+  cancelHref: string;
+  /** A hidden field this page's own POST handler needs to tell this submission apart
+   *  from another form on the same page — e.g. `src/pages/gear/[id].astro`'s edit form
+   *  next to its own separate delete form. Omitted on `new.astro`, whose page has only
+   *  one form and so nothing to disambiguate. */
+  intentField?: { readonly name: string; readonly value: string };
+}
+
+const { values, errors, submitLabel, cancelHref, intentField } = Astro.props;
+
+const errorEntries = Object.entries(errors);
+
+const INPUT_CLASS =
+  'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
+const SELECT_CLASS = INPUT_CLASS;
+const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-24`;
+const LABEL_CLASS = 'text-ink-2 block text-sm';
+const ERROR_CLASS = 'text-rust mt-1 text-sm';
+
+function describedBy(field: string): string | undefined {
+  return errors[field] ? `${field}-error` : undefined;
+}
+
+function invalid(field: string): 'true' | undefined {
+  return errors[field] ? 'true' : undefined;
+}
+---
+
+<form method="POST" class="space-y-5">
+  {intentField && <input type="hidden" name={intentField.name} value={intentField.value} />}
+
+  {
+    errorEntries.length > 0 && (
+      <div
+        role="alert"
+        class="border-rust/40 bg-rust/10 text-ink rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+      >
+        <p class="font-medium">Fix the following before saving:</p>
+        <ul class="mt-2 list-disc space-y-1 pl-5">
+          {errorEntries.map(([, message]) => (
+            <li>{message}</li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  <div>
+    <label for="name" class={LABEL_CLASS}> Name </label>
+    <input
+      id="name"
+      name={GEAR_FORM_FIELD.name}
+      type="text"
+      value={values.name}
+      aria-describedby={describedBy('name')}
+      aria-invalid={invalid('name')}
+      class={INPUT_CLASS}
+    />
+    {
+      errors.name && (
+        <p id="name-error" class={ERROR_CLASS}>
+          {errors.name}
+        </p>
+      )
+    }
+  </div>
+
+  <div class="grid gap-5 sm:grid-cols-2">
+    <div>
+      <label for="brand" class={LABEL_CLASS}> Brand </label>
+      <input
+        id="brand"
+        name={GEAR_FORM_FIELD.brand}
+        type="text"
+        value={values.brand}
+        class={INPUT_CLASS}
+      />
+    </div>
+    <div>
+      <label for="category" class={LABEL_CLASS}> Category </label>
+      <input
+        id="category"
+        name={GEAR_FORM_FIELD.category}
+        type="text"
+        value={values.category}
+        class={INPUT_CLASS}
+      />
+    </div>
+  </div>
+
+  <div>
+    <label for="description" class={LABEL_CLASS}> Description </label>
+    <textarea id="description" name={GEAR_FORM_FIELD.description} class={TEXTAREA_CLASS}
+      >{values.description}</textarea
+    >
+  </div>
+
+  <div class="grid gap-5 sm:grid-cols-3">
+    <div>
+      <label for="quantity" class={LABEL_CLASS}> Quantity </label>
+      <input
+        id="quantity"
+        name={GEAR_FORM_FIELD.quantity}
+        type="text"
+        inputmode="numeric"
+        value={values.quantity}
+        aria-describedby={describedBy('quantity')}
+        aria-invalid={invalid('quantity')}
+        class={INPUT_CLASS}
+      />
+      {
+        errors.quantity && (
+          <p id="quantity-error" class={ERROR_CLASS}>
+            {errors.quantity}
+          </p>
+        )
+      }
+    </div>
+    <div>
+      <label for="weight" class={LABEL_CLASS}> Weight </label>
+      <input
+        id="weight"
+        name={GEAR_FORM_FIELD.weight}
+        type="text"
+        inputmode="decimal"
+        value={values.weight}
+        aria-describedby={describedBy('weight')}
+        aria-invalid={invalid('weight')}
+        class={INPUT_CLASS}
+      />
+      {
+        errors.weight && (
+          <p id="weight-error" class={ERROR_CLASS}>
+            {errors.weight}
+          </p>
+        )
+      }
+    </div>
+    <div>
+      <label for="weight_unit" class={LABEL_CLASS}> Weight unit </label>
+      <select
+        id="weight_unit"
+        name={GEAR_FORM_FIELD.weightUnit}
+        aria-describedby={describedBy('weight_unit')}
+        aria-invalid={invalid('weight_unit')}
+        class={SELECT_CLASS}
+      >
+        {
+          WEIGHT_UNITS.map((unit) => (
+            <option value={unit} selected={unit === values.weight_unit}>
+              {unit}
+            </option>
+          ))
+        }
+      </select>
+      {
+        errors.weight_unit && (
+          <p id="weight_unit-error" class={ERROR_CLASS}>
+            {errors.weight_unit}
+          </p>
+        )
+      }
+    </div>
+  </div>
+
+  <div class="grid gap-5 sm:grid-cols-2">
+    <div>
+      <label for="price" class={LABEL_CLASS}> Price </label>
+      <input
+        id="price"
+        name={GEAR_FORM_FIELD.price}
+        type="text"
+        inputmode="decimal"
+        value={values.price}
+        aria-describedby={describedBy('price')}
+        aria-invalid={invalid('price')}
+        class={INPUT_CLASS}
+      />
+      {
+        errors.price && (
+          <p id="price-error" class={ERROR_CLASS}>
+            {errors.price}
+          </p>
+        )
+      }
+    </div>
+    <div>
+      <label for="currency" class={LABEL_CLASS}> Currency </label>
+      <input
+        id="currency"
+        name={GEAR_FORM_FIELD.currency}
+        type="text"
+        placeholder="GBP"
+        value={values.currency}
+        aria-describedby={describedBy('currency')}
+        aria-invalid={invalid('currency')}
+        class={INPUT_CLASS}
+      />
+      {
+        errors.currency && (
+          <p id="currency-error" class={ERROR_CLASS}>
+            {errors.currency}
+          </p>
+        )
+      }
+    </div>
+  </div>
+
+  <div class="grid gap-5 sm:grid-cols-2">
+    <div>
+      <label for="volume_litres" class={LABEL_CLASS}> Volume (litres) </label>
+      <input
+        id="volume_litres"
+        name={GEAR_FORM_FIELD.volumeLitres}
+        type="text"
+        inputmode="decimal"
+        value={values.volume_litres}
+        aria-describedby={describedBy('volume_litres')}
+        aria-invalid={invalid('volume_litres')}
+        class={INPUT_CLASS}
+      />
+      {
+        errors.volume_litres && (
+          <p id="volume_litres-error" class={ERROR_CLASS}>
+            {errors.volume_litres}
+          </p>
+        )
+      }
+    </div>
+    <div>
+      <label for="status" class={LABEL_CLASS}> Status </label>
+      <select
+        id="status"
+        name={GEAR_FORM_FIELD.status}
+        aria-describedby={describedBy('status')}
+        aria-invalid={invalid('status')}
+        class={SELECT_CLASS}
+      >
+        {
+          GEAR_STATUSES.map((status) => (
+            <option value={status} selected={status === values.status}>
+              {formatGearStatus(status)}
+            </option>
+          ))
+        }
+      </select>
+      {
+        errors.status && (
+          <p id="status-error" class={ERROR_CLASS}>
+            {errors.status}
+          </p>
+        )
+      }
+    </div>
+  </div>
+
+  <div>
+    <label for="url" class={LABEL_CLASS}> Web address </label>
+    <input
+      id="url"
+      name={GEAR_FORM_FIELD.url}
+      type="text"
+      placeholder="https://"
+      value={values.url}
+      aria-describedby={describedBy('url')}
+      aria-invalid={invalid('url')}
+      class={INPUT_CLASS}
+    />
+    {
+      errors.url && (
+        <p id="url-error" class={ERROR_CLASS}>
+          {errors.url}
+        </p>
+      )
+    }
+  </div>
+
+  <div>
+    <label for="notes" class={LABEL_CLASS}> Notes </label>
+    <textarea id="notes" name={GEAR_FORM_FIELD.notes} class={TEXTAREA_CLASS}
+      >{values.notes}</textarea
+    >
+  </div>
+
+  <div class="flex gap-3 pt-2">
+    <button
+      type="submit"
+      class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+    >
+      {submitLabel}
+    </button>
+    <a
+      href={cancelHref}
+      class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
+    >
+      Cancel
+    </a>
+  </div>
+</form>
