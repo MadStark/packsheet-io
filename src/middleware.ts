@@ -3,9 +3,11 @@ import { getUser } from './lib/auth';
 import {
   ACCOUNT_PATH,
   AUTH_CALLBACK_PATH,
+  FORGOT_PASSWORD_PATH,
   SIGN_IN_PATH,
   SIGN_OUT_PATH,
   SIGN_UP_PATH,
+  UPDATE_PASSWORD_PATH,
 } from './lib/auth-routes';
 
 /**
@@ -45,6 +47,14 @@ const AUTH_ROUTE_PATHS: readonly string[] = [
   SIGN_OUT_PATH,
   ACCOUNT_PATH,
   AUTH_CALLBACK_PATH,
+  // PK-56's two password-reset pages, added here as the deliberate lines this list's
+  // comment asks for rather than inherited from a prefix. Both are session-shaped even
+  // though only one of them requires a session: /update-password renders the address the
+  // recovery session belongs to, and /forgot-password renders either a blank form or a
+  // just-submitted confirmation — two states of one URL, and a shared cache handing the
+  // second to the next visitor is the failure this rule exists to prevent.
+  FORGOT_PASSWORD_PATH,
+  UPDATE_PASSWORD_PATH,
 ];
 
 /** The path itself, or anything beneath it. `${path}/` and not `path` as a bare prefix:

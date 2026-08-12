@@ -481,8 +481,11 @@ function chokePointDir(root: string): string {
  * Each entry carries a comment saying what that module does with auth. "Needs auth" is not
  * one; the next reader has to be able to tell whether the reason is still true.
  *
- * The list was empty until PK-19, and the six entries below are the routes that ticket
- * landed. Adding one is a single line here plus its comment. Removing the import is always
+ * The list was empty until PK-19, which landed six of the entries below; PK-56 added the
+ * two password-reset pages, for eight. Adding one is a single line here plus its comment,
+ * and both of PK-56's are the ordinary case rather than a workaround — a page that calls
+ * an operation in the choke point and never hydrates is exactly what this list is for.
+ * Removing the import is always
  * the better fix where it is available — everything auth-adjacent that an anonymous route
  * can legitimately want (paths, constants, types) belongs in src/lib/auth-routes.ts or
  * beside its consumer, not in the choke point. If this list ever grows past a handful,
@@ -508,7 +511,21 @@ const AUTH_CONSUMERS: readonly string[] = [
   // fetched again here), renders a sign-out control and the two-step, typed-
   // confirmation delete-account flow; calls deleteOwnAccount and signOut.
   'src/pages/account/index.astro',
+  // The "forgot your password?" request form; calls requestPasswordReset and renders
+  // PASSWORD_RESET_REQUESTED_MESSAGE, the one sentence it shows whether or not the
+  // address has an account. It authenticates nobody itself — the session is created two
+  // hops later, at the callback — but it starts the flow that will, and it hydrates
+  // nothing: a page with one POST branch and no island.
+  'src/pages/forgot-password.astro',
+  // The new-password form the emailed reset link lands on after the callback has
+  // exchanged its code; calls updatePassword, and reads Astro.locals.user (set by
+  // middleware) to tell a live recovery session from a link that expired or was already
+  // spent. A page, never an island — the whole authorization here is the session cookie,
+  // which a browser-side component could not be trusted with.
+  'src/pages/update-password.astro',
   // The OAuth/PKCE return leg named by AUTH_CALLBACK_PATH; calls exchangeCodeForSession.
+  // Serves both the Google flow and, since PK-56, the password-reset link, which arrives
+  // with ?next=/update-password.
   'src/pages/auth/callback.ts',
   // POST-only sign-out endpoint; calls signOut. No GET handler at all, so a
   // prefetcher or a cross-site <img src> cannot trigger it.
@@ -2160,11 +2177,12 @@ describe('the real site', () => {
 
   /**
    * Invariant D, first half. This stopped being green-for-want-of-anything-to-check when
-   * PK-19 landed: AUTH_CONSUMERS names six real modules, all six genuinely import
-   * src/lib/auth/, and the choke point and everything behind it — @supabase/ssr,
-   * @supabase/supabase-js, @supabase/auth-js — are ordinary modules in this build now.
-   * The only thing keeping them out of the client pass is that all six consumers are
-   * server-only, which is exactly the claim this assertion checks rather than trusts.
+   * PK-19 landed: AUTH_CONSUMERS names eight real modules (six from PK-19, two
+   * password-reset pages from PK-56), every one of them genuinely imports src/lib/auth/,
+   * and the choke point and everything behind it — @supabase/ssr, @supabase/supabase-js,
+   * @supabase/auth-js — are ordinary modules in this build now. The only thing keeping
+   * them out of the client pass is that every one of those consumers is server-only,
+   * which is exactly the claim this assertion checks rather than trusts.
    *
    * The tripwire above is what keeps it from being indistinguishable from a broken check:
    * it asserts the client pass was genuinely observed, and genuinely told apart from the

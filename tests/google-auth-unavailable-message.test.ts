@@ -22,6 +22,15 @@ import { googleAuthUnavailableMessage } from '../src/lib/auth-routes';
  * still go wrong even with Google fully configured: the OAuth call is still a network
  * round trip, and a visitor who hits a failure must see a plain-English sentence,
  * never Supabase's or Google's own error text.
+ *
+ * THIS MESSAGE NAMES GOOGLE AND SHOULD, which is only worth saying because its sibling
+ * must not. It is shown when the call to Google ITSELF failed, on a page the visitor
+ * reached by pressing "Continue with Google" — the provider is the subject, so naming it
+ * is the accurate thing to do. `AUTH_CALLBACK_FAILED_MESSAGE`, the other visitor-facing
+ * auth failure in src/lib/auth-routes.ts, answers three flows of which only one is
+ * Google's, and tests/auth-callback-failed-message.test.ts pins that it names no provider
+ * at all. Do not "unify" the two: the PK-56 review found the confirmation-email leg being
+ * answered with this file's premise, and one message covering both is how that comes back.
  */
 
 describe("googleAuthUnavailableMessage — never Supabase's or Google's own text", () => {

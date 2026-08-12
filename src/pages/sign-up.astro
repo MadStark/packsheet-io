@@ -6,7 +6,9 @@ export const prerender = false;
 import Layout from '../layouts/Layout.astro';
 import { getGoogleAuthorizationUrl, getUser, signUpWithPassword } from '../lib/auth';
 import {
+  AUTH_CALLBACK_FAILED_MESSAGE,
   AUTH_CALLBACK_PATH,
+  AUTH_ERROR_PARAM,
   googleAuthUnavailableMessage,
   nextFromForm,
   NEXT_PARAM,
@@ -19,21 +21,31 @@ import {
 // submitted form below, and never trusted in its raw form from either source.
 let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
 
-const oauthFailed = Astro.url.searchParams.has('oauth_error');
+// The same shared, provider-neutral sentence sign-in.astro renders, for the same reason —
+// see AUTH_CALLBACK_FAILED_MESSAGE in src/lib/auth-routes.ts. Nothing in
+// src/pages/auth/callback.ts currently bounces to THIS page (every failure there goes to
+// SIGN_IN_PATH), so this branch is defensive rather than reachable; it uses the shared
+// constant anyway, because a second hand-typed wording is exactly how the two pages drift
+// and how "with Google" survived on a leg that had no Google in it.
+const authCallbackFailed = Astro.url.searchParams.has(AUTH_ERROR_PARAM);
 
-let errorMessage: string | null = oauthFailed
-  ? 'Something went wrong signing up with Google. Please try again, or use email and password below.'
-  : null;
+let errorMessage: string | null = authCallbackFailed ? AUTH_CALLBACK_FAILED_MESSAGE : null;
 
 // Shown instead of redirecting when sign-up succeeded but did NOT itself produce a
-// session — i.e. this project's Supabase "Confirm email" setting is on and the new
-// account is genuinely waiting on a confirmation email before it can sign in. See the
-// branch below for why that is checked with a second call rather than assumed either
-// way, and why createAuthClient's per-request cookie overlay (src/lib/auth/index.ts)
-// is what makes the check trustworthy: locally, with confirmations OFF
-// (enable_confirmations = false in supabase/config.toml), this branch is never
-// reached at all — signUpWithPassword's own cookies already carry a real session, and
-// this page redirects straight past it.
+// session — i.e. the Supabase project this build talks to has "Confirm email" on and the
+// new account is genuinely waiting on a confirmation email before it can sign in. See the
+// branch below for why that is checked with a second call rather than assumed either way,
+// and why createAuthClient's per-request cookie overlay (src/lib/auth/index.ts) is what
+// makes the check trustworthy.
+//
+// WHICH BRANCH RUNS DEPENDS ON THE ENVIRONMENT, and since PK-56 the two disagree. Both
+// hosted projects confirm email (enable_confirmations = true under [remotes.staging.
+// auth.email] and [remotes.production.auth.email] in supabase/config.toml), so this is
+// the ordinary path there. The local stack keeps the file's top-level
+// enable_confirmations = false, so `npm run dev` and `npm test` never reach this branch
+// at all — signUpWithPassword's own cookies already carry a real session and this page
+// redirects straight past it. Asking getUser() rather than assuming either setting is
+// what lets one page be correct in both.
 let awaitingConfirmation = false;
 
 // CSRF: same protection as sign-in.astro — Astro's on-demand origin check
@@ -100,11 +112,14 @@ if (Astro.request.method === 'POST') {
       // sign-in.astro's error is already BAD_CREDENTIALS_MESSAGE by the time it gets
       // here: chosen from the error's CODE, never relayed from Supabase's own text. This
       // page used to render `result.error` on the reasoning that sign-up is not the
-      // enumeration-sensitive case sign-in is — which is true only when "Confirm email"
-      // is ON, and it is OFF here (enable_confirmations = false in
-      // supabase/config.toml), so a duplicate address came back as a verbatim
-      // `user_already_exists` and this form was an account-enumeration oracle. See
-      // SIGN_UP_UNAVAILABLE_MESSAGE there, including what it does and does not close.
+      // enumeration-sensitive case sign-in is — which holds only where "Confirm email" is
+      // ON, and it is OFF on the local stack, where a duplicate address comes back as a
+      // verbatim `user_already_exists` and this form was an account-enumeration oracle.
+      // PK-56 turned confirmations on for both HOSTED projects, which closes the oracle
+      // there at the source (a duplicate now takes the awaitingConfirmation branch above
+      // instead of this one) and changes nothing about this line: see the "THE PREMISE
+      // MOVED IN PK-56" section on SIGN_UP_UNAVAILABLE_MESSAGE for why the mapping
+      // survives its own premise, and for what is and is not closed in each environment.
       errorMessage = result.error;
     }
   }
