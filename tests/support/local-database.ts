@@ -320,9 +320,20 @@ export async function createUser(label = 'user'): Promise<TestUser> {
  * public.gear_items` for the whole table — the migration's grants block records exactly
  * that, along with why column-level grants cannot be used while PostgREST embeds are —
  * so asking for `price` here reads a column anon could already read, and no policy or
- * privilege changes either way. Whether the live share page should EXPOSE prices to
- * anonymous readers is a product decision that belongs to Ref 26 along with `notes` and
- * `url`, and is deliberately not settled by this string.
+ * privilege changes either way.
+ *
+ * Whether the live share page should EXPOSE prices to anonymous readers was left open
+ * when this select was widened, and has since been decided: it should. A price is public,
+ * on the same footing as a weight. What a setup cost is a large part of why anyone shares
+ * a pack list in the first place — it is the comparison the reader came to make — so
+ * there is nothing here to protect. tests/rls-anon.test.ts pins that a public pack really
+ * does carry its prices to a stranger, so the decision is checkable rather than merely
+ * written down.
+ *
+ * That settles `price` and `currency` and nothing else. The grants block's known gap is
+ * `notes`, `url` and `user_id` — a private aside, often an order-confirmation link, and
+ * the owner's JWT `sub`, which lets a stranger group public packs by author. None of
+ * those is something a reader came for, and all three are still Ref 26's to close.
  */
 export const PACK_TREE_SELECT =
   'id, name, slug, visibility, locked_at, pack_categories(id, name, position, pack_items(id, quantity, worn, consumable, packed, position, overrides, snapshot, gear_items(id, name, brand, weight, weight_unit, price, currency)))';

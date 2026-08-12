@@ -198,9 +198,14 @@ describe('a pack with 40 items loads in one round trip', () => {
  * What a frozen pack carries forward.
  *
  * There is a known gap here, recorded in the grants block of the migration: a public
- * pack currently exposes the whole gear row, `notes` and `url` included. Column-level
- * grants are the obvious fix and are incompatible with PostgREST embedding — measured,
- * not assumed — so the live-path decision belongs to the share page (Ref 26).
+ * pack currently exposes the whole gear row, `notes`, `url` and `user_id` included.
+ * Column-level grants are the obvious fix and are incompatible with PostgREST embedding
+ * — measured, not assumed — so the live-path decision belongs to the share page (Ref 26).
+ *
+ * `price` is NOT part of that gap, and the describe below says why: it is published on
+ * purpose, on the same footing as a weight. The two cases read alike — `anon` reads a
+ * column either way — so the distinction is worth keeping visible rather than leaving a
+ * later reader to infer that every published column is an oversight.
  *
  * What IS decided here is the frozen copy, and this test pins it. A snapshot is read by
  * `anon` on a public pack and is permanent, so freezing those fields would put them
@@ -220,5 +225,49 @@ describe('the frozen snapshot carries only what renders the item', () => {
     expect(data?.snapshot).not.toHaveProperty('url');
     // Still a usable display record.
     expect(data?.snapshot).toMatchObject({ name: 'Gear 1', weight_unit: 'g' });
+  });
+});
+
+/**
+ * A public pack carries its prices, and that is the decision rather than the leak.
+ *
+ * This is not the known gap above wearing a different hat, and the difference is worth
+ * stating because both read identically from here — `anon` selects a column either way.
+ * `notes` and `url` are a private aside and, often, an order-confirmation link: nobody
+ * opens a shared pack list to read them, so publishing them is cost with no return. A
+ * price is the opposite. What a setup cost is a large part of why the list is worth
+ * sharing at all, and it sits on exactly the same footing as a weight, which nobody has
+ * ever proposed hiding.
+ *
+ * PINNED HERE RATHER THAN LEFT TO THE GRANTS BLOCK, because today "anon can read price"
+ * is true by ACCIDENT: it follows from the table-level grant that the known gap above
+ * exists to complain about, not from anything that says prices are meant to be visible.
+ * Both candidate fixes for that gap — a `security_invoker` view exposing only the public
+ * columns, or moving the private columns to a 1:1 owner-only table — require writing
+ * down a column list, and a view that solved the notes/url problem while omitting
+ * `price` would silently empty every price on the share page. The totals engine would
+ * report a pack costing nothing and be right to, because nothing would have been asked
+ * for. This test is what makes that a build failure instead of a discovery.
+ */
+describe('a public pack carries its prices to an anonymous reader', () => {
+  it('returns price and currency on the embedded gear', async () => {
+    const pack = await createPack(owner, { visibility: 'public', itemCount: 2 });
+
+    // Priced on the gear rows, the way a user prices their closet — nothing is written
+    // to the pack items, so this also exercises the reference rather than a copy.
+    const { error: priceError } = await owner.client
+      .from('gear_items')
+      .update({ price: 25, currency: 'GBP' })
+      .in('id', pack.gearItemIds);
+    expect(priceError).toBeNull();
+
+    const { data, error } = await packTreeQuery(anonClient(), pack.slug).single();
+
+    expect(error).toBeNull();
+    const items = data?.pack_categories?.[0]?.pack_items ?? [];
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      expect(item.gear_items).toMatchObject({ price: 25, currency: 'GBP' });
+    }
   });
 });
