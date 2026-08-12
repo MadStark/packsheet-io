@@ -48,6 +48,34 @@ export const ACCOUNT_PATH = '/account';
 export const AUTH_CALLBACK_PATH = '/auth/callback';
 
 /**
+ * The two halves of the password-reset journey (PK-56): the page that asks for an
+ * address and the page that takes the new password.
+ *
+ * WHY OUT HERE rather than beside the functions that serve them. Every module that names
+ * these today — the two pages, `src/middleware.ts`, and `src/pages/sign-in.astro` for the
+ * "Forgot your password?" link — happens to be on AUTH_CONSUMERS already, so no
+ * anonymous route is saved an allowlist line by this file TODAY. That is not the reason,
+ * and treating it as one gets the file's argument backwards: the next module to want one
+ * of these strings is a nav bar, a 404 page, or the "you have been signed out" screen,
+ * none of which authenticates anybody, and the moment a path lives in the choke point the
+ * cheapest way for that module to get it is to ask for a standing permission to import
+ * the auth SDK. The header above is what that trade is about. Paths go here; nothing here
+ * touches an SDK.
+ *
+ * UPDATE_PASSWORD_PATH is additionally a value that TRAVELS, which is the thing to know
+ * before renaming it. `requestPasswordReset` (src/lib/auth/index.ts) puts it in the
+ * `?next=` of the `redirectTo` it hands GoTrue, GoTrue puts that URL in an email, and it
+ * comes back days later through `src/pages/auth/callback.ts`, where `safeNextPath` below
+ * re-validates it exactly like any other `next` — the recovery link deliberately goes
+ * through the same, already-tested exchange route Google sign-in uses rather than a
+ * second copy of it. One constant is what closes that round trip: a hand-typed duplicate
+ * at either end does not fail loudly, it lands the visitor on `ACCOUNT_PATH` with a live
+ * recovery session and no password form anywhere in sight.
+ */
+export const FORGOT_PASSWORD_PATH = '/forgot-password';
+export const UPDATE_PASSWORD_PATH = '/update-password';
+
+/**
  * Validates a `?next=`/`redirectTo` query parameter against open-redirect abuse —
  * "the classic bug in exactly this code" per the ticket that added it. A sign-in page
  * that redirects wherever `next` says, unchecked, is a phishing primitive: an attacker

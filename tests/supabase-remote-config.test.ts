@@ -1,0 +1,212 @@
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * PK-56 — the `[remotes.*]` blocks in supabase/config.toml, and the outage shape they
+ * can produce silently.
+ *
+ * `supabase config push` does not push a diff. It resolves the WHOLE `auth` block —
+ * this file's top-level values, with whatever a `[remotes.<name>]` block sets layered
+ * on top — and pushes THAT to the hosted project named by that block's `project_id`.
+ * The top-level values in this file are deliberately LOCAL DEV settings: no
+ * confirmation email (`enable_confirmations = false`), a one-second resend floor
+ * (`max_frequency = "1s"`), a two-per-hour cap (`[auth.rate_limit] email_sent = 2`),
+ * and `site_url = "http://localhost:4321"`. A `[remotes.*]` block that forgets to
+ * restate even one of those does not leave the hosted project's existing setting
+ * alone — it silently RESETS that one key to the local value, indistinguishable in a
+ * diff from "no change". That is a live outage — hosted confirmation email going
+ * dark, or a hosted project's redirect allow-list narrowing to a hostname nothing
+ * external can reach — that produces no error, no failed step and no red build.
+ *
+ * This file is the check that stands where CI would otherwise have nothing: it reads
+ * supabase/config.toml, finds every `[remotes.*]` block that exists (not a
+ * hard-coded list of the two known today), and asserts each one explicitly overrides
+ * every local-dev value that must never leak to a hosted project. A third remote
+ * added later inherits this guardrail automatically, because the assertions are
+ * driven by whatever `remotes` keys the file actually declares — the same shape as
+ * the `it.each(files)` pattern in migration-hygiene.test.ts, for the same reason: a
+ * check that only knows about today's two remotes is a check that silently stops
+ * covering the third one.
+ *
+ * The mirror-image mistake — "fixing" this test by making LOCAL DEV look like
+ * production instead of making each remote override correctly — is pinned too: the
+ * top-level block must still read as local-only, or `npm run db:start` starts
+ * confirming email against Mailpit while believing it is production-safe, and every
+ * other test in this suite that signs up a throwaway user starts waiting on an email
+ * nobody sends.
+ *
+ * NO TOML PARSER IS A DEPENDENCY OF THIS PROJECT (see package.json — only
+ * jsonc-parser and yaml are present, both for other file formats). Adding one for a
+ * single file this small and this structurally simple — no inline tables, no arrays
+ * of tables, no multi-line strings — would be more surface area than the problem
+ * warrants, so `parseSupabaseToml` below is a small hand-rolled reader scoped
+ * deliberately to what supabase/config.toml actually uses: `[dotted.table]` headers,
+ * `key = value` pairs, double-quoted strings, bare booleans/integers, and
+ * single- or multi-line arrays of strings. It is not a general TOML parser and must
+ * not be asked to be one — anything supabase/config.toml does not already use (inline
+ * tables, arrays of tables, literal/multi-line strings, dotted keys on one line) is
+ * out of scope and will parse wrong or be skipped rather than silently guessed at.
+ */
+
+const CONFIG_PATH = fileURLToPath(new URL('../supabase/config.toml', import.meta.url));
+
+type TomlValue = string | number | boolean | TomlValue[] | TomlTable;
+interface TomlTable {
+  [key: string]: TomlValue;
+}
+
+function parseValue(raw: string): TomlValue {
+  const text = raw.trim();
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  if (/^-?\d+$/.test(text)) return Number(text);
+  if (text.startsWith('[') && text.endsWith(']')) {
+    const inner = text.slice(1, -1);
+    return inner
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .map((part) => parseValue(part));
+  }
+  if (text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
+  return text;
+}
+
+/** Walks `root`, creating any missing table along `path`, without clobbering a table
+ *  a previous header already populated — `[remotes.staging]` sets keys directly on
+ *  `remotes.staging`, and the later `[remotes.staging.auth]` header must extend that
+ *  same object rather than replace it. */
+function tableAt(root: TomlTable, path: string[]): TomlTable {
+  let node = root;
+  for (const segment of path) {
+    const next = node[segment];
+    if (next && typeof next === 'object' && !Array.isArray(next)) {
+      node = next as TomlTable;
+    } else {
+      const created: TomlTable = {};
+      node[segment] = created;
+      node = created;
+    }
+  }
+  return node;
+}
+
+function parseSupabaseToml(text: string): TomlTable {
+  const root: TomlTable = {};
+  let current = root;
+  const lines = text.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    i++;
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+
+    const header = trimmed.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      current = tableAt(
+        root,
+        header[1].split('.').map((s) => s.trim()),
+      );
+      continue;
+    }
+
+    const kv = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!kv) continue; // out of scope for this file — see the header comment.
+    const [, key, firstLine] = kv;
+
+    let valueText = firstLine;
+    // A multi-line array: keep consuming lines until the closing bracket shows up.
+    if (valueText.trim().startsWith('[') && !valueText.includes(']')) {
+      while (i < lines.length && !valueText.includes(']')) {
+        valueText += `\n${lines[i]}`;
+        i++;
+      }
+    }
+    current[key] = parseValue(valueText);
+  }
+  return root;
+}
+
+const config = parseSupabaseToml(readFileSync(CONFIG_PATH, 'utf8'));
+
+function get(table: TomlValue | undefined, ...path: string[]): TomlValue | undefined {
+  let node: TomlValue | undefined = table;
+  for (const segment of path) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return undefined;
+    node = (node as TomlTable)[segment];
+  }
+  return node;
+}
+
+describe('supabase/config.toml parses the way this test needs it to', () => {
+  it('finds top-level auth settings, so the parser is reading the real file', () => {
+    expect(get(config, 'auth', 'site_url')).toBeTypeOf('string');
+  });
+
+  it('finds at least one [remotes.*] block, so the checks below are not vacuous', () => {
+    const remotes = get(config, 'remotes') as TomlTable | undefined;
+    expect(Object.keys(remotes ?? {}).length).toBeGreaterThan(0);
+  });
+});
+
+describe('local dev config stays local (the top-level block)', () => {
+  // If this ever reads true or https, the guard below — which trusts that ONLY a
+  // `[remotes.*]` override makes a project production-safe — has been defeated by
+  // making local dev look like production instead of making a remote block correct.
+  it('does not confirm email locally', () => {
+    expect(get(config, 'auth', 'email', 'enable_confirmations')).toBe(false);
+  });
+
+  it('still points site_url at a loopback address', () => {
+    const siteUrl = get(config, 'auth', 'site_url');
+    expect(siteUrl).toMatch(/^http:\/\/(localhost|127\.0\.0\.1)(:|\/)/);
+  });
+});
+
+describe('every [remotes.*] block overrides what config push would otherwise reset', () => {
+  const remotes = get(config, 'remotes') as TomlTable | undefined;
+  const names = Object.keys(remotes ?? {});
+
+  it.each(names)('%s: site_url is https and not a loopback address', (name) => {
+    const siteUrl = get(remotes, name, 'auth', 'site_url');
+    expect(siteUrl, `${name} has no auth.site_url override`).toBeTypeOf('string');
+    expect(siteUrl as string).toMatch(/^https:\/\//);
+    expect(siteUrl as string).not.toMatch(/localhost|127\.0\.0\.1/);
+  });
+
+  // The confirmation-email switch itself. `false` here — inherited silently from the
+  // top-level block — is the headline failure this whole file exists to catch: a
+  // hosted project that lets anyone sign in as anyone else's unverified address.
+  it.each(names)('%s: enable_confirmations is true', (name) => {
+    expect(get(remotes, name, 'auth', 'email', 'enable_confirmations')).toBe(true);
+  });
+
+  // Not a specific value — just NOT the local "1s" testing floor. With the hourly cap
+  // deliberately opened up (below), this per-address minimum is one of the two guards
+  // actually limiting how fast email goes out, and "1s" is not a limit at all.
+  it.each(names)('%s: max_frequency is not the local "1s" floor', (name) => {
+    expect(get(remotes, name, 'auth', 'email', 'max_frequency')).not.toBe('1s');
+  });
+
+  it.each(names)('%s: SMTP is enabled', (name) => {
+    expect(get(remotes, name, 'auth', 'email', 'smtp', 'enabled')).toBe(true);
+  });
+
+  // The one check in this file that is not about a value silently reverting — it is
+  // about a secret silently becoming permanent. `env(...)` means config push reads
+  // the password from the environment at push time; a literal here would commit
+  // Resend's API key to a public repository the moment anyone typed it in.
+  it.each(names)('%s: the SMTP password is env(...), never a literal secret', (name) => {
+    const pass = get(remotes, name, 'auth', 'email', 'smtp', 'pass');
+    expect(pass, `${name} has no auth.email.smtp.pass`).toBeTypeOf('string');
+    expect(pass as string).toMatch(/^env\([A-Za-z0-9_]+\)$/);
+  });
+
+  it.each(names)('%s: admin_email is on mail.packsheet.io', (name) => {
+    const adminEmail = get(remotes, name, 'auth', 'email', 'smtp', 'admin_email');
+    expect(adminEmail, `${name} has no auth.email.smtp.admin_email`).toBeTypeOf('string');
+    expect(adminEmail as string).toMatch(/@mail\.packsheet\.io$/);
+  });
+});

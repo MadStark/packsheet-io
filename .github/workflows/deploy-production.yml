@@ -92,19 +92,31 @@ jobs:
       # migrations against a real Postgres before this workflow sees them.
       # No SUPABASE_DB_PASSWORD — see deploy-staging.yml. The CLI provisions its own
       # login role from the access token.
-      - name: Apply database migrations
+      #
+      # PK-56: `config push` runs here too, between `link` and `db push` — see the
+      # identical addition and its full reasoning in deploy-staging.yml. It pushes
+      # supabase/config.toml's `[remotes.production]` block (SMTP, confirmation emails,
+      # redirect URLs, rate limits) to the hosted project this workflow is scoped to.
+      # This is the last gate before production, same as `npm test` above: nothing
+      # downstream re-checks that the auth config landed correctly either.
+      - name: Apply database migrations and push auth config
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          # PK-56: read by `config push` to resolve `env(RESEND_SMTP_PASSWORD)` in
+          # supabase/config.toml's `[remotes.production.auth.email.smtp]` block. See
+          # deploy-staging.yml for why it is never a literal in that file.
+          RESEND_SMTP_PASSWORD: ${{ secrets.RESEND_SMTP_PASSWORD }}
         # Through scripts/supabase.sh, not `supabase` directly. This job never starts a
-        # local stack, but `link` and `db push` still PARSE supabase/config.toml, and
-        # that file reads its project name and ports from the environment so each git
-        # worktree gets its own Docker containers. Unset, they make the whole file fail
-        # to parse with "ProjectConfigParseError" — a release broken by a local-dev
-        # convenience, with an error naming neither.
+        # local stack, but `link`, `config push` and `db push` still PARSE
+        # supabase/config.toml, and that file reads its project name and ports from the
+        # environment so each git worktree gets its own Docker containers. Unset, they
+        # make the whole file fail to parse with "ProjectConfigParseError" — a release
+        # broken by a local-dev convenience, with an error naming neither.
         run: |
           set -euo pipefail
           scripts/supabase.sh link --project-ref "$PROJECT_REF"
+          scripts/supabase.sh config push
           scripts/supabase.sh db push
 
       - name: Build

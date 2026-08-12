@@ -83,7 +83,19 @@ jobs:
       # projects with no password set at all. Referencing a secret that does not exist
       # would expand to an empty string and connect, or fail to, for reasons nobody
       # could read off the log.
-      - name: Apply database migrations
+      #
+      # PK-56: `config push` runs here too, between `link` and `db push`, rather than as
+      # a separate step. Both commands mutate the SAME hosted project and need the SAME
+      # `link` that precedes them; splitting config push into its own step would either
+      # duplicate that `link` call or silently depend on link's effect surviving across
+      # steps, which is not guaranteed and not worth relying on. It pushes
+      # supabase/config.toml's `[remotes.staging]` block — SMTP, confirmation emails,
+      # redirect URLs, rate limits — to the hosted project, resolved against this file's
+      # LOCAL top-level values (see the long warning at the top of the `[remotes.*]`
+      # section in supabase/config.toml before touching this). Before the build and the
+      # deploy for the same reason `db push` already is: so a release that depends on
+      # confirmation email working does not go live before the project can send one.
+      - name: Apply database migrations and push auth config
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           # From a secret, not this file. The two project refs are the only thing
@@ -93,15 +105,21 @@ jobs:
           # because `name: staging` on the production workflow is a one-word edit that
           # migrates the wrong database.
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          # PK-56: read by `config push` to resolve `env(RESEND_SMTP_PASSWORD)` in
+          # supabase/config.toml's `[remotes.staging.auth.email.smtp]` block before
+          # sending it to the hosted project. Never written to this file as a literal —
+          # see the same block's own comment on why.
+          RESEND_SMTP_PASSWORD: ${{ secrets.RESEND_SMTP_PASSWORD }}
         # Through scripts/supabase.sh, not `supabase` directly. This job never starts a
-        # local stack, but `link` and `db push` still PARSE supabase/config.toml, and
-        # that file reads its project name and ports from the environment so each git
-        # worktree gets its own Docker containers. Unset, they make the whole file fail
-        # to parse with "ProjectConfigParseError" — a release broken by a local-dev
-        # convenience, with an error naming neither.
+        # local stack, but `link`, `config push` and `db push` still PARSE
+        # supabase/config.toml, and that file reads its project name and ports from the
+        # environment so each git worktree gets its own Docker containers. Unset, they
+        # make the whole file fail to parse with "ProjectConfigParseError" — a release
+        # broken by a local-dev convenience, with an error naming neither.
         run: |
           set -euo pipefail
           scripts/supabase.sh link --project-ref "$PROJECT_REF"
+          scripts/supabase.sh config push
           scripts/supabase.sh db push
 
       - name: Build

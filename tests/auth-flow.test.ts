@@ -57,12 +57,23 @@
  * re-run — config.toml is UNCHANGED by this file. Each `describe` block below registers
  * its own dedicated user rather than sharing one across blocks (an account touched by
  * an earlier block's sign-out or deletion should never be reused by a later block that
- * assumes a clean session), which puts this file's total at twelve sign-up requests and
- * three additional sign-ins — inside the limit of thirty, with room for a full retry but
- * not for much growth. Three of the twelve are the enumeration block's, which is
+ * assumes a clean session), which puts this file's total at fourteen sign-up requests and
+ * five additional sign-ins — inside the limit of thirty, with room for a full retry but
+ * not for much growth. Three of the fourteen are the enumeration block's, which is
  * inherently sign-up-heavy: it registers an address, registers it AGAIN to get the
  * refusal, and makes one more attempt with a password GoTrue will reject. There is no
  * cheaper way to observe either outcome.
+ *
+ * PK-56's two blocks add two of those sign-ups and two of those sign-ins. The reset
+ * REQUESTS themselves are not on that budget at all — `/recover` is not a sign-in or a
+ * sign-up — and what governs them instead is `[auth.email] max_frequency`, a per-ADDRESS
+ * floor between sends: 1 second locally, 60 on both hosted projects. That is deliberate
+ * rather than incidental to the reset block below, which asks twice for the same address
+ * on purpose. `[auth.rate_limit] email_sent` does not apply here, whatever the local value
+ * says: its own comment in config.toml records that it requires `[auth.email.smtp]`, which
+ * the local stack does not use — it mails through `[local_smtp]` (Mailpit) instead. So a
+ * fresh random address per run never inherits a previous run's budget, and nothing in this
+ * file goes red on a third `npm test` within an hour.
  *
  * What this file avoids is the shape that actually burns the budget: creating a fresh
  * user inside every individual `it` rather than once per `describe`'s `beforeAll`. If a
@@ -87,10 +98,13 @@ import {
   createAuthClient,
   deleteOwnAccount,
   getUser,
+  passwordUpdateErrorMessage,
+  requestPasswordReset,
   signInWithPassword,
   signOut,
   signUpErrorMessage,
   signUpWithPassword,
+  updatePassword,
 } from '../src/lib/auth';
 import { createPack } from './support/fixtures';
 import {
@@ -139,7 +153,11 @@ requireAuthEnvironment();
 const PASSWORD = 'CorrectHorseBattery9!';
 const WRONG_PASSWORD = 'WrongPassword9!';
 
-/** A fresh, never-used address per call — `enable_confirmations = false` in config.toml means it never needs to receive mail. */
+/** A fresh, never-used address per call. The local stack keeps `enable_confirmations =
+ *  false` (config.toml's top-level value — both hosted projects override it to true since
+ *  PK-56), so a sign-up here never waits on mail. A password RESET does generate mail even
+ *  locally, into Mailpit, which nothing reads; a fresh address per call is also what keeps
+ *  the per-address `max_frequency` floor from carrying between runs. */
 function testEmail(label: string): string {
   return `auth-flow-${label}-${randomUUID()}@packsheet.test`;
 }
@@ -366,7 +384,14 @@ describe('signing in with a password', () => {
  * The sign-up form as an account-enumeration oracle, and the mapping that stops it being
  * one. See SIGN_UP_UNAVAILABLE_MESSAGE in src/lib/auth/index.ts for why "sign-up is not
  * the enumeration-sensitive case sign-in is" — which is what this module used to say, and
- * used to act on — is only true when Supabase's "Confirm email" is ON, and it is OFF here.
+ * used to act on — holds only where Supabase's "Confirm email" is ON.
+ *
+ * It is OFF on the stack this file runs against, which is what keeps the block below
+ * meaningful: PK-56 turned confirmations on for both HOSTED projects, so a duplicate
+ * sign-up there is answered with a fake success instead of a refusal, and the oracle is
+ * closed at the source. Locally it is not, so the refusal below is real and the mapping is
+ * the only thing standing between it and a visitor — which is exactly the environment
+ * every contributor browses.
  */
 describe('signing up with an address that already exists', () => {
   const email = testEmail('duplicate');
@@ -463,6 +488,210 @@ describe('signing up with an address that already exists', () => {
     expect(signUpErrorMessage('over_email_send_rate_limit')).toBe(
       signUpErrorMessage('over_request_rate_limit'),
     );
+  });
+});
+
+/**
+ * The reset-request form as an account-enumeration oracle, and the reason it is not one
+ * (PK-56). See `requestPasswordReset` in src/lib/auth/index.ts for the argument; this is
+ * the part of it that has to be measured rather than reasoned about, because the leak
+ * would come from GoTrue's behaviour rather than from our copy.
+ *
+ * The three calls in `beforeAll` are the three cases a stranger can produce from
+ * src/pages/forgot-password.astro, and the whole claim is that they are indistinguishable
+ * from outside:
+ *
+ *   - an address that HAS an account, which really does get an email;
+ *   - the SAME address again, immediately — the request that trips `[auth.email]
+ *     max_frequency` (1s locally, 60s on both hosted projects), and the reason that matters
+ *     is that this code is only reachable for an address that got an email in the first
+ *     place, so a page that rendered "too many attempts just now" here and a confirmation
+ *     elsewhere would be publishing the accounts table one guess at a time;
+ *   - an address that has never been registered, which sends nothing at all.
+ *
+ * Whether the second one actually trips on a given run depends on how fast the two HTTP
+ * requests are, and nothing here asserts that it did — that is the point. The assertion is
+ * that all three answers are the same value, which holds either way, and which would fail
+ * the moment somebody widened `requestPasswordReset`'s return type to let a page see the
+ * difference.
+ */
+describe('asking for a password-reset email', () => {
+  const email = testEmail('reset-request');
+  let registered: Awaited<ReturnType<typeof requestPasswordReset>>;
+  let repeated: Awaited<ReturnType<typeof requestPasswordReset>>;
+  let unregistered: Awaited<ReturnType<typeof requestPasswordReset>>;
+  let requestJar: FakeAstroCookies;
+
+  beforeAll(async () => {
+    const signUpVisit = freshVisit();
+    const created = await signUpWithPassword({
+      cookies: asAstroCookies(signUpVisit.cookies),
+      request: signUpVisit.request,
+      email,
+      password: PASSWORD,
+    });
+    if (!created.ok) throw new Error(`Fixture failed to register ${email}: ${created.error}`);
+
+    const requestVisit = freshVisit();
+    requestJar = requestVisit.cookies;
+    registered = await requestPasswordReset({
+      cookies: asAstroCookies(requestJar),
+      request: requestVisit.request,
+      email,
+    });
+
+    const repeatVisit = freshVisit();
+    repeated = await requestPasswordReset({
+      cookies: asAstroCookies(repeatVisit.cookies),
+      request: repeatVisit.request,
+      email,
+    });
+
+    const strangerVisit = freshVisit();
+    unregistered = await requestPasswordReset({
+      cookies: asAstroCookies(strangerVisit.cookies),
+      request: strangerVisit.request,
+      email: testEmail('never-registered-reset'),
+    });
+  });
+
+  it('answers a registered and an unregistered address with the identical value', () => {
+    expect(registered).toEqual({ ok: true });
+    expect(unregistered).toEqual(registered);
+  });
+
+  it('answers a rate-limited repeat exactly the same way', () => {
+    expect(repeated).toEqual(registered);
+  });
+
+  /**
+   * NOT VACUOUS, and this is the assertion that makes the two above mean something. Three
+   * identical values are also what a `requestPasswordReset` that did nothing at all would
+   * produce, so something has to show that the call really reached GoTrue for the
+   * registered address — and it has to be something the VISITOR cannot see, or it would be
+   * the leak.
+   *
+   * `auth.users.recovery_sent_at` is exactly that: server-side state, set by GoTrue when it
+   * issues a recovery link, readable here only through a superuser connection. The
+   * asymmetry between a registered address and an unregistered one is real and it lives in
+   * the database, which is where it belongs; what the response says is the same either way.
+   */
+  it('really did issue a recovery link for the registered address', async () => {
+    const rows = await adminSql<{ recovery_sent_at: Date | null }>(
+      'select recovery_sent_at from auth.users where email = $1',
+      [email],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].recovery_sent_at).not.toBeNull();
+  });
+
+  /**
+   * The other half of "it really ran": the PKCE verifier. `@supabase/ssr` builds a
+   * code-challenge for the recovery link and stores its verifier through the same `setAll`
+   * every other operation in src/lib/auth/index.ts writes cookies with — and
+   * `exchangeCodeForSession` at src/pages/auth/callback.ts cannot complete the link
+   * without it. That is also why the expired-link copy on src/pages/update-password.astro
+   * says "only in the browser that asked": a reset link opened somewhere else has no
+   * verifier to present.
+   */
+  it('leaves this browser the PKCE verifier the emailed link will be exchanged against', () => {
+    expect(requestJar.entries().length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * `updatePassword` — the far end of the reset journey, driven exactly as
+ * src/pages/update-password.astro drives it: a request carrying a session (there, one the
+ * callback route just exchanged a recovery code for; here, one a sign-up wrote, which is
+ * the same object to this function) and a new password.
+ *
+ * What the page cannot be tested for is covered by what this block asserts about the
+ * function: that the new password really replaces the old one on the auth server, rather
+ * than the call merely returning `{ ok: true }`.
+ */
+describe('choosing a new password', () => {
+  const email = testEmail('update-password');
+  const NEW_PASSWORD = 'AnotherCorrectHorse9!';
+  let weakResult: Awaited<ReturnType<typeof updatePassword>>;
+  let updateResult: Awaited<ReturnType<typeof updatePassword>>;
+  let signInWithNew: Awaited<ReturnType<typeof signInWithPassword>>;
+  let signInWithOld: Awaited<ReturnType<typeof signInWithPassword>>;
+
+  beforeAll(async () => {
+    const signUpVisit = freshVisit();
+    const created = await signUpWithPassword({
+      cookies: asAstroCookies(signUpVisit.cookies),
+      request: signUpVisit.request,
+      email,
+      password: PASSWORD,
+    });
+    if (!created.ok) throw new Error(`Fixture failed to register ${email}: ${created.error}`);
+    const sessionHeader = signUpVisit.cookies.asRequestCookieHeader();
+
+    // The refusal FIRST, while the old password is still the current one — so the
+    // successful change below cannot be what made this fail, and so no extra sign-up is
+    // needed to observe it.
+    const weakVisit = continueWith(sessionHeader);
+    weakResult = await updatePassword({
+      cookies: asAstroCookies(weakVisit.cookies),
+      request: weakVisit.request,
+      password: 'x',
+    });
+
+    const updateVisit = continueWith(sessionHeader);
+    updateResult = await updatePassword({
+      cookies: asAstroCookies(updateVisit.cookies),
+      request: updateVisit.request,
+      password: NEW_PASSWORD,
+    });
+
+    const newVisit = freshVisit();
+    signInWithNew = await signInWithPassword({
+      cookies: asAstroCookies(newVisit.cookies),
+      request: newVisit.request,
+      email,
+      password: NEW_PASSWORD,
+    });
+
+    const oldVisit = freshVisit();
+    signInWithOld = await signInWithPassword({
+      cookies: asAstroCookies(oldVisit.cookies),
+      request: oldVisit.request,
+      email,
+      password: PASSWORD,
+    });
+  });
+
+  it('accepts the new password for the session that asked', () => {
+    expect(updateResult.ok).toBe(true);
+    if (!updateResult.ok) return;
+    expect(updateResult.user.email).toBe(email);
+  });
+
+  // The claim the assertion above cannot make on its own: `{ ok: true }` is also what a
+  // function that called nothing would return. Signing in for real is what proves the
+  // auth server changed its mind about this account.
+  it('the new password really signs in afterwards', () => {
+    expect(signInWithNew.ok).toBe(true);
+  });
+
+  it('and the old one no longer does', () => {
+    expect(signInWithOld.ok).toBe(false);
+  });
+
+  /**
+   * Driven through the real call rather than through `passwordUpdateErrorMessage` alone,
+   * for the reason the sign-up block gives for the same test: whether GoTrue actually
+   * reports `weak_password` for a password under `minimum_password_length` is the half a
+   * table-driven test cannot answer, and if it stops doing so this project's
+   * useful-feedback branch is dead with nothing else to say so.
+   */
+  it('refuses a password the server calls too weak, in our own words', () => {
+    expect(weakResult.ok).toBe(false);
+    if (weakResult.ok) return;
+    expect(weakResult.error).toBe(passwordUpdateErrorMessage('weak_password'));
+    expect(weakResult.error).not.toBe(passwordUpdateErrorMessage(undefined));
+    expect(weakResult.error).toMatch(/password/i);
   });
 });
 

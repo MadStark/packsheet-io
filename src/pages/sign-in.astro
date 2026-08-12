@@ -8,6 +8,7 @@ import Layout from '../layouts/Layout.astro';
 import { getGoogleAuthorizationUrl, signInWithPassword } from '../lib/auth';
 import {
   AUTH_CALLBACK_PATH,
+  FORGOT_PASSWORD_PATH,
   googleAuthUnavailableMessage,
   nextFromForm,
   NEXT_PARAM,
@@ -147,7 +148,21 @@ if (Astro.request.method === 'POST') {
       </button>
     </form>
 
-    <p class="text-ink-2 mt-8 text-sm">
+    {
+      /* No `?next=` on this one, deliberately, unlike the sign-up link below it. The reset
+        journey leaves this browser for an inbox and comes back through
+        src/pages/auth/callback.ts, whose destination is set by the `?next=` that
+        requestPasswordReset put in the emailed link — carrying a second, older `next`
+        into the request page would be a value with nowhere to go and no way to survive
+        the round trip. See src/lib/auth-routes.ts for the two constants. */
+    }
+    <p class="text-ink-2 mt-6 text-sm">
+      <a href={FORGOT_PASSWORD_PATH} class="text-blue-deep hover:text-blue-ink underline">
+        Forgot your password?
+      </a>
+    </p>
+
+    <p class="text-ink-2 mt-4 text-sm">
       New here?{' '}
       <a
         href={`${SIGN_UP_PATH}?next=${encodeURIComponent(next)}`}

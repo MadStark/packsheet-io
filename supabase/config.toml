@@ -444,3 +444,133 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# =============================================================================
+# PK-56: hosted SMTP, via `[remotes.*]`
+# =============================================================================
+#
+# Neither hosted project (staging tvcafyzatparwckhyyww, production hrslxngdfocxderslkws)
+# has ever had an SMTP sender configured, so no confirmation email — signup, password
+# reset, email change — has ever reached anyone outside the Supabase org. `supabase
+# config push` (wired up in scripts/supabase.sh via the deploy workflows' "Apply
+# database migrations" step, now doing double duty) reads a `[remotes.<name>]` block
+# and pushes it, resolved against this file's top-level values, to the project named by
+# `project_id`.
+#
+# READ THIS BEFORE ADDING A THIRD REMOTE, OR EDITING EITHER OF THE TWO BELOW:
+#
+# `config push` does not push a diff of what changed — it resolves the WHOLE `auth`
+# block (this file's top-level values, with anything set here layered on top) and
+# pushes that. A key this block does not mention is not "left alone" on the hosted
+# project; it is silently SET to whatever the top-level value happens to be, because
+# the top-level values in this file are deliberately LOCAL DEV settings (Mailpit on
+# `local_smtp`, `site_url = "http://localhost:4321"`, `enable_confirmations = false`,
+# `max_frequency = "1s"`, `[auth.rate_limit] email_sent = 2`). Every one of those five
+# is therefore re-stated explicitly below for both remotes — not because TOML requires
+# it, but because omitting even one of them is a silent, unannounced reset of a live
+# project to a localhost value, indistinguishable in the diff from "no change to that
+# key". tests/supabase-remote-config.test.ts pins all five for every `[remotes.*]`
+# block this file defines, specifically so a third remote added later inherits the
+# guardrail without anyone having to remember to extend a hand-written list.
+#
+# The nesting below is ordinary TOML table nesting with `remotes.<name>.` prepended to
+# the path the top-level key already uses — `[auth.email.smtp]` above becomes
+# `[remotes.staging.auth.email.smtp]` here. Confirmed against the Supabase CLI's own
+# docs for `2.113.0`; there is no separate schema for what is legal inside `[remotes]`.
+
+[remotes.staging]
+project_id = "tvcafyzatparwckhyyww"
+
+[remotes.staging.auth]
+# Overrides the top-level `http://localhost:4321` above. Used to build links inside
+# confirmation/reset emails; a hosted project left on the local value would mail out
+# links to a laptop nobody else can reach.
+site_url = "https://staging.packsheet.io"
+# Staging's live allow-list, carried over as-is rather than narrowed: developers point
+# local builds (`astro dev` on 4321, `wrangler dev` on 8787) at the staging project, so
+# both loopback spellings and both local ports stay on the list. Production's
+# equivalent block below is deliberately narrower — see the comment there for why that
+# narrowness must not be copied here, or the other way round.
+additional_redirect_urls = [
+  "https://staging.packsheet.io/**",
+  "http://localhost:*/**",
+  "http://127.0.0.1:*/**",
+  "http://localhost:4321/auth/callback",
+  "http://localhost:4321/auth/callback?*",
+  "http://localhost:8787/auth/callback",
+  "http://localhost:8787/auth/callback?*",
+  "http://127.0.0.1:4321/auth/callback",
+  "http://127.0.0.1:8787/auth/callback",
+]
+
+[remotes.staging.auth.email]
+# Overrides the top-level `false`. Local dev leaves this off so `npm test` and manual
+# signup flows never wait on Mailpit; a hosted project left on that value lets anyone
+# sign in as anyone else's unverified email address.
+enable_confirmations = true
+# Overrides the top-level `"1s"`, which is a local-only value meant to make manual
+# testing fast against Mailpit. GoTrue's own default is 60 seconds; with the hourly cap
+# below deliberately opened up, this per-address floor becomes one of only two real
+# limits left on how fast confirmation/reset email can be sent (see the rate_limit
+# comment below for the other).
+max_frequency = "60s"
+
+[remotes.staging.auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 587
+# Resend's SMTP username is always the literal string "resend" — it is not a secret and
+# does not vary per account; what identifies the account is the password below.
+user = "resend"
+# Never a literal. This is the Resend API key; env(...) means `config push` reads it
+# from this job's own environment at push time rather than it living in this
+# repository, which is public.
+pass = "env(RESEND_SMTP_PASSWORD)"
+admin_email = "noreply@mail.packsheet.io"
+sender_name = "Packsheet"
+
+[remotes.staging.auth.rate_limit]
+# Overrides the top-level `2`. Deliberately far above anything this project would ever
+# legitimately send in an hour — the product owner's decision is that Supabase must NOT
+# be the thing that limits how much confirmation/reset email goes out. Resend's own
+# quota is the ceiling instead, and Resend alerts automatically at 80% and 100% of it,
+# which this repository cannot see or enforce from here. With this cap effectively
+# disabled, the two guards actually doing the limiting work are `sign_in_sign_ups`
+# above (signup/sign-in requests per IP, per 5 minutes — unrelated to email but the
+# thing that makes triggering confirmation email expensive in the first place) and
+# `max_frequency` on `[remotes.staging.auth.email]` above (the per-address floor
+# between sends). Losing either of those two while this stays at 100000 removes the
+# only real limiter left.
+email_sent = 100000
+
+[remotes.production]
+project_id = "hrslxngdfocxderslkws"
+
+[remotes.production.auth]
+site_url = "https://packsheet.io"
+# Production's live allow-list — exactly two entries, no localhost. Unlike staging,
+# nothing legitimately develops against the production project, so widening this to
+# include a loopback address would only ever help an attacker's local reproduction of
+# the auth callback flow, never a developer. Keep this list exactly as narrow as it is
+# on the hosted project; do not copy staging's localhost entries in here.
+additional_redirect_urls = ["https://packsheet.io/auth/callback", "https://packsheet.io/auth/callback?*"]
+
+[remotes.production.auth.email]
+enable_confirmations = true
+max_frequency = "60s"
+
+[remotes.production.auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 587
+user = "resend"
+pass = "env(RESEND_SMTP_PASSWORD)"
+admin_email = "noreply@mail.packsheet.io"
+sender_name = "Packsheet"
+
+[remotes.production.auth.rate_limit]
+# Same reasoning as staging's block above: Resend's quota and its 80%/100% alerts are
+# the intended ceiling, not this number. The two guards that remain load-bearing are
+# `sign_in_sign_ups` (per IP) and `max_frequency` on `[remotes.production.auth.email]`
+# above (per address).
+email_sent = 100000
