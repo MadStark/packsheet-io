@@ -1,0 +1,37 @@
+-- Worn and consumable cannot both be true on the same pack item.
+--
+-- Ref 23's weight engine (`src/lib/totals.ts`) computes a pack's weight as three
+-- buckets — base, worn and consumable — that must partition the total exactly:
+-- `total = base + worn + consumable`. An item flagged both worn and consumable cannot
+-- be placed in exactly one bucket, so `computeTotals` throws on it rather than picking
+-- a winner; see "THREE BUCKETS THAT PARTITION" in that module's comment for the full
+-- argument against a precedence rule.
+--
+-- This constraint and that refusal ship in the same commit, and each covers what the
+-- other cannot. Until now `worn` and `consumable` were two independent booleans with
+-- nothing coupling them, so a row with both true was one PATCH away through the ordinary
+-- Data API and the application throwing on read was the only defence — which does
+-- nothing for a row written by psql, by a restore, or by a later import path that never
+-- calls the engine. The engine's refusal stays for the converse reason: it is a pure
+-- function over a shape, and it is handed objects that never came from this table at
+-- all. Neither makes the other redundant, and removing either one leaves a real gap.
+--
+-- THIS IS NOT A STRUCTURAL IMPOSSIBILITY, and it is worth being honest about that: two
+-- independent booleans can always be true together as far as Postgres's type system is
+-- concerned, the way `weight is null` and `weight_unit is null` could independently be
+-- true if nothing said otherwise. What makes the combination wrong is not the columns,
+-- it is what they MEAN together — `worn` means carried on the body rather than in the
+-- pack, `consumable` means used up during the trip, and an item that is both has no
+-- single bucket left to be counted in. A reader who only looks at the columns will see
+-- two harmless flags; the constraint exists because the numbers built from them are not
+-- harmless when both are set.
+--
+-- NOT an XOR, and the name says so on purpose. Neither flag set is the ordinary case —
+-- an item that is just carried in the pack, not worn and not consumed — and it must
+-- stay legal; only BOTH true at once is refused. `check (not (worn and consumable))` is
+-- exactly `check (worn_consumable_exclusive)` for the two cases that matter (both true
+-- is refused, all three of the others are permitted), which an XOR would get wrong by
+-- also refusing the ordinary neither-flag row.
+alter table public.pack_items
+  add constraint pack_items_worn_consumable_exclusive
+  check (not (worn and consumable));

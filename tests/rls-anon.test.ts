@@ -197,14 +197,30 @@ describe('a pack with 40 items loads in one round trip', () => {
 /**
  * What a frozen pack carries forward.
  *
- * There is a known gap here, recorded in the grants block of the migration: a public
- * pack currently exposes the whole gear row, `notes` and `url` included. Column-level
- * grants are the obvious fix and are incompatible with PostgREST embedding — measured,
- * not assumed — so the live-path decision belongs to the share page (Ref 26).
+ * READ THIS BEFORE TREATING THE ASSERTION BELOW AS A RULE: it still describes what the
+ * code does, but the reasoning that put it there has been overtaken.
  *
- * What IS decided here is the frozen copy, and this test pins it. A snapshot is read by
- * `anon` on a public pack and is permanent, so freezing those fields would put them
- * somewhere a later fix to the live path could not reach.
+ * The migration's grants block records a known gap — a public pack exposes the whole
+ * gear row, because column-level grants are the obvious fix and are incompatible with
+ * PostgREST embedding (measured, not assumed). `gear_item_snapshot()` was written to
+ * omit `notes` and `url` on the strength of it: the live path had not decided whether to
+ * show them, a snapshot is read by `anon` on a public pack and is permanent, so freezing
+ * them would have published them somewhere a later fix to the live path could not reach.
+ *
+ * That objection is now spent. `notes` and `url` are public, deliberately, along with
+ * `price` — see the describe below and PACK_TREE_SELECT's comment for why. Only
+ * `user_id` is left of the gap.
+ *
+ * Which turns this omission from a protection into an open question of a different kind.
+ * If those fields are extras worth showing on a live item, then a locked pack — or one
+ * whose gear was deleted — quietly loses them, and rule 3's promise that deleting gear
+ * never destroys pack history holds for the weight but not for the remark beside it.
+ * Whether the snapshot should start capturing them is a change to `gear_item_snapshot()`
+ * and belongs with the freeze rules rather than here. That is PK-58, which is written and
+ * carries the one decision this file cannot make: whether to backfill the snapshots
+ * already written, or leave old and new frozen items rendering differently. This test
+ * records what is true today, so the change is a deliberate flip rather than a silent one
+ * — invert it, do not delete it.
  */
 describe('the frozen snapshot carries only what renders the item', () => {
   it('omits notes and url', async () => {
@@ -220,5 +236,76 @@ describe('the frozen snapshot carries only what renders the item', () => {
     expect(data?.snapshot).not.toHaveProperty('url');
     // Still a usable display record.
     expect(data?.snapshot).toMatchObject({ name: 'Gear 1', weight_unit: 'g' });
+  });
+});
+
+/**
+ * What a public pack tells a stranger, decided rather than leaked.
+ *
+ * `price`, `notes` and `url` are all published on purpose. A price sits on the same
+ * footing as a weight — what a setup cost is a large part of why the list is worth
+ * sharing at all, and nobody has ever proposed hiding a weight. `notes` and `url` are
+ * extras an owner chooses to attach to an item: a remark, and a link to somewhere the
+ * item is sold or written about. A reader who followed a shared link is welcome to all
+ * three. None of them is a headline field and the share page should not lead with them,
+ * but that is Ref 26 deciding a layout, not this file deciding a privilege.
+ *
+ * `url` is deliberately not called "the purchase link" anywhere in this codebase. That
+ * is the common case and not the definition — it may point at a review, a manufacturer's
+ * page, a forum thread — and a name that narrowed it would be quoted back later as
+ * licence to render it as a Buy button.
+ *
+ * What is left of the migration's known gap is `user_id`, which is a different kind of
+ * thing entirely: the owner's JWT `sub`, which nobody asked for and which lets a stranger
+ * group every public pack by author. Still Ref 26's to close.
+ *
+ * PINNED HERE RATHER THAN LEFT TO THE GRANTS BLOCK, because today "anon can read these"
+ * is true by ACCIDENT: it follows from the table-level grant the known gap exists to
+ * complain about, not from anything recording that they are meant to be visible. Both
+ * candidate fixes for that gap — a `security_invoker` view exposing only the public
+ * columns, or moving the private columns to a 1:1 owner-only table — require writing down
+ * a column list. A view drawn up to hide `user_id` that took these three with it would
+ * silently empty every price on the share page and drop the extras, and the totals engine
+ * would report a pack costing nothing and be right to, having been asked for nothing.
+ * This test is what makes that a build failure instead of a discovery.
+ */
+describe('a public pack carries its prices and extras to an anonymous reader', () => {
+  it('lets a stranger read price, currency, notes and url on the referenced gear', async () => {
+    const pack = await createPack(owner, { visibility: 'public', itemCount: 2 });
+
+    const extras = {
+      price: 25,
+      currency: 'GBP',
+      notes: 'Runs small, size up.',
+      url: 'https://example.com/reviews/the-thing',
+    };
+
+    // Written on the gear rows, the way an owner fills in their closet — nothing is
+    // written to the pack items, so this also exercises the reference rather than a copy.
+    const { error: updateError } = await owner.client
+      .from('gear_items')
+      .update(extras)
+      .in('id', pack.gearItemIds);
+    expect(updateError).toBeNull();
+
+    // Named explicitly rather than read through packTreeQuery, and that is the point of
+    // the test rather than a shortcut around it. PACK_TREE_SELECT exists to carry what
+    // the TOTALS ENGINE reads; `notes` and `url` are display extras it has no use for. If
+    // this asserted through that select, then narrowing the select — a query decision —
+    // would fail a test about PRIVILEGE, and widening it would be the only way to make a
+    // privilege test pass. Asking for the four columns directly keeps the two questions
+    // apart: what a stranger is ALLOWED to read, and what any given page bothers to ask
+    // for. Reaching these rows at all also exercises the anon policy on gear_items, which
+    // grants read only to gear a public pack references.
+    const { data, error } = await anonClient()
+      .from('gear_items')
+      .select('id, price, currency, notes, url')
+      .in('id', pack.gearItemIds);
+
+    expect(error).toBeNull();
+    expect(data).toHaveLength(2);
+    for (const gear of data ?? []) {
+      expect(gear).toMatchObject(extras);
+    }
   });
 });

@@ -3,6 +3,9 @@ import { adminSql, adminSqlWith, createUser, type TestUser } from './support/loc
 import type { TablesInsert } from '../src/lib/database.types';
 import { anonClient, packTreeQuery } from './support/local-database';
 import { createPack } from './support/fixtures';
+// The Ref 23 engine, run over rows this file fetched rather than over a fixture written
+// by hand. It is pure, so importing it here costs nothing and loads nothing.
+import { computeTotals } from '../src/lib/totals';
 
 /**
  * The three rules the model exists to enforce (Ref 7), tested as behaviour.
@@ -505,6 +508,49 @@ describe('the constrained columns refuse values outside their domain', () => {
     expect(position.error?.code).toBe('23514');
   });
 
+  // The engine-side half of this rule lives in src/lib/totals.ts, which throws on an
+  // item flagged both worn and consumable because base, worn and consumable must
+  // partition the pack exactly. This is the schema's half of the same rule — and it
+  // must refuse only the combination, not either flag alone, which is why both halves
+  // are asserted here: a constraint that accidentally forbade `worn` by itself would
+  // still pass a test that checked only the refusal.
+  it('refuses an item flagged both worn and consumable, but accepts either alone', async () => {
+    const pack = await createPack(owner, { itemCount: 1 });
+
+    const both = await owner.client
+      .from('pack_items')
+      .update({ worn: true, consumable: true })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(both.error?.code).toBe('23514');
+
+    const wornOnly = await owner.client
+      .from('pack_items')
+      .update({ worn: true, consumable: false })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(wornOnly.error).toBeNull();
+
+    const consumableOnly = await owner.client
+      .from('pack_items')
+      .update({ worn: false, consumable: true })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(consumableOnly.error).toBeNull();
+
+    // NEITHER flag, which is the migration's "NOT an XOR" argument made self-evidencing.
+    // It was covered only by accident until now: every fixture in this file creates items
+    // with both columns false, so an XOR would have failed at fixture creation and taken
+    // half the suite with it — a diagnosis nobody would have reached from the failures.
+    // The ordinary case deserves the same one line the two exceptional ones get.
+    const neither = await owner.client
+      .from('pack_items')
+      .update({ worn: false, consumable: false })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(neither.error).toBeNull();
+  });
+
   // The shape check on snapshot. Without it `{}` satisfies reference-or-snapshot, and
   // an item that renders as nothing is one PATCH away through the ordinary Data API.
   it('refuses a snapshot that could not render the item', async () => {
@@ -543,5 +589,103 @@ describe('the pack tree comes back in position order', () => {
     expect(items).toHaveLength(3);
     const ids = items.map((i) => i.id);
     expect(ids).toEqual([...ids].sort());
+  });
+});
+
+/**
+ * THE PACK THAT COST £2,000 AND REPORTED £42.50.
+ *
+ * Every other test of the totals engine builds its own input, which is exactly the
+ * transcription step that hides this defect: the engine was handed rows the ENGINE'S
+ * tests thought a pack looked like, never rows this query actually returns. The two
+ * disagreed, and the disagreement was not uniform within a single pack.
+ *
+ * `private.gear_item_snapshot()` captures `price` and `currency`. `PACK_TREE_SELECT` —
+ * the one pack-tree query in this repository, and the one the share page will issue when
+ * Ref 26 writes it — did not. So a pack whose gear is all priced came back with no
+ * prices at all — until one gear item was DELETED, at which point the BEFORE DELETE
+ * trigger froze that one row, and that row alone arrived carrying a price. The rollup then reported the
+ * deleted item's price as the whole pack's cost: a confident wrong number, not an
+ * absence, and one that would have looked entirely plausible on the page.
+ *
+ * This is the case no unit test could have caught, because both halves of it — what the
+ * trigger captures and what the select asks for — live outside the module. It runs the
+ * real query, against the real trigger, through the real engine.
+ */
+describe('the totals engine over the tree PACK_TREE_SELECT actually fetches', () => {
+  it('prices every item, whether it is live gear or a frozen snapshot', async () => {
+    const pack = await createPack(owner, { visibility: 'public', itemCount: 3 });
+
+    // £25.00 each, on the gear rows — the master record, exactly as a user would price
+    // their closet. Nothing is written to the pack items.
+    const priced = await owner.client
+      .from('gear_items')
+      .update({ price: 25, currency: 'GBP' })
+      .in('id', pack.gearItemIds)
+      .select('id');
+    expect(priced.error).toBeNull();
+    expect(priced.data).toHaveLength(3);
+
+    // One item leaves the closet. The BEFORE DELETE trigger freezes it into its pack
+    // item, price included, while the other two stay live — which is what makes the two
+    // sources coexist in one pack rather than in two different packs.
+    const { error: deleteError } = await owner.client
+      .from('gear_items')
+      .delete()
+      .eq('id', pack.gearItemIds[0]);
+    expect(deleteError).toBeNull();
+
+    const { data, error } = await packTreeQuery(anonClient(), pack.slug).single();
+    expect(error).toBeNull();
+
+    const totals = computeTotals(data!);
+
+    // The mixture is real, not nominal: one frozen row and two live ones, in one pack.
+    expect(totals.categories[0].items.map((item) => item.source).sort()).toEqual([
+      'gear_item',
+      'gear_item',
+      'snapshot',
+    ]);
+
+    // £75.00, in minor units. Not £25.00 — which is what a rollup fed by a select that
+    // omits `price` reports, having seen a price on the frozen item and nothing anywhere
+    // else — and not an empty map either, which is what the same select reported before
+    // anything was deleted. The failure was that those two situations produced different
+    // wrong answers from the same correct data.
+    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
+      GBP: { amountMinorUnits: 7500, currency: 'GBP' },
+    });
+  });
+
+  /**
+   * The flags, from the same direction. `consumable` and `packed` are `boolean not null
+   * default false` columns that the select did not fetch, so every consumable item's
+   * weight landed in base and `packedCount` was 0 for every pack in the product —
+   * indistinguishable from a pack with no consumables and nothing packed.
+   */
+  it('reads the consumable and packed flags the pack actually carries', async () => {
+    const pack = await createPack(owner, { visibility: 'public', itemCount: 2 });
+
+    const flagged = await owner.client
+      .from('pack_items')
+      .update({ consumable: true, packed: true })
+      .eq('id', pack.itemIds[0])
+      .select('id');
+    expect(flagged.error).toBeNull();
+    expect(flagged.data).toHaveLength(1);
+
+    const { data, error } = await packTreeQuery(anonClient(), pack.slug).single();
+    expect(error).toBeNull();
+
+    const totals = computeTotals(data!);
+
+    // createPack weighs its gear 100 g, 101 g, … in insertion order, and the flagged item
+    // is the first. Both buckets are asserted, so an engine that put the consumable item
+    // in neither — or in both — could not pass.
+    expect(totals.consumable).toBe(100);
+    expect(totals.base).toBe(101);
+    expect(totals.total).toBe(201);
+    expect(totals.packedCount).toBe(1);
+    expect(totals.itemCount).toBe(2);
   });
 });
