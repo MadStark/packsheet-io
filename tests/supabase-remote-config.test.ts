@@ -210,3 +210,73 @@ describe('every [remotes.*] block overrides what config push would otherwise res
     expect(adminEmail as string).toMatch(/@mail\.packsheet\.io$/);
   });
 });
+
+/**
+ * PK-56, second half — the part of `config push` that has nothing to do with this
+ * ticket, and is the more dangerous half precisely because of that.
+ *
+ * `supabase config push` does not push only `auth`. It also pushes `[api]`, `[storage]`
+ * and `[db.settings]`, and the `[remotes.*]` blocks above override AUTH KEYS ONLY —
+ * every non-auth value below therefore reaches BOTH hosted projects verbatim from this
+ * file's top-level, local-development values, on every deploy, for as long as
+ * `config push` runs in the workflows. There is no `[remotes.*.storage]` making that
+ * per-environment, and adding one would not help: the risk is not that these values are
+ * wrong today, it is that nothing notices when they change.
+ *
+ * They are correct today, and that was verified rather than assumed — read off both
+ * hosted projects' `/config/storage` and `/postgrest` on 12 August 2026, every value
+ * below already matches what is live on staging AND production, including
+ * `vectorBuckets` already being enabled with the same 10/5 limits. So `config push`
+ * is a no-op outside `auth` right now.
+ *
+ * But it is a no-op by ALIGNMENT, not by enforcement. Both sides happen to sit on
+ * Supabase's defaults. Nothing structural keeps them there, and the failure mode is
+ * ugly and quiet: someone raises `file_size_limit` for a local import experiment, or
+ * flips `[storage.analytics] enabled` to try Iceberg on their laptop, and the next
+ * merge to `staging` or `main` carries that change onto a hosted project with no
+ * mention of storage anywhere in the diff, the PR title, or the deploy log. Two of
+ * these switches — vector buckets and analytics buckets — gate PAID Pro-plan features,
+ * and the CLI's confirmation prompt does not save anyone: in CI there is no TTY, so it
+ * auto-answers YES after 100ms, and its cost warning only ever covers the two MFA
+ * addons, never storage.
+ *
+ * So this block pins the local values as the deliberate, reviewed contents of what gets
+ * pushed. It asserts nothing about whether these numbers are good — only that changing
+ * one is a decision somebody made on purpose, in a diff that says so, rather than a
+ * local convenience that escaped. If you are here because this test failed: you have
+ * just changed live configuration on staging and production. Update the expectation
+ * only once you actually want that, and check the value against both hosted projects.
+ */
+describe('what config push sends to hosted projects OUTSIDE the auth block', () => {
+  it('api: schemas, search path and max_rows are the reviewed values', () => {
+    expect(get(config, 'api', 'schemas')).toEqual(['public', 'graphql_public']);
+    expect(get(config, 'api', 'extra_search_path')).toEqual(['public', 'extensions']);
+    expect(get(config, 'api', 'max_rows')).toBe(1000);
+  });
+
+  it('storage: the file size limit is the reviewed value', () => {
+    expect(get(config, 'storage', 'file_size_limit')).toBe('50MiB');
+  });
+
+  it('storage: the S3 protocol toggle is the reviewed value', () => {
+    expect(get(config, 'storage', 's3_protocol', 'enabled')).toBe(true);
+  });
+
+  // Vector Buckets is a paid Pro-plan feature, and these toggles are asymmetric: a push
+  // can switch one ON, but an `enabled = false` is not sent at all, so a push can never
+  // switch it back OFF. Already enabled on both hosted projects with these same limits.
+  it('storage: the vector bucket toggle and limits are the reviewed values', () => {
+    expect(get(config, 'storage', 'vector', 'enabled')).toBe(true);
+    expect(get(config, 'storage', 'vector', 'max_buckets')).toBe(10);
+    expect(get(config, 'storage', 'vector', 'max_indexes')).toBe(5);
+  });
+
+  // Analytics/Iceberg buckets are the other paid toggle. This one is OFF locally, which
+  // is why it is currently sent nowhere — and why flipping it to `true` for a local
+  // experiment would be the single easiest way to turn a paid feature on in production
+  // by accident. The hosted projects have their own Iceberg settings; a push must not
+  // start reaching them.
+  it('storage: the analytics bucket toggle stays off, so it is never pushed', () => {
+    expect(get(config, 'storage', 'analytics', 'enabled')).toBe(false);
+  });
+});
