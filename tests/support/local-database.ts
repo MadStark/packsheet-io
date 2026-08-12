@@ -330,10 +330,17 @@ export async function createUser(label = 'user'): Promise<TestUser> {
  * does carry its prices to a stranger, so the decision is checkable rather than merely
  * written down.
  *
- * That settles `price` and `currency` and nothing else. The grants block's known gap is
- * `notes`, `url` and `user_id` — a private aside, often an order-confirmation link, and
- * the owner's JWT `sub`, which lets a stranger group public packs by author. None of
- * those is something a reader came for, and all three are still Ref 26's to close.
+ * `notes` and `url` are public too, decided the same way and for the same reason. They
+ * are extras an owner chooses to add to an item — a remark, and a link to somewhere the
+ * item is sold or written about — and a reader who opened a shared list is welcome to
+ * them. Deliberately NOT described here as "the purchase link": that is the common case,
+ * not the definition, and a column comment that narrows it would be quoted back as
+ * licence to render it as a Buy button. They are not headline fields and the share page
+ * should not lead with them, but that is a layout decision rather than a privilege one.
+ *
+ * What remains of the grants block's known gap is `user_id` alone — the owner's JWT
+ * `sub`, which nobody asked for and which lets a stranger group every public pack by
+ * author. That one is still Ref 26's to close.
  */
 export const PACK_TREE_SELECT =
   'id, name, slug, visibility, locked_at, pack_categories(id, name, position, pack_items(id, quantity, worn, consumable, packed, position, overrides, snapshot, gear_items(id, name, brand, weight, weight_unit, price, currency)))';
