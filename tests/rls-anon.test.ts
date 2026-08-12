@@ -216,8 +216,11 @@ describe('a pack with 40 items loads in one round trip', () => {
  * whose gear was deleted — quietly loses them, and rule 3's promise that deleting gear
  * never destroys pack history holds for the weight but not for the remark beside it.
  * Whether the snapshot should start capturing them is a change to `gear_item_snapshot()`
- * and belongs with the freeze rules rather than here. This test records what is true
- * today, so that change is a deliberate flip rather than a silent one.
+ * and belongs with the freeze rules rather than here. That is PK-58, which is written and
+ * carries the one decision this file cannot make: whether to backfill the snapshots
+ * already written, or leave old and new frozen items rendering differently. This test
+ * records what is true today, so the change is a deliberate flip rather than a silent one
+ * — invert it, do not delete it.
  */
 describe('the frozen snapshot carries only what renders the item', () => {
   it('omits notes and url', async () => {
