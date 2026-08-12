@@ -551,6 +551,29 @@ enable_confirmations = true
 # `[remotes.staging.auth.rate_limit]` comment below for why those two differ and for
 # what the remaining exposure on reset mail actually is.
 max_frequency = "60s"
+# Overrides the top-level `6`, which is the CLI template's default and NOT what either
+# hosted project had. Both were on `8`. Found the hard way: the first real
+# `config push` against staging quietly shortened its email OTP from eight digits to
+# six, because a key this block did not mention is not left alone. Nothing in this
+# project's flows uses an email OTP today — confirmation and recovery both travel as
+# PKCE links — but shortening a one-time code is a security reduction nobody asked
+# for, arriving in a diff that says nothing about OTPs.
+otp_length = 8
+
+# NOT A FEATURE THIS PROJECT USES, AND PINNED PRECISELY BECAUSE OF THAT. Both hosted
+# projects have TOTP enrolment and verification ON — the platform default for a hosted
+# project — while this file's top-level `[auth.mfa.totp]` has them off, which is the
+# CLI template's local default. The first `config push` against staging therefore
+# turned MFA off there without being asked to, and would have done the same to
+# production on the next deploy. Restated here so the hosted state survives a push.
+#
+# Read that as the general lesson rather than two more keys: the danger is not the keys
+# somebody thought about, it is the ones nobody did. When pushing to a project for the
+# first time, READ THE DIFF `config push` PRINTS before letting it run unattended — it
+# is the only place the full set of differences is ever shown.
+[remotes.staging.auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
 
 [remotes.staging.auth.email.smtp]
 enabled = true
@@ -618,6 +641,15 @@ additional_redirect_urls = ["https://packsheet.io/auth/callback", "https://packs
 [remotes.production.auth.email]
 enable_confirmations = true
 max_frequency = "60s"
+# Production is on `8`, like staging was before the first push shortened it. See the
+# staging block above for how that was found and why it matters.
+otp_length = 8
+
+# Production has TOTP enrolment and verification ON, and must keep them. Same reasoning
+# as the staging block above, which is where the full note lives.
+[remotes.production.auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
 
 [remotes.production.auth.email.smtp]
 enabled = true

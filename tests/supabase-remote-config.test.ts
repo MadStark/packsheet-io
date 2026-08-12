@@ -227,6 +227,35 @@ describe('every [remotes.*] block overrides what config push would otherwise res
   });
 
   /**
+   * The two keys nobody enumerated, added after the first real `config push`.
+   *
+   * Everything above was on the list because somebody reasoned about it. These two were
+   * not, and the push found them: staging's email OTP silently went from EIGHT digits
+   * to six, and its MFA TOTP enrolment and verification were both switched OFF, because
+   * this file's top-level values are the CLI template's local defaults and both hosted
+   * projects were on the platform's. Neither appeared in the PR diff, the commit
+   * message, or anything a reviewer would have read — only in the diff `config push`
+   * itself prints, at the moment it applies.
+   *
+   * They are pinned here for the same reason as everything above, but the lesson is
+   * wider than two keys and is written out in config.toml: the dangerous keys are the
+   * ones nobody thought about, so the diff `config push` prints must actually be READ
+   * the first time it runs against any project. This block cannot grow to cover a key
+   * nobody has noticed yet — it can only stop a noticed one from quietly reverting.
+   */
+  it.each(names)('%s: otp_length is the hosted 8, not the local template default', (name) => {
+    expect(get(remotes, name, 'auth', 'email', 'otp_length')).toBe(8);
+  });
+
+  // MFA is not a feature this project uses. That is exactly why it needs pinning: an
+  // unused capability being switched off is the change least likely to be noticed by
+  // anyone, and switching it back on is not something a deploy should decide either.
+  it.each(names)('%s: MFA TOTP stays enabled, as both hosted projects have it', (name) => {
+    expect(get(remotes, name, 'auth', 'mfa', 'totp', 'enroll_enabled')).toBe(true);
+    expect(get(remotes, name, 'auth', 'mfa', 'totp', 'verify_enabled')).toBe(true);
+  });
+
+  /**
    * The hourly email cap, added in the PK-56 review. Nothing checked this before, and it
    * is the one key on the list whose silent reversion recreates the ORIGINAL fault: with
    * `[remotes.<name>.auth.rate_limit]` absent, `config push` sends the top-level `2`, and
