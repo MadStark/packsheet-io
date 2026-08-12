@@ -13,6 +13,7 @@ import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import {
   GEAR_SELECT,
   applyGearQuery,
+  gearListPath,
   gearQueryToSearchParams,
   parseGearQuery,
   sortLinkSearchParams,
@@ -86,8 +87,14 @@ if (Astro.request.method === 'POST') {
       await client.from('gear_items').update({ deleted_at: null }).eq('deleted_at', token);
     }
     // Redirect either way: a stale or forged token undoes nothing, but the visitor
-    // still gets a clean URL back rather than the undo banner's own POST target.
-    return Astro.redirect(GEAR_PATH, 303);
+    // still gets a clean URL back — the SAME filtered/sorted/paged view the undo
+    // banner was shown on, not a bare GEAR_PATH. Astro.url.searchParams here still
+    // carries `undo`/`count` alongside whatever real filter was active; parsing it
+    // with parseGearQuery and handing the result to gearListPath is what drops those
+    // two (so a refresh cannot re-trigger the undo) while keeping every other filter
+    // — see gearListPath's own comment for why this is done through GearQuery rather
+    // than deleting `undo`/`count` off a copied URLSearchParams by name.
+    return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
   }
 
   const result = parseBulkAction(form);
@@ -119,9 +126,14 @@ if (Astro.request.method === 'POST') {
         if (error) {
           bulkError = GENERIC_WRITE_ERROR;
         } else {
-          const redirectParams = new URLSearchParams(Astro.url.searchParams);
-          redirectParams.delete(UNDO_PARAM);
-          redirectParams.delete(UNDO_COUNT_PARAM);
+          // The same filtered/sorted/paged view the visitor was on, plus the fresh
+          // undo token and count — built from gearQueryToSearchParams(parseGearQuery
+          // (...)) rather than copying Astro.url.searchParams and deleting/re-setting
+          // UNDO_PARAM/UNDO_COUNT_PARAM by hand, so this can never accidentally carry
+          // forward an EARLIER, unrelated undo/count pair that happened to already be
+          // sitting in the current URL (e.g. a second bulk delete performed while a
+          // previous delete's undo banner was still showing).
+          const redirectParams = gearQueryToSearchParams(parseGearQuery(Astro.url.searchParams));
           redirectParams.set(UNDO_PARAM, token);
           redirectParams.set(UNDO_COUNT_PARAM, String(ids.length));
           return Astro.redirect(`${GEAR_PATH}?${redirectParams.toString()}`, 303);
@@ -136,7 +148,14 @@ if (Astro.request.method === 'POST') {
       if (error) {
         bulkError = GENERIC_WRITE_ERROR;
       } else {
-        return Astro.redirect(`${GEAR_PATH}${Astro.url.search}`, 303);
+        // Same filtered/sorted/paged view, via gearListPath rather than
+        // `${GEAR_PATH}${Astro.url.search}` verbatim — the difference matters
+        // whenever the undo banner is currently showing (this form's own action
+        // defaults to the current document URL, undo/count included): the verbatim
+        // form would carry that now-unrelated undo/count pair forward into this
+        // redirect, reviving a banner for an action that has nothing to do with it.
+        // gearListPath drops both, the same way it does for the undo POST itself.
+        return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
     } else if (action.intent === BULK_INTENT.setStatus) {
       const { error } = await client
@@ -147,7 +166,8 @@ if (Astro.request.method === 'POST') {
       if (error) {
         bulkError = GENERIC_WRITE_ERROR;
       } else {
-        return Astro.redirect(`${GEAR_PATH}${Astro.url.search}`, 303);
+        // Same reasoning as bulk-set-category immediately above.
+        return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
     } else {
       // restore / delete-permanently: valid BULK_INTENT values, but they belong to
@@ -380,17 +400,40 @@ function pageHref(page: number): string {
               {gearOptions.categories.length > 0 && (
                 <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
                   <legend class="text-ink-2 px-1 text-sm">Category</legend>
-                  <div class="mt-1 flex max-h-32 flex-col gap-1 overflow-y-auto">
+                  {/* PS-4 defect 3: this used to be a max-h-32 (128px) scroll box over
+                      rows sized by text-sm's own line-height + gap-1, which cuts off
+                      partway through a 6th row rather than stopping on a row boundary
+                      — reading as broken layout, not "scroll for more". Fixed by
+                      giving every row a FIXED height (h-7 = 1.75rem, no inter-row gap)
+                      and sizing the container to an exact whole multiple of it —
+                      max-h-[8.75rem] is precisely 5 * h-7, so the visible edge always
+                      falls on a row boundary — instead of an arbitrary max-h that
+                      happens to land mid-row. border-hairline/bg-sunk mark this as a
+                      deliberate sub-region (no shadow, per tokens.css's own "nothing
+                      casts a shadow at rest" rule) and .gear-filter-scroll below
+                      themes the scrollbar itself from the same token palette, so the
+                      cut edge reads as "more below, scroll" rather than a layout bug.
+                      Keyboard reachability and no-focus-trap come for free: the
+                      checkboxes inside are the only focusable content, tab order runs
+                      through them exactly as before, and a checkbox scrolled out of
+                      view is brought back on screen on focus by the browser's own
+                      default scrollIntoView behaviour — nothing here intercepts or
+                      traps that. `truncate` + `title` keep one unusually long name
+                      from wrapping to a second line and breaking the fixed row
+                      height, while still exposing the full text on hover. */}
+                  <div class="gear-filter-scroll border-hairline bg-sunk mt-1 max-h-[8.75rem] overflow-y-auto rounded-[var(--r-sm)] border">
                     {gearOptions.categories.map((category) => (
-                      <label class="text-ink flex items-center gap-2 text-sm">
+                      <label class="text-ink flex h-7 items-center gap-2 px-2 text-sm">
                         <input
                           type="checkbox"
                           name="category"
                           value={category}
                           checked={query.categories.includes(category)}
-                          class="accent-blue"
+                          class="accent-blue shrink-0"
                         />
-                        {category}
+                        <span class="truncate" title={category}>
+                          {category}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -418,17 +461,22 @@ function pageHref(page: number): string {
               {gearOptions.brands.length > 0 && (
                 <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
                   <legend class="text-ink-2 px-1 text-sm">Brand</legend>
-                  <div class="mt-1 flex max-h-32 flex-col gap-1 overflow-y-auto">
+                  {/* Same fixed-row-height, whole-row-multiple fix as the Category
+                      fieldset above — see that block's own comment for the reasoning
+                      behind h-7 / max-h-[8.75rem] / .gear-filter-scroll / truncate. */}
+                  <div class="gear-filter-scroll border-hairline bg-sunk mt-1 max-h-[8.75rem] overflow-y-auto rounded-[var(--r-sm)] border">
                     {gearOptions.brands.map((brand) => (
-                      <label class="text-ink flex items-center gap-2 text-sm">
+                      <label class="text-ink flex h-7 items-center gap-2 px-2 text-sm">
                         <input
                           type="checkbox"
                           name="brand"
                           value={brand}
                           checked={query.brands.includes(brand)}
-                          class="accent-blue"
+                          class="accent-blue shrink-0"
                         />
-                        {brand}
+                        <span class="truncate" title={brand}>
+                          {brand}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -695,6 +743,40 @@ function pageHref(page: number): string {
     }
   </main>
 </Layout>
+
+<style>
+  /* PS-4 defect 3: themes the Category/Brand scroll boxes' own scrollbar from
+   * tokens.css rather than leaving it whatever the OS/browser default is, so the
+   * scrollability itself reads as a deliberate part of this design rather than an
+   * unstyled leftover. --rule/--ink-3 (neutral earth tones), never --blue: per
+   * tokens.css's own rule, blue marks something INTERACTIVE (a link, a checked
+   * checkbox's accent), and a scrollbar thumb — while technically draggable — is a
+   * native browser affordance for a content region, not one of this app's own
+   * interactive controls, so it stays off that colour. No box-shadow anywhere here,
+   * matching tokens.css's "nothing casts a shadow at rest".
+   */
+  .gear-filter-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule) transparent;
+  }
+
+  .gear-filter-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .gear-filter-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .gear-filter-scroll::-webkit-scrollbar-thumb {
+    background-color: var(--rule);
+    border-radius: 9999px;
+  }
+
+  .gear-filter-scroll::-webkit-scrollbar-thumb:hover {
+    background-color: var(--ink-3);
+  }
+</style>
 
 <script>
   // Progressive enhancement only: every bulk action is a real form submission and

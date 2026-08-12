@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  gearListPath,
   gearQueryToSearchParams,
   parseGearQuery,
   sortLinkSearchParams,
@@ -7,6 +8,7 @@ import {
   type GearQuery,
 } from '../src/lib/gear/query';
 import { GEAR_STATUSES, MAX_SEARCH_LENGTH, type GearStatus } from '../src/lib/gear/fields';
+import { GEAR_PATH } from '../src/lib/gear/routes';
 
 /**
  * `src/lib/gear/query.ts` is the pure URL <-> PostgREST-query translation layer PK-4
@@ -556,5 +558,65 @@ describe('sortLinkSearchParams', () => {
     expect(result.brands).toEqual(['Enlightened Equipment']);
     expect(result.minGrams).toBe(400);
     expect(result.maxGrams).toBe(900);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gearListPath
+// ---------------------------------------------------------------------------
+
+describe('gearListPath', () => {
+  it('the all-default query redirects to bare GEAR_PATH, with no trailing "?"', () => {
+    expect(gearListPath(DEFAULT_QUERY)).toBe(GEAR_PATH);
+    expect(gearListPath(DEFAULT_QUERY)).not.toContain('?');
+  });
+
+  it('a filtered query redirects to GEAR_PATH with exactly that filter as its query string', () => {
+    const query: GearQuery = { ...DEFAULT_QUERY, search: 'Bear Can' };
+    expect(gearListPath(query)).toBe(`${GEAR_PATH}?${gearQueryToSearchParams(query).toString()}`);
+    expect(gearListPath(query)).toBe(`${GEAR_PATH}?q=Bear+Can`);
+  });
+
+  it('carries every filter field through, not only search', () => {
+    const query: GearQuery = {
+      ...DEFAULT_QUERY,
+      categories: ['Shelter'],
+      statuses: ['owned'],
+      sort: 'weight',
+      direction: 'desc',
+      page: 3,
+    };
+    const path = gearListPath(query);
+    expect(path.startsWith(`${GEAR_PATH}?`)).toBe(true);
+    const reparsed = parseGearQuery(new URL(path, 'https://example.test').searchParams);
+    expect(reparsed).toEqual(query);
+  });
+
+  // THE EXACT CASE PK-4's DEFECT 2 NAMES: deleting from a filtered list redirects
+  // with the filter preserved (`/gear?q=Bear+Can&undo=…&count=3`); clicking Undo used
+  // to redirect to a bare `/gear`, dropping `q=Bear+Can` right when the visitor is
+  // correcting a mistake. Parsing the undo POST's own URL — which still carries
+  // `undo`/`count` alongside the real filter — through parseGearQuery and then
+  // gearListPath must reproduce the SAME filtered view, with `undo`/`count` gone
+  // (so a refresh of the redirect target cannot re-trigger the undo) but every real
+  // filter intact.
+  it('parsing a URL that also carries undo/count and feeding it through gearListPath drops undo/count but keeps the active filter', () => {
+    const params = PARAMS([
+      ['q', 'Bear Can'],
+      ['undo', '2026-01-15T10:30:00.000Z'],
+      ['count', '3'],
+    ]);
+    const path = gearListPath(parseGearQuery(params));
+    expect(path).toBe(`${GEAR_PATH}?q=Bear+Can`);
+    expect(path).not.toContain('undo');
+    expect(path).not.toContain('count');
+  });
+
+  it('an undo/count pair with NO other active filter drops back to bare GEAR_PATH, not GEAR_PATH?', () => {
+    const params = PARAMS([
+      ['undo', '2026-01-15T10:30:00.000Z'],
+      ['count', '3'],
+    ]);
+    expect(gearListPath(parseGearQuery(params))).toBe(GEAR_PATH);
   });
 });

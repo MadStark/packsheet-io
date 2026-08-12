@@ -57,6 +57,7 @@ import {
   type GearSortKey,
   type GearStatus,
 } from './fields';
+import { GEAR_PATH } from './routes';
 
 // ---------------------------------------------------------------------------
 // GearQuery
@@ -317,6 +318,41 @@ export function sortLinkSearchParams(query: GearQuery, key: GearSortKey): URLSea
   const direction: 'asc' | 'desc' =
     query.sort === key && query.direction === 'asc' ? 'desc' : 'asc';
   return gearQueryToSearchParams({ ...query, sort: key, direction, page: 1 });
+}
+
+// ---------------------------------------------------------------------------
+// gearListPath
+// ---------------------------------------------------------------------------
+
+/**
+ * The URL a redirect back to the closet list's current filtered/sorted/paged view
+ * should target: bare `GEAR_PATH` when `query` is exactly the all-default query (so a
+ * redirect from an unfiltered view does not grow a pointless trailing `?`), or
+ * `GEAR_PATH` with `gearQueryToSearchParams(query)` appended otherwise.
+ *
+ * WHY THIS EXISTS (PK-4 defect: "Undo throws away the active filter"). The closet
+ * list's undo banner used to redirect unconditionally to a bare `GEAR_PATH` once
+ * acted on, discarding whatever `q`/category/status/brand/weight/sort/page state the
+ * visitor was looking at — precisely the moment they are LEAST willing to lose it,
+ * since they are actively correcting a mistake (a filtered-down "Bear Canister"
+ * search, say, losing its filter and dumping them back on the full, unfiltered
+ * closet). `src/pages/gear/index.astro`'s undo/set-category/set-status POST branches
+ * all redirect through this function now instead.
+ *
+ * BUILT ON `gearQueryToSearchParams`, NOT A HAND-COPIED `URLSearchParams`. The
+ * tempting alternative — `new URLSearchParams(Astro.url.searchParams)` with `undo`
+ * and `count` deleted afterward by name — has to be kept in sync BY HAND with every
+ * param that is not really part of `GearQuery` (today that is exactly `undo` and
+ * `count`, from `src/lib/gear/bulk.ts`; there is no guarantee it stays exactly those
+ * two forever). Routing the redirect target through a parsed `GearQuery` instead
+ * means any param `parseGearQuery` does not recognise as one of ITS OWN fields is
+ * dropped for free, the same way a stray `?utm_source=` or a typo'd `?cagegory=`
+ * already is on every other place this module round-trips a query — nothing has to
+ * remember to delete it by name.
+ */
+export function gearListPath(query: GearQuery): string {
+  const search = gearQueryToSearchParams(query).toString();
+  return search === '' ? GEAR_PATH : `${GEAR_PATH}?${search}`;
 }
 
 // ---------------------------------------------------------------------------

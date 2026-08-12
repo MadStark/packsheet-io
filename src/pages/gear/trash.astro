@@ -11,7 +11,7 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import { createAuthClient } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
-import { GEAR_PATH, GEAR_TRASH_PATH, gearItemPath } from '../../lib/gear/routes';
+import { GEAR_PATH, GEAR_TRASH_PATH } from '../../lib/gear/routes';
 import { GEAR_TRASH_SELECT } from '../../lib/gear/query';
 import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
 import {
@@ -329,14 +329,24 @@ const pendingNames: readonly string[] = pendingPermanentDelete
                           class="accent-blue"
                         />
                       </td>
-                      <td class="px-3 py-2">
-                        <a
-                          href={gearItemPath(item.id)}
-                          class="text-blue-deep hover:text-blue-ink underline"
-                        >
-                          {item.name}
-                        </a>
-                      </td>
+                      {/* PS-4 defect 1: a trashed item's name is plain text, not a
+                          link to gearItemPath(item.id) — src/pages/gear/[id].astro
+                          deliberately 404s for a soft-deleted row (its own load query
+                          is guarded with `.is('deleted_at', null)`), so linking every
+                          row here would point every single one at a dead end, not
+                          merely a stale or crafted one. Option (b) — teaching
+                          [id].astro to render a soft-deleted item in a read-only state
+                          with a Restore action — was considered and rejected: this row
+                          already shows everything that page could (name, brand,
+                          category, status, quantity, price, deleted date) and already
+                          offers both actions a trashed item supports (Restore, Delete
+                          permanently, both below); there is no remaining state a
+                          detail view would add, only a second surface to keep in sync
+                          with this one. This cell's own text is independent of the
+                          row's accessible name for ITS checkbox
+                          (aria-label={`Select ${item.name}`}, in the preceding cell),
+                          which is unaffected by removing the link. */}
+                      <td class="px-3 py-2">{item.name}</td>
                       <td class="px-3 py-2">{item.brand ?? '—'}</td>
                       <td class="px-3 py-2">{item.category ?? '—'}</td>
                       <td class="px-3 py-2">{formatGearStatus(item.status)}</td>
