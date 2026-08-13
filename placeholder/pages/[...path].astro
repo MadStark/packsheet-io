@@ -1,0 +1,33 @@
+---
+// Every URL that is not the placeholder page, sent back to the placeholder page.
+//
+// This is the second half of PlaceholderOnly. Not compiling `src/pages/` (see
+// astro.config.mjs) already means no other page EXISTS to be served; this route decides
+// what a visitor gets when they ask for one anyway — a bookmark to /gear, a link someone
+// shared to /welcome/, a crawler holding a URL from before the flag went on. Without it
+// they would get Astro's 404 page, which is a dead end on a site whose whole content is
+// one page away.
+//
+// ON-DEMAND, and it is the only route in this mode that is. A rest parameter cannot be
+// prerendered without a getStaticPaths enumerating every URL a stranger might type, which
+// is not a finite set. So this costs one Worker invocation per non-asset request, and
+// that is the price of the requirement — the placeholder page itself, and every static
+// asset it pulls, still come off the assets binding without the Worker running.
+export const prerender = false;
+
+// A REST PARAMETER MATCHES `/` TOO, and this route does not serve it. Astro ranks a
+// static route above a dynamic one and a dynamic one above a rest parameter, so
+// `./index.astro` wins `/` outright — and in the deployed artifact the question never
+// even reaches Astro, because `/` is a prerendered file the assets binding answers first.
+// Both layers agree, which is what keeps the redirect below from pointing at itself.
+//
+// 302 and not 301, for the reason that outlives this mode: a 301 is the one redirect
+// browsers cache indefinitely and stop asking the server about. Every URL on the site
+// answering "permanently moved to /" would follow visitors past the flag being turned
+// off — a bookmark to /gear that keeps bouncing to a landing page that no longer exists,
+// with nothing server-side able to correct it. PlaceholderOnly is by definition
+// temporary, so its redirects must be too. The same argument, in the same words, governs
+// src/pages/index.astro's redirect; this is not a coincidence but the same rule applied
+// to the same kind of decision.
+return Astro.redirect('/', 302);
+---
