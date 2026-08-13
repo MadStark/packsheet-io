@@ -57,8 +57,11 @@ export const GEAR_STATUS_LABELS: Record<GearStatus, string> = {
 // Sorting
 // ---------------------------------------------------------------------------
 
-/** The sort keys the closet list offers, as they appear in the URL's `sort` parameter. */
-export const GEAR_SORT_KEYS = ['name', 'weight', 'price', 'added'] as const;
+/** The sort keys the closet list offers, as they appear in the URL's `sort` parameter.
+ *  `brand` was added by PK-62 alongside its Brand column header becoming a sort link —
+ *  ordering a closet by maker is the one grouping the removed Brand filter checkboxes
+ *  used to provide, and a sort does it without a panel of every brand the visitor owns. */
+export const GEAR_SORT_KEYS = ['name', 'brand', 'weight', 'price', 'added'] as const;
 
 export type GearSortKey = (typeof GEAR_SORT_KEYS)[number];
 
@@ -86,9 +89,20 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
  * would require an exchange rate, and `money.ts` argues at length for why this product
  * must never invent one. This is left as a known limitation for the UI to surface later
  * (e.g. grouping or flagging mixed-currency results) rather than solved here.
+ *
+ * `brand` (PK-62) sorts by the raw column, which is the whole mapping — but note it is
+ * the first NULLABLE column this list offers. Postgres orders nulls LAST ascending and
+ * FIRST descending by default, and neither PostgREST nor this module overrides that, so
+ * items with no brand cluster at the bottom going up and at the top coming down. That is
+ * left as-is deliberately: `nullslast` in both directions would make descending no longer
+ * the exact reverse of ascending, which is a stranger promise for a column header whose
+ * two clicks a visitor reasonably expects to mirror each other. `applyGearQuery`'s
+ * secondary `.order('id')` keeps the run of null-brand rows in a stable, repeatable order
+ * across pages rather than letting Postgres return them differently per request.
  */
 export const GEAR_SORT_COLUMNS: Record<GearSortKey, string> = {
   name: 'name',
+  brand: 'brand',
   weight: 'weight_grams',
   price: 'price',
   added: 'created_at',

@@ -279,6 +279,7 @@ describe('parseGearQuery: weight range (wmin/wmax/wunit)', () => {
 describe('parseGearQuery: sort / dir', () => {
   it.each([
     ['name', 'name'],
+    ['brand', 'brand'],
     ['weight', 'weight'],
     ['price', 'price'],
     ['added', 'added'],
@@ -454,6 +455,14 @@ describe('gearQueryToSearchParams / parseGearQuery: round trip', () => {
       'sort by weight descending',
       [
         ['sort', 'weight'],
+        ['dir', 'desc'],
+      ],
+    ],
+    [
+      'sort by brand descending, alongside a search that must survive it (PK-62)',
+      [
+        ['q', 'quilt'],
+        ['sort', 'brand'],
         ['dir', 'desc'],
       ],
     ],

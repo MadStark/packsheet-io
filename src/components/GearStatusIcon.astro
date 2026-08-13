@@ -1,0 +1,82 @@
+---
+// The closet's status marker (PK-62): the icon that replaced the Status *column* on
+// src/pages/gear/index.astro, sitting immediately left of an item's name.
+//
+// OWNED RENDERS NOTHING, AND THAT IS THE DESIGN. Owned is the unmarked default — the
+// overwhelming majority of a closet — so marking it would put a glyph on nearly every
+// row to say "nothing unusual here". The visible consequence is that names on owned
+// rows sit further left than names on wishlist and retired rows; PK-62 accepts that
+// ragged left edge explicitly and forbids "fixing" it with a spacer or a placeholder
+// glyph, so do not add one.
+//
+// KEEP THIS A PLAIN .astro COMPONENT. Same rule GearNav.astro and GearItemForm.astro
+// carry, for the same reason: it takes no `client:*` directive anywhere it is used and
+// must never gain one. Three hand-written inline SVGs are not a reason to ship an icon
+// package to the browser, let alone a hydration runtime — the whole closet renders
+// without a byte of component JavaScript today, and tests/anonymous-read-path.test.ts
+// exists to keep it that way.
+//
+// COLOUR IS NEVER THE ONLY SIGNAL (WCAG 1.4.1). Each icon carries its own accessible
+// name via role="img" + aria-label, so a screen reader announces "Wishlist" or
+// "Retired" beside the item name, and the two glyphs differ in SHAPE as well as hue.
+// --ochre and --rust come from src/styles/tokens.css and both have dark cuts there, so
+// this follows the theme rather than pinning a light-mode hex. Never --blue: per
+// tokens.css's own standing rule, blue marks something INTERACTIVE, and a status
+// marker is not clickable.
+import { GEAR_STATUS_LABELS, isGearStatus } from '../lib/gear/fields';
+
+interface Props {
+  /** A `gear_items` row's `status`, typed as the bare `string` the database client
+   *  hands back rather than a `GearStatus` — mirroring `formatGearStatus`, which takes
+   *  the same widened type for the same reason: the CHECK constraint backing the column
+   *  is not proven to still hold by the time a row is read back. */
+  readonly status: string;
+}
+
+const { status } = Astro.props;
+
+// An unrecognised status is drawn the same way `owned` is — not at all. There is no
+// honest glyph for a value this component has never heard of, and inventing one (a "?"
+// badge, say) would put a defect marker on a row whose only crime is being written
+// directly against PostgREST. `formatGearStatus` still renders such a value verbatim
+// wherever a status is shown as text, so it stays debuggable somewhere.
+const marked = isGearStatus(status) && status !== 'owned' ? status : null;
+
+// h-4 w-4 pairs with the table's text-sm rows; shrink-0 keeps the glyph its full size
+// when a long item name competes for the cell. stroke-based rather than filled, at a
+// width that stays legible at 16px.
+const SVG_CLASS = 'h-4 w-4 shrink-0';
+const SVG_ATTRS = {
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  'stroke-width': 1.7,
+  'stroke-linecap': 'round',
+  'stroke-linejoin': 'round',
+  role: 'img',
+} as const;
+---
+
+{
+  marked === 'wishlist' && (
+    <svg {...SVG_ATTRS} class={`${SVG_CLASS} text-ochre`} aria-label={GEAR_STATUS_LABELS.wishlist}>
+      {/* A shopping trolley: wanted, not yet owned. */}
+      <path d="M2.75 3.75h2.1l2.55 11.05a1.6 1.6 0 0 0 1.56 1.24h7.74a1.6 1.6 0 0 0 1.55-1.21l1.67-6.86H6.1" />
+      <circle cx="9.5" cy="19.75" r="1.4" />
+      <circle cx="17.25" cy="19.75" r="1.4" />
+    </svg>
+  )
+}
+{
+  marked === 'retired' && (
+    <svg {...SVG_ATTRS} class={`${SVG_CLASS} text-rust`} aria-label={GEAR_STATUS_LABELS.retired}>
+      {/* A waste bin: out of service, but still in the closet — this is NOT the trash
+          page's soft delete, which removes the row from this list entirely. */}
+      <path d="M3.75 6.5h16.5" />
+      <path d="M9.75 6.5V4.4A1.4 1.4 0 0 1 11.15 3h1.7a1.4 1.4 0 0 1 1.4 1.4v2.1" />
+      <path d="M6.4 6.5 7.5 19.9A1.5 1.5 0 0 0 9 21.25h6a1.5 1.5 0 0 0 1.5-1.35L17.6 6.5" />
+      <path d="M10.35 10.5v6.5" />
+      <path d="M13.65 10.5v6.5" />
+    </svg>
+  )
+}

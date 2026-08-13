@@ -430,7 +430,7 @@ describe('search matches name or brand, case-insensitively, mid-word', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Sorting — each of the four sort keys, both directions.
+// 4. Sorting — each of the five sort keys, both directions (`brand` added by PK-62).
 // ---------------------------------------------------------------------------
 
 describe('sorting', () => {
@@ -445,8 +445,16 @@ describe('sorting', () => {
     const insertOne = (fields: GearInsert) =>
       sortUser.client.from('gear_items').insert(fields).select('id').single();
 
+    // BRANDS ARE SET ON TWO OF THE THREE, AND THE THIRD IS DELIBERATELY LEFT NULL.
+    // PK-62 made `brand` a sort key, and it is the first NULLABLE column the closet
+    // offers one for — so the fixture has to contain a null to say anything honest
+    // about where those rows land. 'Camp Chef' < 'Enlightened Equipment' ascending, and
+    // the brand order is deliberately NOT the same as the name order (Basecamp Grill /
+    // Featherweight Quilt happen to agree, but Overnight Pack moves), so a brand sort
+    // that silently fell back to `name` would not pass the assertions below.
     await insertOne({
       name: 'Featherweight Quilt',
+      brand: 'Enlightened Equipment',
       weight: 300,
       weight_unit: 'g',
       price: 200,
@@ -454,6 +462,7 @@ describe('sorting', () => {
     });
     await insertOne({
       name: 'Basecamp Grill',
+      brand: 'Camp Chef',
       weight: 500,
       weight_unit: 'g',
       price: 50,
@@ -501,6 +510,55 @@ describe('sorting', () => {
       'Overnight Pack',
       'Basecamp Grill',
       'Featherweight Quilt',
+    ]);
+  });
+
+  it('sorts by brand, both directions, with the branded rows in brand order (PK-62)', async () => {
+    // Camp Chef < Enlightened Equipment. Overnight Pack has NO brand, and Postgres
+    // orders nulls LAST ascending and FIRST descending by default — neither PostgREST
+    // nor GEAR_SORT_COLUMNS overrides that, so the unbranded row bookends the list
+    // rather than sorting as an empty string would (which would put it FIRST ascending).
+    // See GEAR_SORT_COLUMNS' own comment for why that default is left alone.
+    expect(await sortedNames('brand', 'asc')).toEqual([
+      'Basecamp Grill',
+      'Featherweight Quilt',
+      'Overnight Pack',
+    ]);
+    expect(await sortedNames('brand', 'desc')).toEqual([
+      'Overnight Pack',
+      'Featherweight Quilt',
+      'Basecamp Grill',
+    ]);
+  });
+
+  it('a brand sort survives an active search — PK-62 acceptance', async () => {
+    // The acceptance criterion in as few moving parts as it takes: `q` narrows the
+    // closet to the two branded rows (both match on the letter run in their names),
+    // and the brand sort still orders THOSE in brand order in both directions rather
+    // than quietly reverting to the default name sort. The search filter and the sort
+    // are applied by two different functions (`applyGearFilters` and `applyGearQuery`),
+    // which is exactly why "does one survive the other" is worth an assertion.
+    const searched = async (direction: 'asc' | 'desc') => {
+      const { items, error } = await closetQuery(sortUser, {
+        q: 'a',
+        sort: 'brand',
+        dir: direction,
+      });
+      expect(error).toBeNull();
+      return names(items);
+    };
+
+    // 'a' appears in every name here, so the search narrows nothing away — what it does
+    // is prove the sort is unaffected by a search being present at all.
+    expect(await searched('asc')).toEqual([
+      'Basecamp Grill',
+      'Featherweight Quilt',
+      'Overnight Pack',
+    ]);
+    expect(await searched('desc')).toEqual([
+      'Overnight Pack',
+      'Featherweight Quilt',
+      'Basecamp Grill',
     ]);
   });
 

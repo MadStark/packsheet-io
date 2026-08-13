@@ -10,7 +10,7 @@
 // downloads, and the whole point of src/lib/gear/routes.ts and src/lib/auth-routes.ts
 // being importable from anywhere is that a component like this one can render a link
 // without ever becoming a reason for an auth SDK to reach the client.
-import { GEAR_NEW_PATH, GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
+import { GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
 // The wordmark's destination, which used to be a hard-coded "/" and is the single click
 // this whole change is about. Every page this nav renders on belongs to a signed-in
@@ -53,22 +53,27 @@ const links: readonly [href: string, label: string][] = [
         ))
       }
       {
-        /* C1 (PK-4 review): GEAR_NEW_PATH used to be linked ONLY from the closet's
-           empty state, so once the closet held one item there was no route to it but
-           typing the URL. Present everywhere this nav renders, not only on the closet
-           list, so "add another item" stays reachable from the trash and detail pages
-           too. Blue marks it interactive per tokens.css's own rule, same vocabulary as
-           every other link in this header rather than a new button style. */
+        /* PK-62 REMOVED THE "Add item" LINK FROM THIS NAV — read this before putting
+           it back, because the C1 (PK-4 review) defect it was added for is NOT fully
+           re-opened by removing it, but it is not untouched either.
+
+           C1 was that GEAR_NEW_PATH used to be linked ONLY from the closet's EMPTY
+           STATE, so once the closet held a single item there was no route to it at all
+           short of typing the URL. That specific defect stays fixed without this link:
+           the same review also gave the closet list its own "Add item" button in its
+           heading row, rendered whether the closet is empty or full
+           (src/pages/gear/index.astro), and that button is the one PK-62 kept. On the
+           closet list — where adding an item is actually the thing you are there to do
+           — nothing changed but the removal of a second link to a route already linked
+           three inches away.
+
+           WHAT DID CHANGE, honestly: from the trash and detail pages, adding an item is
+           now two clicks (Closet, then Add item) rather than one. That is the cost PK-62
+           accepted to leave this header the three DESTINATIONS it is for — Closet,
+           Trash, Account — rather than mixing an action in among them. If "add from
+           anywhere" turns out to matter more than that, the fix is a considered one
+           (a persistent action affordance), not quietly restoring this <li>. */
       }
-      <li>
-        <a
-          href={GEAR_NEW_PATH}
-          aria-current={path === GEAR_NEW_PATH ? 'page' : undefined}
-          class="text-blue-deep hover:text-blue-ink aria-[current=page]:text-blue-ink font-medium aria-[current=page]:underline"
-        >
-          Add item
-        </a>
-      </li>
     </ul>
   </nav>
 </header>

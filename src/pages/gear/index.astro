@@ -7,6 +7,7 @@ export const prerender = false;
 
 import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
+import GearStatusIcon from '../../components/GearStatusIcon.astro';
 import { createAuthClient } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
 import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
@@ -30,7 +31,14 @@ import {
   parseUndoCount,
   parseUndoToken,
 } from '../../lib/gear/bulk';
-import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
+// `loadGearOptions` only — `extractGearOptions` is NOT called here any more. PK-62
+// removed the Category and Brand filter checkboxes this page built from it, but the
+// QUERY still runs, because `closetIsEmpty` below is derived from its row count and
+// nothing else on this page can tell "your closet is empty" from "these filters matched
+// nothing". `extractGearOptions` itself stays in src/lib/gear/options.ts, tested and
+// unused for now, for the item form's category autocomplete (PK-63) — deleting it here
+// would only mean writing it again there.
+import { loadGearOptions } from '../../lib/gear/options';
 import {
   bulkSetCategory,
   bulkSetStatus,
@@ -38,7 +46,6 @@ import {
   undoBulkDelete,
 } from '../../lib/gear/mutations';
 import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
-import { WEIGHT_UNITS } from '../../lib/units';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -215,7 +222,6 @@ const { data: optionRows, error: optionsError } = await loadGearOptions(client, 
 const { items: rows, error: listError, count, page } = await loadGearCloset(client, user.id, query);
 
 const loadError = optionsError || listError ? GENERIC_LOAD_ERROR : null;
-const gearOptions = extractGearOptions(optionRows ?? []);
 const items = rows ?? [];
 const totalCount = count ?? 0;
 const totalPages = Math.max(1, Math.ceil(totalCount / GEAR_PAGE_SIZE));
@@ -230,20 +236,16 @@ const rangeEnd = totalCount === 0 ? 0 : rangeStart + items.length - 1;
 // one sentence that would be wrong for whichever case it wasn't written for.
 const closetIsEmpty = !loadError && (optionRows ?? []).length === 0;
 
-const hasActiveFilters =
-  query.search !== '' ||
-  query.categories.length > 0 ||
-  query.statuses.length > 0 ||
-  query.brands.length > 0 ||
-  query.minGrams !== null ||
-  query.maxGrams !== null;
-
-// The weight-range fields' own values, read back off gearQueryToSearchParams rather
-// than re-deriving a unit conversion here a second time — see that function's own
-// round-trip comment for why the two must agree.
-const currentParams = gearQueryToSearchParams(query);
-const wminValue = currentParams.get('wmin') ?? '';
-const wmaxValue = currentParams.get('wmax') ?? '';
+// ZERO CHECKED RENDERS AS ALL THREE CHECKED (PK-62). `parseGearQuery` already treats an
+// empty `statuses` array as "no status filter", i.e. every row — so the query layer
+// needed no change for this, only this one line deciding what the boxes SHOW for that
+// state. Rendering all three ticked rather than none is what makes "default" and
+// "cleared" the same state instead of two that look different and behave identically,
+// and it is why unticking the last remaining box lands the visitor back on the full
+// closet with all three ticked rather than on an empty list they have no filter panel
+// left to rescue themselves from.
+const checkedStatuses: readonly string[] =
+  query.statuses.length === 0 ? GEAR_STATUSES : query.statuses;
 
 // The undo banner: only rendered for a token that survives validation — a malformed
 // or tampered `undo` param is silently ignored rather than shown to anybody, exactly
@@ -255,8 +257,25 @@ const undoMessage =
     ? `${undoCount} item${undoCount === 1 ? '' : 's'} moved to the trash.`
     : 'Items moved to the trash.';
 
-const SORT_COLUMNS: readonly { readonly key: GearSortKey; readonly label: string }[] = [
+/**
+ * Every labelled column header in the table, in render order, with `key: null` marking
+ * one that is not sortable. The Status column is absent because PK-62 removed it — a
+ * three-value field an icon beside the name says faster (see GearStatusIcon.astro).
+ *
+ * ONE LIST, NOT TWO SLICES. This used to be a sortable-only `SORT_COLUMNS` that the
+ * template rendered as `.slice(0, 1)`, then three hand-written unsortable headers, then
+ * `.slice(1)` — an interleaving held together by two magic indices that had to be
+ * recounted by hand every time a column moved. Making Brand sortable would have turned
+ * those into `.slice(0, 2)` / `.slice(2)`; naming each column's sortability instead
+ * removes the slicing altogether and lets the template be a single map. The first and
+ * last cells (the select-all checkbox and the Photo column's sr-only heading) stay
+ * outside this list because neither carries a visible label.
+ */
+const COLUMNS: readonly { readonly key: GearSortKey | null; readonly label: string }[] = [
   { key: 'name', label: 'Name' },
+  { key: 'brand', label: 'Brand' },
+  { key: null, label: 'Category' },
+  { key: null, label: 'Qty' },
   { key: 'weight', label: 'Weight' },
   { key: 'price', label: 'Price' },
   { key: 'added', label: 'Added' },
@@ -388,17 +407,40 @@ function pageHref(target: number): string {
         </div>
       ) : (
         <>
-          {/* Filters — a single GET form, so applying them is a plain, bookmarkable
-              navigation. sort/dir are carried as hidden fields so changing a filter
-              does not silently reset the visitor's chosen sort; page is deliberately
-              NOT carried, since a new filter set changes what "page 3" even means. */}
+          {/* The search-plus-status bar (PK-62), all that is left of what was a filter
+              panel heavier than the closet it filtered: Category, Brand and
+              Weight-range fieldsets, over a list that is a few hundred rows at most.
+              Search and three status checkboxes replace the lot — brand is now a column
+              sort instead of a checkbox per brand the visitor owns.
+
+              STILL A SINGLE GET FORM, so applying it is a plain, bookmarkable
+              navigation. sort/dir are carried as hidden fields so changing the search
+              or a status does not silently reset the visitor's chosen sort; page is
+              deliberately NOT carried, since a new filter set changes what "page 3"
+              even means.
+
+              NO "Apply filters" BUTTON, AND THE FORM STILL WORKS WITH JAVASCRIPT OFF.
+              Two independent mechanisms cover that, which is why neither needs the
+              other to be reliable:
+
+                - The search field submits on Enter. HTML's implicit submission runs for
+                  a form with no submit button when exactly ONE field blocks it; a
+                  checkbox does not block, so this search input is that one field. Add a
+                  second text-like input to this form and Enter silently stops working —
+                  put a submit button back at the same time if that ever happens.
+                - The status checkboxes are submitted by the <noscript> button below
+                  when scripting is off, and by the progressive-enhancement listener at
+                  the foot of this file when it is on. The button is genuinely absent
+                  from the DOM when JS runs, so it can never be a second, redundant way
+                  to do what a tick already did. */}
           <form
             method="GET"
             action={GEAR_PATH}
+            id="gear-filters"
             class="border-hairline bg-surface mt-6 rounded-[var(--r)] border p-5"
           >
-            <div class="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-              <div class="sm:col-span-2 lg:col-span-4">
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-6">
+              <div class="flex-1">
                 <label for="q" class="text-ink-2 block text-sm">
                   Search
                 </label>
@@ -412,155 +454,44 @@ function pageHref(target: number): string {
                 />
               </div>
 
-              {gearOptions.categories.length > 0 && (
-                <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
-                  <legend class="text-ink-2 px-1 text-sm">Category</legend>
-                  {/* PS-4 defect 3: this used to be a max-h-32 (128px) scroll box over
-                      rows sized by text-sm's own line-height + gap-1, which cuts off
-                      partway through a 6th row rather than stopping on a row boundary
-                      — reading as broken layout, not "scroll for more". Fixed by
-                      giving every row a FIXED height (h-7 = 1.75rem, no inter-row gap)
-                      and sizing the container to an exact whole multiple of it —
-                      max-h-[8.75rem] is precisely 5 * h-7, so the visible edge always
-                      falls on a row boundary — instead of an arbitrary max-h that
-                      happens to land mid-row. border-hairline/bg-sunk mark this as a
-                      deliberate sub-region (no shadow, per tokens.css's own "nothing
-                      casts a shadow at rest" rule) and .gear-filter-scroll below
-                      themes the scrollbar itself from the same token palette, so the
-                      cut edge reads as "more below, scroll" rather than a layout bug.
-                      Keyboard reachability and no-focus-trap come for free: the
-                      checkboxes inside are the only focusable content, tab order runs
-                      through them exactly as before, and a checkbox scrolled out of
-                      view is brought back on screen on focus by the browser's own
-                      default scrollIntoView behaviour — nothing here intercepts or
-                      traps that. `truncate` + `title` keep one unusually long name
-                      from wrapping to a second line and breaking the fixed row
-                      height, while still exposing the full text on hover. */}
-                  <div class="gear-filter-scroll border-hairline bg-sunk mt-1 max-h-[8.75rem] overflow-y-auto rounded-[var(--r-sm)] border">
-                    {gearOptions.categories.map((category) => (
-                      <label class="text-ink flex h-7 items-center gap-2 px-2 text-sm">
-                        <input
-                          type="checkbox"
-                          name="category"
-                          value={category}
-                          checked={query.categories.includes(category)}
-                          class="accent-blue shrink-0"
-                        />
-                        <span class="truncate" title={category}>
-                          {category}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
-              )}
-
-              <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
-                <legend class="text-ink-2 px-1 text-sm">Status</legend>
-                <div class="mt-1 flex flex-col gap-1">
-                  {GEAR_STATUSES.map((status) => (
-                    <label class="text-ink flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        name="status"
-                        value={status}
-                        checked={query.statuses.includes(status)}
-                        class="accent-blue"
-                      />
-                      {formatGearStatus(status)}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
-
-              {gearOptions.brands.length > 0 && (
-                <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
-                  <legend class="text-ink-2 px-1 text-sm">Brand</legend>
-                  {/* Same fixed-row-height, whole-row-multiple fix as the Category
-                      fieldset above — see that block's own comment for the reasoning
-                      behind h-7 / max-h-[8.75rem] / .gear-filter-scroll / truncate. */}
-                  <div class="gear-filter-scroll border-hairline bg-sunk mt-1 max-h-[8.75rem] overflow-y-auto rounded-[var(--r-sm)] border">
-                    {gearOptions.brands.map((brand) => (
-                      <label class="text-ink flex h-7 items-center gap-2 px-2 text-sm">
-                        <input
-                          type="checkbox"
-                          name="brand"
-                          value={brand}
-                          checked={query.brands.includes(brand)}
-                          class="accent-blue shrink-0"
-                        />
-                        <span class="truncate" title={brand}>
-                          {brand}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
-              )}
-
-              <fieldset class="border-hairline rounded-[var(--r-sm)] border p-3">
-                <legend class="text-ink-2 px-1 text-sm">Weight range</legend>
-                <div class="mt-1 flex items-center gap-2">
-                  <label for="wmin" class="sr-only">
-                    Minimum weight
+              {/* A fieldset with an sr-only legend rather than no grouping at all: the
+                  three boxes are one control ("which statuses am I looking at"), and a
+                  screen reader needs that said once rather than inferred from three
+                  adjacent labels. The legend is visually hidden because the bar's whole
+                  point is to be lighter than what it replaced, and "Owned / Wishlist /
+                  Retired" beside a search field is self-describing on sight. */}
+              <fieldset class="flex flex-wrap items-center gap-x-5 gap-y-2 sm:pb-2">
+                <legend class="sr-only">Status</legend>
+                {GEAR_STATUSES.map((status) => (
+                  <label class="text-ink flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      name="status"
+                      value={status}
+                      checked={checkedStatuses.includes(status)}
+                      class="accent-blue"
+                    />
+                    {formatGearStatus(status)}
                   </label>
-                  <input
-                    id="wmin"
-                    name="wmin"
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={wminValue}
-                    placeholder="Min"
-                    class="border-hairline bg-surface text-ink w-full rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
-                  />
-                  <label for="wmax" class="sr-only">
-                    Maximum weight
-                  </label>
-                  <input
-                    id="wmax"
-                    name="wmax"
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={wmaxValue}
-                    placeholder="Max"
-                    class="border-hairline bg-surface text-ink w-full rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
-                  />
-                  <label for="wunit" class="sr-only">
-                    Weight unit
-                  </label>
-                  <select
-                    id="wunit"
-                    name="wunit"
-                    class="border-hairline bg-surface text-ink rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
-                  >
-                    {WEIGHT_UNITS.map((unit) => (
-                      <option value={unit} selected={unit === query.weightUnit}>
-                        {unit}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                ))}
               </fieldset>
             </div>
 
             <input type="hidden" name="sort" value={query.sort} />
             <input type="hidden" name="dir" value={query.direction} />
 
-            <div class="mt-4 flex items-center gap-3">
+            {/* Present ONLY when scripting is off — see the form's own comment above.
+                A browser with JS enabled does not parse this element's contents at all,
+                so there is no hidden control here to tab into, and no second way to
+                apply a tick that already applied itself. */}
+            <noscript>
               <button
                 type="submit"
-                class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+                class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
               >
-                Apply filters
+                Apply
               </button>
-              {hasActiveFilters && (
-                <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline">
-                  Clear filters
-                </a>
-              )}
-            </div>
+            </noscript>
           </form>
 
           {items.length === 0 ? (
@@ -589,40 +520,20 @@ function pageHref(target: number): string {
                             class="accent-blue"
                           />
                         </th>
-                        {SORT_COLUMNS.slice(0, 1).map(({ key, label }) => (
+                        {COLUMNS.map(({ key, label }) => (
                           <th
                             scope="col"
-                            aria-sort={sortAriaSort(key)}
+                            aria-sort={key === null ? undefined : sortAriaSort(key)}
                             class="px-3 py-2 font-medium"
                           >
-                            <a href={sortHref(key)} class="hover:text-ink text-ink-2">
-                              {label}
-                              {sortIndicator(key)}
-                            </a>
-                          </th>
-                        ))}
-                        <th scope="col" class="px-3 py-2 font-medium">
-                          Brand
-                        </th>
-                        <th scope="col" class="px-3 py-2 font-medium">
-                          Category
-                        </th>
-                        <th scope="col" class="px-3 py-2 font-medium">
-                          Status
-                        </th>
-                        <th scope="col" class="px-3 py-2 font-medium">
-                          Qty
-                        </th>
-                        {SORT_COLUMNS.slice(1).map(({ key, label }) => (
-                          <th
-                            scope="col"
-                            aria-sort={sortAriaSort(key)}
-                            class="px-3 py-2 font-medium"
-                          >
-                            <a href={sortHref(key)} class="hover:text-ink text-ink-2">
-                              {label}
-                              {sortIndicator(key)}
-                            </a>
+                            {key === null ? (
+                              label
+                            ) : (
+                              <a href={sortHref(key)} class="hover:text-ink text-ink-2">
+                                {label}
+                                {sortIndicator(key)}
+                              </a>
+                            )}
                           </th>
                         ))}
                         <th scope="col" class="px-3 py-2 font-medium">
@@ -643,16 +554,26 @@ function pageHref(target: number): string {
                             />
                           </td>
                           <td class="px-3 py-2">
-                            <a
-                              href={gearItemPath(item.id)}
-                              class="text-blue-deep hover:text-blue-ink underline"
-                            >
-                              {item.name}
-                            </a>
+                            {/* THE RAGGED LEFT EDGE HERE IS DELIBERATE. `gap-1.5`
+                                applies BETWEEN children, so an owned row — which
+                                renders no icon at all — has its name start flush at the
+                                cell's padding while wishlist and retired rows are
+                                indented by the glyph. PK-62 accepts that and explicitly
+                                forbids evening it up with a spacer or a placeholder
+                                glyph; see GearStatusIcon.astro for why owned is the
+                                unmarked default. */}
+                            <span class="flex items-center gap-1.5">
+                              <GearStatusIcon status={item.status} />
+                              <a
+                                href={gearItemPath(item.id)}
+                                class="text-blue-deep hover:text-blue-ink underline"
+                              >
+                                {item.name}
+                              </a>
+                            </span>
                           </td>
                           <td class="px-3 py-2">{item.brand ?? '—'}</td>
                           <td class="px-3 py-2">{item.category ?? '—'}</td>
-                          <td class="px-3 py-2">{formatGearStatus(item.status)}</td>
                           <td class="numeric px-3 py-2">{item.quantity}</td>
                           <td class="numeric px-3 py-2">
                             {item.weight} {item.weight_unit}
@@ -759,40 +680,6 @@ function pageHref(target: number): string {
   </main>
 </Layout>
 
-<style>
-  /* PS-4 defect 3: themes the Category/Brand scroll boxes' own scrollbar from
-   * tokens.css rather than leaving it whatever the OS/browser default is, so the
-   * scrollability itself reads as a deliberate part of this design rather than an
-   * unstyled leftover. --rule/--ink-3 (neutral earth tones), never --blue: per
-   * tokens.css's own rule, blue marks something INTERACTIVE (a link, a checked
-   * checkbox's accent), and a scrollbar thumb — while technically draggable — is a
-   * native browser affordance for a content region, not one of this app's own
-   * interactive controls, so it stays off that colour. No box-shadow anywhere here,
-   * matching tokens.css's "nothing casts a shadow at rest".
-   */
-  .gear-filter-scroll {
-    scrollbar-width: thin;
-    scrollbar-color: var(--rule) transparent;
-  }
-
-  .gear-filter-scroll::-webkit-scrollbar {
-    width: 8px;
-  }
-
-  .gear-filter-scroll::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .gear-filter-scroll::-webkit-scrollbar-thumb {
-    background-color: var(--rule);
-    border-radius: 9999px;
-  }
-
-  .gear-filter-scroll::-webkit-scrollbar-thumb:hover {
-    background-color: var(--ink-3);
-  }
-</style>
-
 <script>
   // Progressive enhancement only: every bulk action is a real form submission and
   // works with this script never running. All this does is let a visitor tick one box
@@ -804,6 +691,23 @@ function pageHref(target: number): string {
       document.querySelectorAll('input[type="checkbox"][name="id"]').forEach((box) => {
         if (box instanceof HTMLInputElement) box.checked = checked;
       });
+    });
+  }
+
+  // Progressive enhancement only, again (PK-62): ticking a status re-runs the search
+  // immediately instead of waiting for a button nobody wants back. With this script
+  // never running, the <noscript> Apply button in the same form does the identical
+  // thing — that button is the no-JS path, this is the JS one, and they are never both
+  // present, so there is no state where a tick can be applied twice.
+  //
+  // requestSubmit() rather than submit(): submit() bypasses the submit event and
+  // constraint validation entirely, which is the wrong default even for a form that has
+  // neither today. The instanceof guard covers the closet's own empty state, where this
+  // form is not rendered at all and getElementById answers null.
+  const filters = document.getElementById('gear-filters');
+  if (filters instanceof HTMLFormElement) {
+    filters.querySelectorAll('input[type="checkbox"][name="status"]').forEach((box) => {
+      box.addEventListener('change', () => filters.requestSubmit());
     });
   }
 </script>
