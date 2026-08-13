@@ -9,21 +9,43 @@
 // ragged left edge explicitly and forbids "fixing" it with a spacer or a placeholder
 // glyph, so do not add one.
 //
+// WHICH STATUS GETS WHICH GLYPH IS NOT DECIDED HERE. `gearStatusMarker`
+// (src/lib/gear/format.ts) owns that, as a map that is total over `GearStatus`, so a
+// fourth status becomes a compile error there rather than a row that silently draws
+// nothing here. This file owns the drawing and nothing else. It also means the decision
+// is testable: `vitest.config.ts` collects `src/lib/`, and there is no harness in this
+// repo for rendering an `.astro` component in a test.
+//
 // KEEP THIS A PLAIN .astro COMPONENT. Same rule GearNav.astro and GearItemForm.astro
-// carry, for the same reason: it takes no `client:*` directive anywhere it is used and
-// must never gain one. Three hand-written inline SVGs are not a reason to ship an icon
-// package to the browser, let alone a hydration runtime — the whole closet renders
-// without a byte of component JavaScript today, and tests/anonymous-read-path.test.ts
-// exists to keep it that way.
+// carry in their own comments, and it is a CONVENTION those comments enforce by being
+// read — not something a test checks. (tests/anonymous-read-path.test.ts guards a
+// different and narrower thing: that no auth SDK or service-role key reaches the
+// anonymous read path. It inspects the build's module graph for those imports and does
+// not enumerate any gear route, so it would not notice a `client:*` directive here.)
+// Two hand-written inline SVGs are not a reason to ship an icon package to the browser,
+// let alone a hydration runtime.
 //
 // COLOUR IS NEVER THE ONLY SIGNAL (WCAG 1.4.1). Each icon carries its own accessible
 // name via role="img" + aria-label, so a screen reader announces "Wishlist" or
 // "Retired" beside the item name, and the two glyphs differ in SHAPE as well as hue.
-// --ochre and --rust come from src/styles/tokens.css and both have dark cuts there, so
-// this follows the theme rather than pinning a light-mode hex. Never --blue: per
-// tokens.css's own standing rule, blue marks something INTERACTIVE, and a status
-// marker is not clickable.
-import { GEAR_STATUS_LABELS, isGearStatus } from '../lib/gear/fields';
+// Never --blue: per tokens.css's own standing rule, blue marks something INTERACTIVE,
+// and a status marker is not clickable.
+//
+// WHY WISHLIST IS --ochre-ink AND NOT --ochre, which is what PK-62's text asks for.
+// Because owned draws nothing, this glyph is the ONLY visual carrier of "wishlist" on
+// its row — a graphical object under WCAG 1.4.11, which wants 3:1 against its
+// background, not decoration, which wants nothing. --ochre #b5822e manages 3.40:1 on
+// --surface but only 2.84:1 on --sunk #efeae1, and --sunk is the row's own hover
+// background (`hover:bg-sunk` on every row in the closet table), so the icon fails the
+// moment a pointer crosses its row. --ochre-ink #8a6118 is 4.61:1 on --sunk and 5.52:1
+// on --surface. It is the same family, already in the palette, and invents nothing —
+// tokens.css's "do not invent values here" rule is respected, and PK-62's own
+// requirement that status must not rest on colour alone is better served by a colour
+// that can actually be seen. --rust needed no such change: #b24a3c is 4.45:1 on --sunk.
+// Dark mode was never the problem in either case (--ochre's dark cut #d4a353 is ~6.7:1
+// on dark --sunk); this is a light-mode fix that dark mode simply inherits.
+import { GEAR_STATUS_LABELS } from '../lib/gear/fields';
+import { gearStatusMarker } from '../lib/gear/format';
 
 interface Props {
   /** A `gear_items` row's `status`, typed as the bare `string` the database client
@@ -35,12 +57,7 @@ interface Props {
 
 const { status } = Astro.props;
 
-// An unrecognised status is drawn the same way `owned` is — not at all. There is no
-// honest glyph for a value this component has never heard of, and inventing one (a "?"
-// badge, say) would put a defect marker on a row whose only crime is being written
-// directly against PostgREST. `formatGearStatus` still renders such a value verbatim
-// wherever a status is shown as text, so it stays debuggable somewhere.
-const marked = isGearStatus(status) && status !== 'owned' ? status : null;
+const marked = gearStatusMarker(status);
 
 // h-4 w-4 pairs with the table's text-sm rows; shrink-0 keeps the glyph its full size
 // when a long item name competes for the cell. stroke-based rather than filled, at a
@@ -59,7 +76,11 @@ const SVG_ATTRS = {
 
 {
   marked === 'wishlist' && (
-    <svg {...SVG_ATTRS} class={`${SVG_CLASS} text-ochre`} aria-label={GEAR_STATUS_LABELS.wishlist}>
+    <svg
+      {...SVG_ATTRS}
+      class={`${SVG_CLASS} text-ochre-ink`}
+      aria-label={GEAR_STATUS_LABELS.wishlist}
+    >
       {/* A shopping trolley: wanted, not yet owned. */}
       <path d="M2.75 3.75h2.1l2.55 11.05a1.6 1.6 0 0 0 1.56 1.24h7.74a1.6 1.6 0 0 0 1.55-1.21l1.67-6.86H6.1" />
       <circle cx="9.5" cy="19.75" r="1.4" />

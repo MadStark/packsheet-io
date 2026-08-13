@@ -446,9 +446,10 @@ describe('sorting', () => {
       sortUser.client.from('gear_items').insert(fields).select('id').single();
 
     // BRANDS ARE SET ON TWO OF THE THREE, AND THE THIRD IS DELIBERATELY LEFT NULL.
-    // PK-62 made `brand` a sort key, and it is the first NULLABLE column the closet
-    // offers one for — so the fixture has to contain a null to say anything honest
-    // about where those rows land.
+    // PK-62 made `brand` a sort key, and it is a NULLABLE one — so the fixture has to
+    // contain a null to say anything honest about where those rows land. (`price` was
+    // already both nullable and sortable before this; `brand` is only the case where a
+    // real closet notices, unbranded gear being commoner than unpriced gear.)
     //
     // THE BRAND ORDER MUST DISAGREE WITH THE NAME ORDER, OR THE BRAND-SORT TEST BELOW
     // PROVES NOTHING. `name` is the default sort and the fallback for an unrecognised

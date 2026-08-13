@@ -1,7 +1,28 @@
 /**
- * Turns the closet list's "what categories and brands does this user already have"
- * query into de-duplicated, sorted option lists for the filter form on
- * `src/pages/gear/index.astro`.
+ * The closet's "what categories and brands does this user already have" query, and the
+ * de-duplication that turns its rows into sorted option lists.
+ *
+ * WHAT THIS MODULE IS FOR CHANGED IN PK-62, AND THE TWO HALVES NOW HAVE DIFFERENT
+ * CALLERS — read this before concluding either half is dead code.
+ *
+ *   - `loadGearOptions` is still called by `src/pages/gear/index.astro` on every render,
+ *     but no longer for its DATA. PK-62 deleted the Category and Brand filter checkboxes
+ *     it used to populate; what the page needs now is only whether the query returned
+ *     ANY row, because that is how `closetIsEmpty` tells "your closet is genuinely
+ *     empty" apart from "these filters matched nothing" — two honestly different empty
+ *     states that collapse into one wrong message without it. `.is('deleted_at', null)`
+ *     is load-bearing for that reading specifically: a closet whose every item is in the
+ *     trash must report as EMPTY, not as full-but-filtered.
+ *   - `extractGearOptions` has NO production caller as of PK-62 and is kept, with its
+ *     tests, for the item form's category autocomplete (PK-63). That is a forward-looking
+ *     bet: if PK-63 changes shape and never wants it, delete this function rather than
+ *     leaving it here indefinitely on the strength of this sentence.
+ *
+ * SINCE ONLY A BOOLEAN IS READ FROM IT TODAY, `loadGearOptions` fetches up to
+ * `db-max-rows` rows and two columns to answer a question `.limit(1)` or a `head: true`
+ * count would answer. Left as-is deliberately rather than optimised into something PK-63
+ * would immediately have to widen again — but if PK-63 does not land, narrowing it is
+ * the obvious cleanup.
  *
  * WHY THIS LIVES IN src/lib/ RATHER THAN IN THE PAGE. Same reasoning as every other
  * module in this directory (see `src/lib/gear/query.ts`'s own module comment):

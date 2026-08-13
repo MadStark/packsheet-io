@@ -14,12 +14,21 @@ import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import {
   gearListPath,
   gearQueryToSearchParams,
+  hasUnsurfacedFilters,
   loadGearCloset,
   parseGearQuery,
   sortLinkSearchParams,
+  unsurfacedFilterParams,
   type GearQuery,
 } from '../../lib/gear/query';
-import { GEAR_PAGE_SIZE, GEAR_STATUSES, type GearSortKey } from '../../lib/gear/fields';
+import {
+  GEAR_LIST_COLUMNS,
+  GEAR_PAGE_SIZE,
+  GEAR_STATUSES,
+  checkedGearStatuses,
+  isGearStatus,
+  type GearSortKey,
+} from '../../lib/gear/fields';
 import {
   BULK_FORM_FIELD,
   BULK_INTENT,
@@ -236,16 +245,17 @@ const rangeEnd = totalCount === 0 ? 0 : rangeStart + items.length - 1;
 // one sentence that would be wrong for whichever case it wasn't written for.
 const closetIsEmpty = !loadError && (optionRows ?? []).length === 0;
 
-// ZERO CHECKED RENDERS AS ALL THREE CHECKED (PK-62). `parseGearQuery` already treats an
-// empty `statuses` array as "no status filter", i.e. every row — so the query layer
-// needed no change for this, only this one line deciding what the boxes SHOW for that
-// state. Rendering all three ticked rather than none is what makes "default" and
-// "cleared" the same state instead of two that look different and behave identically,
-// and it is why unticking the last remaining box lands the visitor back on the full
-// closet with all three ticked rather than on an empty list they have no filter panel
-// left to rescue themselves from.
-const checkedStatuses: readonly string[] =
-  query.statuses.length === 0 ? GEAR_STATUSES : query.statuses;
+// ZERO CHECKED RENDERS AS ALL THREE CHECKED (PK-62) — the rule itself lives in
+// `checkedGearStatuses` (src/lib/gear/fields.ts), not here, because it is one of this
+// ticket's acceptance criteria and `vitest.config.ts` excludes `src/pages/**` from
+// collection. See that function's own comment for the reasoning.
+const checkedStatuses = checkedGearStatuses(query.statuses);
+
+// See `unsurfacedFilterParams` (src/lib/gear/query.ts) for what these are and why the
+// page has to both re-emit and disclose them. `[...params]` rather than the object form
+// because `category` and `brand` legitimately repeat.
+const unsurfacedFilters = [...unsurfacedFilterParams(query)];
+const closetIsSilentlyFiltered = hasUnsurfacedFilters(query);
 
 // The undo banner: only rendered for a token that survives validation — a malformed
 // or tampered `undo` param is silently ignored rather than shown to anybody, exactly
@@ -258,28 +268,13 @@ const undoMessage =
     : 'Items moved to the trash.';
 
 /**
- * Every labelled column header in the table, in render order, with `key: null` marking
- * one that is not sortable. The Status column is absent because PK-62 removed it — a
- * three-value field an icon beside the name says faster (see GearStatusIcon.astro).
- *
- * ONE LIST, NOT TWO SLICES. This used to be a sortable-only `SORT_COLUMNS` that the
- * template rendered as `.slice(0, 1)`, then three hand-written unsortable headers, then
- * `.slice(1)` — an interleaving held together by two magic indices that had to be
- * recounted by hand every time a column moved. Making Brand sortable would have turned
- * those into `.slice(0, 2)` / `.slice(2)`; naming each column's sortability instead
- * removes the slicing altogether and lets the template be a single map. The first and
- * last cells (the select-all checkbox and the Photo column's sr-only heading) stay
- * outside this list because neither carries a visible label.
+ * The labelled column headers live in `GEAR_LIST_COLUMNS` (src/lib/gear/fields.ts), not
+ * here, so that "the Brand header is a sort link" is a testable claim rather than a line
+ * in a file `vitest.config.ts` excludes. See that constant's own comment — including its
+ * warning that the `<tbody>` cells below are a separate hand-maintained list in the same
+ * order that nothing checks. The first and last cells (the select-all checkbox and the
+ * Photo column's sr-only heading) are not in it, because neither carries a visible label.
  */
-const COLUMNS: readonly { readonly key: GearSortKey | null; readonly label: string }[] = [
-  { key: 'name', label: 'Name' },
-  { key: 'brand', label: 'Brand' },
-  { key: null, label: 'Category' },
-  { key: null, label: 'Qty' },
-  { key: 'weight', label: 'Weight' },
-  { key: 'price', label: 'Price' },
-  { key: 'added', label: 'Added' },
-];
 
 function sortHref(key: GearSortKey): string {
   return `${GEAR_PATH}?${sortLinkSearchParams(query, key).toString()}`;
@@ -309,12 +304,15 @@ function pageHref(target: number): string {
     <div class="flex items-center justify-between gap-4">
       <h1 class="text-3xl">Your gear closet</h1>
       {
-        /* C1 (PK-4 review): a primary action in the heading row, reachable regardless
-           of whether the closet is empty or full — GearNav's own "Add item" link
-           covers every gear page, and this is the closet list's own, more prominent
-           copy of the same route, matching the empty state's already-established
-           border-blue-deep button styling rather than inventing a second vocabulary
-           for "add an item". */
+        /* C1 (PK-4 review): a primary action in the heading row, rendered whether the
+           closet is empty or full. THIS IS NOW THE ONLY LINK TO GEAR_NEW_PATH ON THIS
+           PAGE'S CHROME — PK-62 removed GearNav's "Add item" link (see that file's own
+           comment for why), so this button is load-bearing rather than the second, more
+           prominent copy of a nav link it used to be. Do not remove it on the grounds
+           that the nav covers it; the nav no longer does. The empty state below carries
+           its own copy for the case where there is no table to put this above.
+           border-blue-deep matches the empty state's already-established button styling
+           rather than inventing a second vocabulary for "add an item". */
       }
       <a
         href={GEAR_NEW_PATH}
@@ -419,20 +417,33 @@ function pageHref(target: number): string {
               deliberately NOT carried, since a new filter set changes what "page 3"
               even means.
 
-              NO "Apply filters" BUTTON, AND THE FORM STILL WORKS WITH JAVASCRIPT OFF.
-              Two independent mechanisms cover that, which is why neither needs the
-              other to be reliable:
+              NO "Apply filters" BUTTON ONCE SCRIPTING IS CONFIRMED WORKING, AND THE FORM
+              STILL WORKS WITHOUT IT. Two independent mechanisms, neither relying on the
+              other:
 
-                - The search field submits on Enter. HTML's implicit submission runs for
-                  a form with no submit button when exactly ONE field blocks it; a
-                  checkbox does not block, so this search input is that one field. Add a
-                  second text-like input to this form and Enter silently stops working —
-                  put a submit button back at the same time if that ever happens.
-                - The status checkboxes are submitted by the <noscript> button below
-                  when scripting is off, and by the progressive-enhancement listener at
-                  the foot of this file when it is on. The button is genuinely absent
-                  from the DOM when JS runs, so it can never be a second, redundant way
-                  to do what a tick already did. */}
+                - The search field submits on Enter. HTML's implicit submission fires for
+                  a form with no submit button when AT MOST ONE field blocks it (zero
+                  blocking fields submits too; two or more is what does nothing). Here
+                  there is exactly one: `type="search"` is on the blocking list, and
+                  neither the three checkboxes nor the two `type="hidden"` inputs are.
+                  Add a second text-like input and Enter silently stops working — and
+                  note the rule keys off FORM OWNERSHIP, not nesting, so an input
+                  elsewhere in the document carrying form="gear-filters" breaks it just
+                  as surely as one added between these tags.
+                - The status checkboxes are submitted by the Apply button below when the
+                  inline script has not removed it, and by that script's own change
+                  listener when it has. See the button's comment for why this is not a
+                  <noscript>, which guards the wrong condition.
+
+              CHANGING A STATUS RELOADS THE LIST, and WCAG 3.2.2 (On Input, Level A)
+              allows that only where the visitor "has been advised of the behavior before
+              using the component" — which is what the hint beside the checkboxes is for.
+              It is not decoration and it is not a tooltip: remove it and this auto-submit
+              becomes an unannounced change of context. The honest cost of the design even
+              so is that each tick is a navigation that resets focus to the top of the
+              document, so unticking two statuses means two reloads and two traversals. A
+              visitor who would rather batch the changes can turn the script off; there is
+              no in-page way to opt out. */}
           <form
             method="GET"
             action={GEAR_PATH}
@@ -460,38 +471,78 @@ function pageHref(target: number): string {
                   adjacent labels. The legend is visually hidden because the bar's whole
                   point is to be lighter than what it replaced, and "Owned / Wishlist /
                   Retired" beside a search field is self-describing on sight. */}
-              <fieldset class="flex flex-wrap items-center gap-x-5 gap-y-2 sm:pb-2">
+              <fieldset class="sm:pb-2">
                 <legend class="sr-only">Status</legend>
-                {GEAR_STATUSES.map((status) => (
-                  <label class="text-ink flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      name="status"
-                      value={status}
-                      checked={checkedStatuses.includes(status)}
-                      class="accent-blue"
-                    />
-                    {formatGearStatus(status)}
-                  </label>
-                ))}
+                <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
+                  {GEAR_STATUSES.map((status) => (
+                    <label class="text-ink flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        name="status"
+                        value={status}
+                        checked={checkedStatuses.includes(status)}
+                        class="accent-blue"
+                      />
+                      {formatGearStatus(status)}
+                    </label>
+                  ))}
+                </div>
+                {/* The WCAG 3.2.2 advisory. Rendered unconditionally rather than only
+                    when scripting is on, because the server cannot know that — and the
+                    sentence stays true either way: with the script off, the Apply button
+                    is present and it is that button which updates the list. */}
+                <p class="text-ink-3 mt-1.5 text-xs">Changing a status updates the list.</p>
               </fieldset>
             </div>
 
             <input type="hidden" name="sort" value={query.sort} />
             <input type="hidden" name="dir" value={query.direction} />
 
-            {/* Present ONLY when scripting is off — see the form's own comment above.
-                A browser with JS enabled does not parse this element's contents at all,
-                so there is no hidden control here to tab into, and no second way to
-                apply a tick that already applied itself. */}
-            <noscript>
-              <button
-                type="submit"
-                class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-              >
-                Apply
-              </button>
-            </noscript>
+            {/* Category, brand and the weight range: honoured by the query layer, with
+                no control on this page since PK-62. Re-emitted so that submitting this
+                form preserves them exactly as the sort headers and the pager already do,
+                instead of being the one path that silently discards them. The notice
+                below is what stops that from being an undisclosed filter. */}
+            {unsurfacedFilters.map(([name, value]) => (
+              <input type="hidden" name={name} value={value} />
+            ))}
+
+            {/* ALWAYS RENDERED, AND REMOVED BY THE SCRIPT BELOW ONCE IT HAS ACTUALLY
+                WIRED THE CHECKBOXES UP. This started as a <noscript> block, which was
+                wrong in a way worth recording so it does not come back: <noscript> keys
+                on SCRIPTING BEING ENABLED, not on this page's script having run. Those
+                are different conditions, and every way they diverge left all three
+                checkboxes as dead controls with no button and no feedback — a blocked or
+                404'd bundle after a deploy, a Content-Security-Policy that refuses the
+                script, an extension, or simply an exception thrown earlier in the same
+                bundle. Rendering the button unconditionally and deleting it only on the
+                success path inverts that: the worst case is now one redundant button,
+                not a filter bar that silently does nothing. */}
+            <button
+              type="submit"
+              id="gear-filters-apply"
+              class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+            >
+              Apply
+            </button>
+
+            {/* THE ONLY DISCLOSURE, AND THE ONLY ESCAPE, for a filter with no control.
+                Without this, a visitor arriving on a bookmarked `?category=Shelter` — a
+                URL PK-4 shipped and this ticket removed the UI for — sees a closet
+                missing most of its gear with nothing on the page saying why, and the
+                "Clear filters" link in the no-results state never renders because the
+                filter DID match something. Deliberately not a reconstruction of the old
+                filter panel: it says the closet is filtered and offers one link that
+                removes every such filter, which is the whole of what a visitor can
+                usefully do about a control that no longer exists. */}
+            {closetIsSilentlyFiltered && (
+              <p role="status" class="text-ink-2 mt-4 text-sm">
+                This closet is filtered by settings this page no longer shows.{' '}
+                <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
+                  Clear filters
+                </a>
+              </p>
+            )}
           </form>
 
           {items.length === 0 ? (
@@ -520,7 +571,7 @@ function pageHref(target: number): string {
                             class="accent-blue"
                           />
                         </th>
-                        {COLUMNS.map(({ key, label }) => (
+                        {GEAR_LIST_COLUMNS.map(({ key, label }) => (
                           <th
                             scope="col"
                             aria-sort={key === null ? undefined : sortAriaSort(key)}
@@ -564,6 +615,20 @@ function pageHref(target: number): string {
                                 unmarked default. */}
                             <span class="flex items-center gap-1.5">
                               <GearStatusIcon status={item.status} />
+                              {/* THE ONLY PLACE AN ACTIVE ROW'S MALFORMED STATUS STILL
+                                  SURFACES. Removing the Status column took away the one
+                                  cell that rendered `item.status` as text, and
+                                  `gearStatusMarker` draws nothing for a value it does
+                                  not recognise — identical to `owned`. The trash page
+                                  still renders a status verbatim, but it only ever shows
+                                  SOFT-DELETED rows, so without this an out-of-constraint
+                                  status would be invisible everywhere an active item
+                                  appears. sr-only costs no layout, so the deliberately
+                                  ragged left edge is untouched; nothing renders here at
+                                  all for the three real statuses. */}
+                              {!isGearStatus(item.status) && (
+                                <span class="sr-only">{formatGearStatus(item.status)}</span>
+                              )}
                               <a
                                 href={gearItemPath(item.id)}
                                 class="text-blue-deep hover:text-blue-ink underline"
@@ -679,6 +744,42 @@ function pageHref(target: number): string {
     }
   </main>
 </Layout>
+
+{
+  /* THE STATUS FILTER'S OWN SCRIPT, is:inline and deliberately NOT in the bundled module
+    below. Two properties depend on both of those choices:
+
+      1. An inline script cannot fail to load. The failure this design replaces was
+         exactly "scripting is enabled but the module never arrived" — a hashed bundle
+         404ing after a deploy, a CSP or extension refusing it, or an exception thrown
+         earlier in the same bundle. <noscript> cannot see any of those, which is why the
+         Apply button is a real button removed here rather than <noscript> content.
+      2. It runs during parsing rather than after it, so the Apply button is gone before
+         first paint instead of appearing and then vanishing. It sits at the FOOT of the
+         document, after the form it operates on has been parsed — an inline script is
+         synchronous, so "later in the document" is all the guarantee it needs.
+
+    The removal happens FIRST, so anything that throws afterwards leaves the button in
+    place and the form still usable. requestSubmit() is preferred over submit(), which
+    skips both the submit event and constraint validation, but it is absent in Safari
+    below 16 — where calling it unguarded would throw inside the change handler and
+    produce the very dead control this exists to prevent. */
+}
+<script is:inline>
+  (function () {
+    const form = document.getElementById('gear-filters');
+    if (!form) return;
+    const apply = document.getElementById('gear-filters-apply');
+    if (apply) apply.remove();
+    const submit = function () {
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+    };
+    form.querySelectorAll('input[type="checkbox"][name="status"]').forEach(function (box) {
+      box.addEventListener('change', submit);
+    });
+  })();
+</script>
 
 <script>
   // Progressive enhancement only: every bulk action is a real form submission and
