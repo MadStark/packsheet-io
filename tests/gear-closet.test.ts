@@ -448,13 +448,22 @@ describe('sorting', () => {
     // BRANDS ARE SET ON TWO OF THE THREE, AND THE THIRD IS DELIBERATELY LEFT NULL.
     // PK-62 made `brand` a sort key, and it is the first NULLABLE column the closet
     // offers one for — so the fixture has to contain a null to say anything honest
-    // about where those rows land. 'Camp Chef' < 'Enlightened Equipment' ascending, and
-    // the brand order is deliberately NOT the same as the name order (Basecamp Grill /
-    // Featherweight Quilt happen to agree, but Overnight Pack moves), so a brand sort
-    // that silently fell back to `name` would not pass the assertions below.
+    // about where those rows land.
+    //
+    // THE BRAND ORDER MUST DISAGREE WITH THE NAME ORDER, OR THE BRAND-SORT TEST BELOW
+    // PROVES NOTHING. `name` is the default sort and the fallback for an unrecognised
+    // sort key, so a `sort=brand` that never reached GEAR_SORT_COLUMNS would come back
+    // in name order — and if the fixture's two orders happened to coincide, every
+    // assertion would still pass while the feature was entirely broken. An earlier
+    // version of this fixture had exactly that hole: 'Camp Chef' (Basecamp Grill) <
+    // 'Enlightened Equipment' (Featherweight Quilt) < null (Overnight Pack) is the same
+    // sequence as the alphabetical name order, in both directions. 'Alpkit' on the
+    // QUILT and 'Weber' on the GRILL inverts the first two relative to their names, so
+    // name order and brand order now differ in both directions and the fallback is
+    // distinguishable from the real thing.
     await insertOne({
       name: 'Featherweight Quilt',
-      brand: 'Enlightened Equipment',
+      brand: 'Alpkit',
       weight: 300,
       weight_unit: 'g',
       price: 200,
@@ -462,7 +471,7 @@ describe('sorting', () => {
     });
     await insertOne({
       name: 'Basecamp Grill',
-      brand: 'Camp Chef',
+      brand: 'Weber',
       weight: 500,
       weight_unit: 'g',
       price: 50,
@@ -513,31 +522,38 @@ describe('sorting', () => {
     ]);
   });
 
-  it('sorts by brand, both directions, with the branded rows in brand order (PK-62)', async () => {
-    // Camp Chef < Enlightened Equipment. Overnight Pack has NO brand, and Postgres
-    // orders nulls LAST ascending and FIRST descending by default — neither PostgREST
-    // nor GEAR_SORT_COLUMNS overrides that, so the unbranded row bookends the list
-    // rather than sorting as an empty string would (which would put it FIRST ascending).
-    // See GEAR_SORT_COLUMNS' own comment for why that default is left alone.
+  it('sorts by brand, both directions, and not merely in name order (PK-62)', async () => {
+    // Alpkit (Featherweight Quilt) < Weber (Basecamp Grill), which is the OPPOSITE of
+    // those two rows' alphabetical name order — so these two assertions fail if
+    // `sort=brand` ever falls back to the default `name` sort. See the fixture's own
+    // comment for why that inversion is load-bearing rather than incidental.
+    //
+    // Overnight Pack has NO brand, and Postgres orders nulls LAST ascending and FIRST
+    // descending by default — neither PostgREST nor GEAR_SORT_COLUMNS overrides that,
+    // so the unbranded row bookends the list rather than sorting where an empty string
+    // would (which would put it FIRST ascending). See GEAR_SORT_COLUMNS' own comment
+    // for why that default is deliberately left alone.
     expect(await sortedNames('brand', 'asc')).toEqual([
-      'Basecamp Grill',
-      'Featherweight Quilt',
-      'Overnight Pack',
+      'Featherweight Quilt', // Alpkit
+      'Basecamp Grill', // Weber
+      'Overnight Pack', // no brand — nulls last ascending
     ]);
     expect(await sortedNames('brand', 'desc')).toEqual([
-      'Overnight Pack',
-      'Featherweight Quilt',
-      'Basecamp Grill',
+      'Overnight Pack', // no brand — nulls first descending
+      'Basecamp Grill', // Weber
+      'Featherweight Quilt', // Alpkit
     ]);
+
+    // And the guard that makes the above mean something: the name sort really does
+    // disagree, so "passes the brand assertions" cannot be satisfied by name ordering.
+    expect(await sortedNames('name', 'asc')).not.toEqual(await sortedNames('brand', 'asc'));
   });
 
   it('a brand sort survives an active search — PK-62 acceptance', async () => {
-    // The acceptance criterion in as few moving parts as it takes: `q` narrows the
-    // closet to the two branded rows (both match on the letter run in their names),
-    // and the brand sort still orders THOSE in brand order in both directions rather
-    // than quietly reverting to the default name sort. The search filter and the sort
-    // are applied by two different functions (`applyGearFilters` and `applyGearQuery`),
-    // which is exactly why "does one survive the other" is worth an assertion.
+    // The search filter and the sort are applied by two different functions
+    // (`applyGearFilters` and `applyGearQuery`), which is exactly why "does one survive
+    // the other" is worth its own assertion rather than being assumed from the two
+    // passing separately.
     const searched = async (direction: 'asc' | 'desc') => {
       const { items, error } = await closetQuery(sortUser, {
         q: 'a',
@@ -548,17 +564,22 @@ describe('sorting', () => {
       return names(items);
     };
 
-    // 'a' appears in every name here, so the search narrows nothing away — what it does
-    // is prove the sort is unaffected by a search being present at all.
+    // WHAT THIS DOES AND DOES NOT PROVE, stated plainly so nobody reads more into it:
+    // 'a' occurs in all three names, so the search narrows NOTHING away here. The claim
+    // under test is therefore "an active `q` does not disturb the brand ordering", not
+    // "the search filters correctly" — that second question has its own describe block
+    // above, and duplicating it here would only make this test slower to read. The
+    // expected order is the brand order, NOT the name order, so a search that reset the
+    // sort would still be caught.
     expect(await searched('asc')).toEqual([
-      'Basecamp Grill',
       'Featherweight Quilt',
+      'Basecamp Grill',
       'Overnight Pack',
     ]);
     expect(await searched('desc')).toEqual([
       'Overnight Pack',
-      'Featherweight Quilt',
       'Basecamp Grill',
+      'Featherweight Quilt',
     ]);
   });
 
