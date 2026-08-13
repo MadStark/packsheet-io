@@ -22,6 +22,20 @@ on:
   push:
     branches: [main]
 
+  # The lever PlaceholderOnly needs, and the reason it is a setting rather than a commit.
+  #
+  # `vars.PLACEHOLDER_ONLY` is read at BUILD time (see the Build step below and the
+  # constant in astro.config.mjs), so changing it in Settings → Environments → production
+  # changes nothing on its own — the live Worker is whatever the last build produced.
+  # Without this trigger the only way to pick the new value up would be to push a commit
+  # to main, which is exactly the coupling between "merge" and "launch" the flag exists to
+  # break. With it, turning the site on is: change the variable, run this workflow.
+  #
+  # It re-runs the full job, migrations and release verification included, against
+  # whatever main currently is. That is the intent — a launch deserves the same gates a
+  # release gets, and a re-run that skipped them would be a second, weaker way to deploy.
+  workflow_dispatch:
+
 concurrency:
   group: deploy-production
   # NOT cancel-in-progress. You cannot cancel an upload that has already happened: a run
@@ -170,6 +184,19 @@ jobs:
           # mirror image of it, in deploy-staging.yml.
           CLOUDFLARE_ENV: production
 
+          # PlaceholderOnly. A repository VARIABLE, not a secret: its value is a boolean
+          # that is visible on the live site the moment it takes effect, so encrypting it
+          # would buy nothing and cost the ability to read the current state without
+          # deploying. Scoped to the production environment, so staging carries its own
+          # answer and neither can move the other by accident.
+          #
+          # Unset is the normal state and means off — see astro.config.mjs, which compares
+          # against the literal string "true" and treats everything else, this variable's
+          # empty string included, as a normal build. That is why nothing here supplies a
+          # default: GitHub substitutes an empty string for an undefined variable, and an
+          # empty string is already the answer we want.
+          PLACEHOLDER_ONLY: ${{ vars.PLACEHOLDER_ONLY }}
+
           # PK-19: build-time inputs Vite inlines into the client bundle at this step —
           # see the identical comment in deploy-staging.yml. Production's own
           # environment-scoped secrets, distinct from staging's: separate Supabase
@@ -208,5 +235,15 @@ jobs:
       - name: Verify the release answers
         env:
           SITE: https://packsheet.io
+
+          # The SAME variable the Build step read, and it has to be here too or this step
+          # fails every correct placeholder release. The checks below are assertions about
+          # a specific site shape — `/` redirects to `/welcome/`, `/welcome/` answers 200,
+          # `/account` redirects to `/sign-in` — and all three invert under the flag: `/`
+          # becomes the page, `/welcome/` becomes a redirect to it, and `/account` does not
+          # exist. A verifier that did not know which build it was looking at would report
+          # a healthy launch as a failed release, which is the failure mode that teaches
+          # people to ignore it.
+          PLACEHOLDER_ONLY: ${{ vars.PLACEHOLDER_ONLY }}
         timeout-minutes: 5
         run: scripts/verify-release.sh "$SITE"

@@ -373,6 +373,122 @@ describe('environment selection', () => {
 // The deploy step
 // ---------------------------------------------------------------------------
 
+/**
+ * PlaceholderOnly — the wiring, as opposed to the behaviour verify-release.sh's own tests
+ * cover.
+ *
+ * The flag is read at BUILD time (astro.config.mjs), which has a consequence worth
+ * stating because it is the whole reason these assertions exist: changing the variable in
+ * the GitHub UI does nothing on its own. Something has to rebuild. Three separate pieces
+ * have to be present for "flip the setting and the site changes" to be true, and each
+ * fails silently on its own —
+ *
+ *   - a trigger that is not a push, or the only way to pick the new value up is to commit
+ *     to main, which is exactly the coupling the flag exists to break
+ *   - the variable on the Build step, or the artifact is built without it and the setting
+ *     is inert while looking set
+ *   - the variable on the verify step, or every correct placeholder release goes red
+ *
+ * Nothing in a run that is missing one of them looks wrong.
+ */
+describe('PlaceholderOnly', () => {
+  const FLAG = 'PLACEHOLDER_ONLY';
+  /** From `vars.`, not `secrets.`: the value is a boolean whose effect is visible on the
+   *  live site the moment it takes hold, so encrypting it would buy nothing and cost the
+   *  ability to read the current state without deploying. */
+  const FROM_VARS = new RegExp(`\\$\\{\\{\\s*vars\\.${FLAG}\\s*\\}\\}`);
+
+  it.each(DEPLOYS)('$file can be run without pushing a commit', ({ file }) => {
+    const on = workflow(file).on as Record<string, unknown> | undefined;
+    expect(on, `${file}: no triggers at all`).toBeDefined();
+    expect(
+      on && 'workflow_dispatch' in on,
+      `${file}: no workflow_dispatch — the only way to change what PlaceholderOnly produces would be to push a commit`,
+    ).toBe(true);
+  });
+
+  it.each(DEPLOYS)(
+    '$file builds with the $env environment’s own PlaceholderOnly',
+    ({ file, job }) => {
+      const build = stepsOf(file, job).find(isBuild);
+      expect(build, `${file}: no Build step`).toBeDefined();
+      expect(build?.env?.[FLAG], `${file}: Build does not read vars.${FLAG}`).toMatch(FROM_VARS);
+    },
+  );
+
+  // Production only, because it is the only workflow that verifies a running site.
+  it('verifies the production release against the shape it just built', () => {
+    const verifyStep = stepsOf('deploy-production.yml', 'deploy').find(isVerify);
+    expect(verifyStep, 'no verify step in deploy-production.yml').toBeDefined();
+    expect(
+      verifyStep?.env?.[FLAG],
+      `the verifier does not read vars.${FLAG}, so it would check a placeholder release against the normal site's shape and fail every correct launch`,
+    ).toMatch(FROM_VARS);
+  });
+
+  // The two steps must read the SAME expression. A build that is placeholder and a
+  // verification that is not — or the reverse — is a release that checked the wrong thing,
+  // and it is a one-word edit away at all times.
+  it('builds and verifies production from one source of truth', () => {
+    const steps = stepsOf('deploy-production.yml', 'deploy');
+    expect(steps.find(isBuild)?.env?.[FLAG]).toBe(steps.find(isVerify)?.env?.[FLAG]);
+  });
+
+  /**
+   * The build-side half of the same "only the literal string" rule verify-release.sh is
+   * held to. These two comparisons decide, respectively, what is built and what is
+   * checked; if they ever disagree about what counts as "on", one of them is wrong about
+   * a live release.
+   *
+   * Asserted against the source text rather than by running a build, because the failure
+   * is a loosened comparison — `!== undefined`, a truthiness check, a lowercased
+   * `.includes` — and every one of those still produces a working placeholder build when
+   * the variable says exactly "true". They only diverge on the inputs nobody tests with.
+   */
+  it('turns on for the literal "true" and nothing else', () => {
+    const config = readFileSync(repoPath('astro.config.mjs'), 'utf8');
+    expect(config).toMatch(/process\.env\.PLACEHOLDER_ONLY === 'true'/);
+  });
+
+  /**
+   * The mechanism itself: srcDir, not a runtime check.
+   *
+   * This is the assertion that stops the whole feature being quietly reimplemented as a
+   * middleware branch, which is the obvious-looking edit and does not work. Cloudflare's
+   * assets binding serves prerendered files — `/welcome/`, `/robots.txt` — without
+   * invoking the Worker at all (wrangler.jsonc says so, and verify-release.sh has a
+   * section resting on it), so middleware never sees those requests and cannot hide the
+   * landing page. Swapping srcDir means the other pages are never COMPILED, which is both
+   * the only thing that works here and the stronger guarantee.
+   */
+  it('enforces the flag by not compiling the other pages', () => {
+    const config = readFileSync(repoPath('astro.config.mjs'), 'utf8');
+    expect(config).toMatch(/srcDir:\s*placeholderOnly\s*\?\s*'\.\/placeholder'\s*:\s*'\.\/src'/);
+  });
+
+  /**
+   * The placeholder tree reaches no auth SDK, checked here rather than left to
+   * tests/anonymous-read-path.test.ts.
+   *
+   * That suite analyses the module graph of a real build — of the DEFAULT build, which
+   * does not compile this directory at all. So the guarantee it provides for `src/` is
+   * simply absent here, and this is the cheap stand-in: a placeholder build serves a
+   * static page to anonymous strangers and has no reason to import Supabase, and if one
+   * of these files ever grows a reason, that is the moment to make the real analysis run
+   * against both trees rather than to widen this regex.
+   */
+  it('serves the placeholder without an auth SDK anywhere near it', () => {
+    const dir = repoPath('placeholder/pages');
+    const files = readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => readFileSync(join(e.parentPath, e.name), 'utf8'));
+    expect(files.length).toBeGreaterThan(0);
+    for (const source of files) {
+      expect(source).not.toMatch(/@supabase|lib\/auth/);
+    }
+  });
+});
+
 describe('deploy steps', () => {
   it.each(DEPLOYS)('$file deploys with wrangler-action', ({ file, job }) => {
     expect(stepsOf(file, job).filter(isWranglerAction)).toHaveLength(1);
@@ -818,7 +934,7 @@ describe('verify-release.sh', () => {
    *  as curl timing out against a server that is definitely listening. */
   function verify(
     site: string,
-    { attempts = '1', extraPath = '' } = {},
+    { attempts = '1', extraPath = '', placeholderOnly = false } = {},
   ): Promise<{ status: number | null; output: string }> {
     return new Promise((resolve) => {
       const child = spawn(SCRIPT, [site], {
@@ -828,6 +944,10 @@ describe('verify-release.sh', () => {
           VERIFY_ATTEMPTS: attempts,
           VERIFY_DELAY: '0',
           VERIFY_TIMEOUT: '5',
+          // Passed only when asked for, so every test written before PlaceholderOnly
+          // existed keeps running the script with the variable genuinely unset — which is
+          // the state a normal release runs in, and the one those tests are pinning.
+          ...(placeholderOnly ? { PLACEHOLDER_ONLY: 'true' } : {}),
         },
       });
       let output = '';
@@ -1081,6 +1201,121 @@ describe('verify-release.sh', () => {
     // either place is the release-breaking edit.
     expect(WELCOME_PATH).toBe('/welcome/');
     expect(script).toContain(`$SITE${WELCOME_PATH}`);
+  });
+
+  /**
+   * PlaceholderOnly, verified from the other side.
+   *
+   * The script has two shapes of release to check and picks between them on one
+   * environment variable, which makes the branch itself the thing that can go wrong. The
+   * failure is asymmetric and both halves are covered below: a placeholder release
+   * verified with the normal checks reports a healthy launch as a failed release (noisy,
+   * self-correcting), while a NORMAL release verified with the placeholder checks would
+   * pass a site that is serving the whole app when it was meant to be serving one page
+   * (silent, and the reason the flag exists at all).
+   */
+  describe('PlaceholderOnly releases', () => {
+    // A healthy placeholder origin: the placeholder page at `/`, and every other route —
+    // the landing page it replaces, and an app route that proves the Worker ran —
+    // redirecting to it. robots.txt is production-shaped, because a placeholder release
+    // is still a production release.
+    const PLACEHOLDER_HEALTHY: Record<string, Route | Route[]> = {
+      '/': [200, '<html>Coming soon</html>'],
+      '/welcome/': [302, '', { location: '/' }],
+      '/account': [302, '', { location: '/' }],
+      '/robots.txt': [200, PRODUCTION_ROBOTS],
+    };
+
+    it('passes when the site serves the placeholder build', async () => {
+      const { status, output } = await verify(await stub(PLACEHOLDER_HEALTHY), {
+        placeholderOnly: true,
+      });
+      expect(status).toBe(0);
+      // The success line names the shape, so a green production deploy on a day somebody
+      // expected the site to be live still says "PlaceholderOnly" in the log.
+      expect(output).toMatch(/PlaceholderOnly/);
+    });
+
+    // THE FAILURE THIS BRANCH EXISTS FOR. `vars.PLACEHOLDER_ONLY` reached the verify step
+    // but not the Build step — a hoisted env, a typo in one of the two — so the artifact
+    // is a normal build and the whole application is live on a release meant to show a
+    // placeholder. From outside, nothing looks wrong: `/` answers, the site is up.
+    it('fails when the root still routes instead of being the page', async () => {
+      const site = await stub({ ...PLACEHOLDER_HEALTHY, ...{ '/': HEALTHY['/'] } });
+      const { status, output } = await verify(site, { placeholderOnly: true });
+      expect(status).toBe(1);
+      expect(output).toMatch(/the root IS the page, not a router/);
+    });
+
+    // A stale dist/client/welcome/index.html left behind by an earlier deploy. The assets
+    // binding serves it without the Worker ever running, so the catch-all redirect cannot
+    // save it — the content the placeholder was meant to replace stays live at the URL
+    // search engines and old links already hold.
+    it('fails when the landing page is still reachable', async () => {
+      const site = await stub({ ...PLACEHOLDER_HEALTHY, '/welcome/': [200, '<html>x</html>'] });
+      const { status, output } = await verify(site, { placeholderOnly: true });
+      expect(status).toBe(1);
+      expect(output).toMatch(/\/welcome\/ answered 200/);
+    });
+
+    // `/` is a static asset under this flag, so a release whose Worker is broken or whose
+    // app routes survived the build still serves a perfect placeholder. `/account` is the
+    // check that reaches the Worker, exactly as it is in a normal release.
+    it('fails when an app route is still reachable', async () => {
+      const site = await stub({ ...PLACEHOLDER_HEALTHY, '/account': HEALTHY['/account'] });
+      const { status, output } = await verify(site, { placeholderOnly: true });
+      expect(status).toBe(1);
+      expect(output).toMatch(/expected this site's root/);
+    });
+
+    // Same open-redirect argument the two normal-mode Location checks make, and it bites
+    // harder here: under this flag EVERY url on the site answers with a redirect, so a
+    // destination read loosely from a header would be an open redirect on all of them.
+    it('fails when a redirect points off this site', async () => {
+      const site = await stub({
+        ...PLACEHOLDER_HEALTHY,
+        '/welcome/': [302, '', { location: 'https://example.com/' }],
+      });
+      const { status, output } = await verify(site, { placeholderOnly: true });
+      expect(status).toBe(1);
+      expect(output).toMatch(/expected this site's root/);
+    });
+
+    // The robots assertions are OUTSIDE the branch in the script, and this is what says
+    // so. A placeholder release is still a production release: a staging artifact on
+    // packsheet.io costs the site its search presence whichever pages it is serving, and
+    // the placeholder period — when nobody is looking closely — is when it would last
+    // longest unnoticed.
+    it('still fails when a non-production build is live', async () => {
+      const site = await stub({ ...PLACEHOLDER_HEALTHY, '/robots.txt': [200, STAGING_ROBOTS] });
+      const { status, output } = await verify(site, { placeholderOnly: true });
+      expect(status).toBe(1);
+      expect(output).toMatch(/disallows crawling/);
+    });
+
+    /**
+     * The branch is load-bearing in BOTH directions, asserted by running each fixture
+     * through the other mode. Without these two, a script that ignored the variable
+     * entirely — or applied one set of checks to both shapes — could still pass every
+     * test above.
+     */
+    it('would reject the placeholder site if the flag did not reach the verifier', async () => {
+      const { status } = await verify(await stub(PLACEHOLDER_HEALTHY));
+      expect(status).toBe(1);
+    });
+
+    it('would reject a normal site if the flag reached the verifier wrongly', async () => {
+      const { status } = await verify(await stub(HEALTHY), { placeholderOnly: true });
+      expect(status).toBe(1);
+    });
+
+    // Only the literal string, the same comparison astro.config.mjs makes. The two must
+    // agree: a value that builds a normal site but verifies a placeholder one — or the
+    // reverse — is a green release that checked the wrong thing.
+    it('treats anything but the literal "true" as a normal release', () => {
+      const script = readFileSync(SCRIPT, 'utf8');
+      expect(script).toContain(`[ "$PLACEHOLDER_ONLY" = 'true' ]`);
+    });
   });
 
   // Exiting at the first problem hides the second until someone fixes the first and

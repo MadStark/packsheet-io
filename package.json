@@ -16,6 +16,8 @@
     "build": "astro build",
     "build:production": "cross-env PUBLIC_SITE_ENV=production CLOUDFLARE_ENV=production astro build",
     "build:staging": "cross-env PUBLIC_SITE_ENV=staging CLOUDFLARE_ENV=staging astro build",
+    "dev:placeholder": "cross-env PLACEHOLDER_ONLY=true astro dev",
+    "build:placeholder": "cross-env PLACEHOLDER_ONLY=true PUBLIC_SITE_ENV=production CLOUDFLARE_ENV=production astro build",
     "preview": "astro preview",
     "preview:production": "npm run build:production && astro preview",
     "astro": "astro",

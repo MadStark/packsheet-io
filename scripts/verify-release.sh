@@ -28,6 +28,22 @@ ATTEMPTS="${VERIFY_ATTEMPTS:-5}"
 DELAY="${VERIFY_DELAY:-5}"
 TIMEOUT="${VERIFY_TIMEOUT:-20}"
 
+# Which SHAPE of site this release is supposed to be — see `placeholderOnly` in
+# astro.config.mjs, and the note on this variable in deploy-production.yml's verify step.
+#
+# This is not a switch that relaxes the checks; it selects a different, equally specific
+# set of them. A placeholder release must prove that the landing page and every app route
+# are UNREACHABLE, which is a stronger assertion than the normal release's and would be
+# a false alarm against it — and the normal release's assertions would be false alarms
+# against a placeholder. Getting the branch wrong is therefore loud in both directions,
+# which is the only reason it is safe to have a branch here at all.
+#
+# The same literal-"true" comparison as astro.config.mjs, so a variable that says "True"
+# or " true" verifies the build it actually produced rather than the one somebody meant.
+# The two must agree: this script is what would otherwise report a healthy launch as a
+# failed release.
+PLACEHOLDER_ONLY="${PLACEHOLDER_ONLY:-}"
+
 # Checked explicitly rather than left to `set -e`.
 #
 # `set -euo pipefail` above is defence in depth here, not the mechanism: every external
@@ -50,6 +66,24 @@ fail() {
   # ::error:: renders in the Actions log as an annotation on the job.
   echo "::error::$1"
   problems=$((problems + 1))
+}
+
+# Report the outcome and exit. Both release shapes end here, which is the point: every
+# check runs even when an earlier one fails, and the count is reported — exiting at the
+# first problem hides the second until someone fixes the first and deploys again, on the
+# one deploy nobody re-runs casually.
+#
+# `$1` describes what was verified. It is passed in rather than fixed because the two
+# shapes verify genuinely different things, and a success line that did not say which one
+# ran would let a release that quietly verified the wrong shape look identical to one that
+# verified the right one.
+finish() {
+  if [ "$problems" -gt 0 ]; then
+    echo "Release verification FAILED: $problems problem(s) at $SITE"
+    exit 1
+  fi
+  echo "Verified: $1"
+  exit 0
 }
 
 # Fetch a URL into a file and echo the status code, retrying while the answer is not one
@@ -85,6 +119,103 @@ fetch() {
     sleep "$DELAY"
   done
 }
+
+# Assert that a path answers a redirect whose destination is this site's own root.
+#
+# Only used by the PlaceholderOnly branch, where it is the single check applied to every
+# route that must have stopped existing — the landing page, the app, the auth routes. It
+# is a function rather than three copies because the interesting property is that they
+# all answer IDENTICALLY: a difference between them would mean something survived the
+# build that should not have.
+#
+# Same-origin only, and for the same reason the two checks in the normal branch below
+# spell their destinations out rather than pattern-matching the path: a site that
+# redirects every URL to wherever a Location header says is an open redirect on every URL
+# it has. Under this flag that is the entire site.
+expect_redirect_to_root() {
+  local path="$1" headers="$work/redirect.headers" status location
+  status="$(fetch "$SITE$path" "$work/redirect.body" '^30[12378]$' "$headers")"
+  if ! printf '%s' "$status" | grep -Eq '^30[12378]$'; then
+    fail "$SITE$path answered $status, expected a redirect to / — a PlaceholderOnly release must serve nothing but the placeholder page."
+    return
+  fi
+  # Last Location wins and `\r` is stripped, for the reasons the /account check documents.
+  location="$(grep -i '^location:' "$headers" | tail -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//' || true)"
+  case "$location" in
+    / | "$SITE"/) ;;
+    *) fail "$SITE$path redirected to '$location', expected this site's root." ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# The build that landed is the PRODUCTION build
+# ---------------------------------------------------------------------------
+# robots.txt is the only output that differs between the production and staging
+# builds, which makes it the one cheap signal that the right artifact is live. Both
+# halves are asserted on purpose:
+#
+#   - the Sitemap line is POSITIVE evidence, present only in the production build.
+#     Checking merely for the absence of Disallow would pass on an empty file, a 404
+#     body, or an error page.
+#   - Disallow: / is the specific catastrophe — a staging or preview build on
+#     packsheet.io, invisible from the outside, costing the site its search presence.
+#
+# CHECKED BEFORE THE ROUTE BRANCH BELOW, AND OUTSIDE IT, because it is the one assertion
+# both shapes of release share: PlaceholderOnly changes which pages exist, not which
+# environment's build is allowed to be live on packsheet.io. A placeholder release is
+# still a production release, and a staging artifact reaching this hostname is still the
+# catastrophe — arguably more so, since the placeholder period is when nobody is looking
+# closely at the site.
+robots_status="$(fetch "$SITE/robots.txt" "$work/robots.txt")"
+if [ "$robots_status" != "200" ]; then
+  fail "$SITE/robots.txt answered $robots_status, expected 200."
+else
+  if ! grep -qi '^Sitemap:' "$work/robots.txt"; then
+    fail "$SITE/robots.txt has no Sitemap: line — this is not the production build."
+  fi
+  if grep -q '^Disallow: /[[:space:]]*$' "$work/robots.txt"; then
+    fail "$SITE/robots.txt disallows crawling — a non-production build is live."
+  fi
+fi
+
+if [ "$PLACEHOLDER_ONLY" = 'true' ]; then
+  # -------------------------------------------------------------------------
+  # PlaceholderOnly: the placeholder answers, and nothing else does
+  # -------------------------------------------------------------------------
+  # Three assertions, and each one fails for a different reason worth telling apart.
+  #
+  #   - `/` must be the page. In a normal build it is a router that answers a 302, so a
+  #     redirect here means the flag did not reach the build and the app is live on a
+  #     release that was meant to be a placeholder — the failure this whole check exists
+  #     to catch, and the one nobody would notice from the outside for hours.
+  #   - `/welcome/` must NOT be reachable. It is the landing page in a normal build and a
+  #     prerendered file served straight off the assets binding, so a 200 here is the
+  #     precise signature of a stale `dist/client/welcome/index.html` left behind by an
+  #     earlier deploy — content the placeholder was supposed to replace, still being
+  #     served, at a URL search engines and old links already hold.
+  #   - `/account` must not be reachable either, and it is checked SECOND to the Worker
+  #     rather than to the page: `/` is a static asset in this mode, so a release whose
+  #     Worker is broken would still serve a perfect placeholder and fail nothing above.
+  #     The redirect that answers here is produced by the catch-all route, which only the
+  #     Worker can run. Same argument as the normal branch's own "the Worker runs" section
+  #     below, applied to the one route this mode has.
+  home_status="$(fetch "$SITE/" "$work/home.html")"
+  if [ "$home_status" != "200" ]; then
+    fail "$SITE/ answered $home_status, expected 200 — under PlaceholderOnly the root IS the page, not a router."
+  elif ! grep -qi '<html' "$work/home.html"; then
+    fail "$SITE/ answered 200 but the body is not HTML."
+  fi
+
+  expect_redirect_to_root /welcome/
+  expect_redirect_to_root /account
+
+  finish "$SITE serves the PlaceholderOnly page at /, redirects /welcome/ and /account to it, and serves an indexable robots.txt."
+fi
+
+# Everything below verifies a NORMAL release, and runs only because the branch above did
+# not exit. It is unchanged by PlaceholderOnly and deliberately left that way: the shape
+# of release that happens every day should not have to be read through a conditional
+# belonging to the shape that happens twice.
 
 # ---------------------------------------------------------------------------
 # The front door routes, and the landing page it routes an anonymous visitor to
@@ -142,30 +273,6 @@ elif ! grep -qi '<html' "$work/welcome.html"; then
 fi
 
 # ---------------------------------------------------------------------------
-# The build that landed is the PRODUCTION build
-# ---------------------------------------------------------------------------
-# robots.txt is the only output that differs between the production and staging
-# builds, which makes it the one cheap signal that the right artifact is live. Both
-# halves are asserted on purpose:
-#
-#   - the Sitemap line is POSITIVE evidence, present only in the production build.
-#     Checking merely for the absence of Disallow would pass on an empty file, a 404
-#     body, or an error page.
-#   - Disallow: / is the specific catastrophe — a staging or preview build on
-#     packsheet.io, invisible from the outside, costing the site its search presence.
-robots_status="$(fetch "$SITE/robots.txt" "$work/robots.txt")"
-if [ "$robots_status" != "200" ]; then
-  fail "$SITE/robots.txt answered $robots_status, expected 200."
-else
-  if ! grep -qi '^Sitemap:' "$work/robots.txt"; then
-    fail "$SITE/robots.txt has no Sitemap: line — this is not the production build."
-  fi
-  if grep -q '^Disallow: /[[:space:]]*$' "$work/robots.txt"; then
-    fail "$SITE/robots.txt disallows crawling — a non-production build is live."
-  fi
-fi
-
-# ---------------------------------------------------------------------------
 # The WORKER runs, not just the assets binding
 # ---------------------------------------------------------------------------
 # Neither check above touches the Worker at all. `/` and `/robots.txt` are both
@@ -216,12 +323,4 @@ else
   esac
 fi
 
-# Every check runs even when an earlier one fails, and the count is reported. The
-# alternative — exiting at the first problem — hides the second one until someone
-# fixes the first and deploys again.
-if [ "$problems" -gt 0 ]; then
-  echo "Release verification FAILED: $problems problem(s) at $SITE"
-  exit 1
-fi
-
-echo "Verified: $SITE routes / to a 200 HTML landing page for a signed-out visitor, serves an indexable robots.txt, and redirects an on-demand route to sign-in."
+finish "$SITE routes / to a 200 HTML landing page for a signed-out visitor, serves an indexable robots.txt, and redirects an on-demand route to sign-in."

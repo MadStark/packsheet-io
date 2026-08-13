@@ -14,6 +14,16 @@ on:
   push:
     branches: [staging]
 
+  # Same lever as deploy-production.yml's — see the long note there for why a build-time
+  # flag needs a trigger that is not a commit.
+  #
+  # Staging gets it too, rather than production alone, because staging is where you would
+  # want to LOOK at the placeholder before pointing the public at it. `vars.PLACEHOLDER_ONLY`
+  # is scoped per environment, so setting it here shows the coming-soon page on
+  # staging.packsheet.io — behind Cloudflare Access, in front of nobody — without touching
+  # what production is serving.
+  workflow_dispatch:
+
 concurrency:
   group: deploy-staging
   cancel-in-progress: true
@@ -188,6 +198,11 @@ jobs:
           # generated config has no environments left in it — and the deploy would
           # silently go to the PRODUCTION Worker.
           CLOUDFLARE_ENV: staging
+
+          # PlaceholderOnly, scoped to the staging environment and independent of
+          # production's. See the identical line in deploy-production.yml for why it is a
+          # variable rather than a secret, and why unset correctly means off.
+          PLACEHOLDER_ONLY: ${{ vars.PLACEHOLDER_ONLY }}
 
           # PK-19: build-time inputs, same as CLOUDFLARE_ENV above and for the same
           # reason — Vite inlines every PUBLIC_-prefixed var into the client bundle at

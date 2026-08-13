@@ -129,9 +129,57 @@ If you change anything touching `robots.txt`, the sitemap, or canonical URLs, bu
 ways and diff the output before opening a pull request — this is the one difference the
 build produces, and CI does not yet assert it.
 
+### PlaceholderOnly
+
+A setting that makes the site serve **one coming-soon page and nothing else**. It exists
+so that merging `staging` into `main` is not the same act as launching: the code can be
+live, in production, while the product is not yet open — and opening it is then a setting
+change rather than a release.
+
+When it is on, `/` is the placeholder page and every other URL — the landing page, the
+gear closet, the auth routes, anything — answers a `302` back to `/`. When it is off, the
+placeholder page is not built, not deployed, and reachable at no URL at all.
+
+**To turn the site on or off:**
+
+1. GitHub → Settings → Environments → `production` → Variables → set `PLACEHOLDER_ONLY`
+   to `true` (placeholder) or `false` / delete it (the real site).
+2. Actions → **Deploy production** → **Run workflow**.
+
+Step 2 is not optional. The flag is read at **build** time, so changing the variable
+changes nothing until something rebuilds — the live Worker is whatever the last build
+produced. The workflow has a manual trigger for exactly this, and a dispatched run is a
+full release: migrations, tests and release verification all included.
+
+`staging` has its own variable, independent of production's, so the placeholder can be
+looked at on `staging.packsheet.io` without touching what the public sees.
+
+Locally:
+
+```bash
+npm run dev:placeholder    # iterate on the page itself
+npm run build:placeholder  # exactly what a production placeholder release would serve
+```
+
+**Why it is a build-time flag and not a middleware check**, since middleware is the
+obvious-looking implementation and does not work here: Cloudflare's assets binding serves
+prerendered files — `/welcome/`, `/robots.txt` — straight off the uploaded assets
+_without invoking the Worker at all_. Astro middleware runs inside the Worker, so it never
+sees those requests and could not hide the landing page. Making it able to would mean
+`run_worker_first: true`, billing a Worker invocation for every static asset on every
+visit, forever, to read one boolean. Instead `astro.config.mjs` swaps `srcDir`, so under
+the flag `src/pages/` is never compiled: there is no other page in the artifact to reach,
+by any URL or any hosting rule someone later gets wrong. The placeholder itself stays a
+prerendered file served with no Worker; only the catch-all redirect costs an invocation.
+
+`scripts/verify-release.sh` knows about both shapes and checks the one that was built —
+under the flag it asserts that `/` is the page and that `/welcome/` and `/account` are
+_not_ reachable. Without that it would report every correct launch as a failed release.
+
 ### The one thing staging cannot reproduce
 
-`PUBLIC_SITE_ENV` is reproducible locally — it is the only build-time switch left; the
+`PUBLIC_SITE_ENV` and `PLACEHOLDER_ONLY` are both reproducible locally — they are the two
+build-time switches; the
 "Continue with Google" control has no flag of its own and is simply always compiled in
 (see "Database" below for where the Google credentials that back it live). What is
 environment-dependent and NOT reproducible is which Supabase project a build points at —
