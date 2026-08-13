@@ -8,7 +8,7 @@ export const prerender = false;
 import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import { createAuthClient } from '../../lib/auth';
-import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { SIGN_IN_PATH, NEXT_PARAM } from '../../lib/auth-routes';
 import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import {
   gearListPath,
@@ -279,6 +279,29 @@ function sortIndicator(key: GearSortKey): string {
 function pageHref(target: number): string {
   return `${GEAR_PATH}?${gearQueryToSearchParams({ ...query, page: target }).toString()}`;
 }
+
+/**
+ * PK-63: "saving returns you where you were" starts here — every route INTO the gear
+ * item form (Add item, the empty-state's own copy of it, and each row's item-name
+ * link) has to carry the current view so new.astro/[id].astro can hand it back to
+ * gearReturnPath (src/lib/gear/return-path.ts) on Cancel and on a successful save. The
+ * current view is exactly `${Astro.url.pathname}${Astro.url.search}` — this page's own
+ * URL, filters/sort/page and all — captured once here rather than at each of the three
+ * call sites so they cannot drift into three slightly different ideas of "here".
+ *
+ * Built with URLSearchParams rather than hand-written string concatenation so the
+ * carried view is correctly percent-encoded regardless of what it contains (a search
+ * term with an `&` or `#` in it, for instance) without this file re-deriving
+ * encodeURIComponent's own rules; NEXT_PARAM (src/lib/auth-routes.ts) rather than the
+ * literal `'next'` for the same reason GearItemForm's own hidden field uses it — one
+ * spelling, shared by every reader and writer of this value, so a rename is one
+ * constant rather than a grep-and-hope across pages and components.
+ */
+function withReturnTo(path: string): string {
+  const params = new URLSearchParams();
+  params.set(NEXT_PARAM, `${Astro.url.pathname}${Astro.url.search}`);
+  return `${path}?${params.toString()}`;
+}
 ---
 
 <Layout
@@ -298,7 +321,7 @@ function pageHref(target: number): string {
            for "add an item". */
       }
       <a
-        href={GEAR_NEW_PATH}
+        href={withReturnTo(GEAR_NEW_PATH)}
         class="border-blue-deep text-blue-deep hover:bg-blue-tint shrink-0 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
       >
         Add item
@@ -380,7 +403,7 @@ function pageHref(target: number): string {
         <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
           <p class="text-ink-2">Your closet is empty.</p>
           <a
-            href={GEAR_NEW_PATH}
+            href={withReturnTo(GEAR_NEW_PATH)}
             class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
           >
             Add your first item
@@ -644,7 +667,7 @@ function pageHref(target: number): string {
                           </td>
                           <td class="px-3 py-2">
                             <a
-                              href={gearItemPath(item.id)}
+                              href={withReturnTo(gearItemPath(item.id))}
                               class="text-blue-deep hover:text-blue-ink underline"
                             >
                               {item.name}

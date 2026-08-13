@@ -9,14 +9,15 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import GearItemForm from '../../components/GearItemForm.astro';
 import { createAuthClient } from '../../lib/auth';
-import { SIGN_IN_PATH } from '../../lib/auth-routes';
-import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
+import { SIGN_IN_PATH, NEXT_PARAM } from '../../lib/auth-routes';
 import {
   EMPTY_GEAR_FORM_VALUES,
   parseGearItemForm,
   rawGearFormValues,
   type GearFormValues,
 } from '../../lib/gear/form';
+import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
+import { gearReturnPath, gearReturnPathFromForm } from '../../lib/gear/return-path';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -38,9 +39,28 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 // and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
 const GENERIC_WRITE_ERROR = 'Something went wrong adding this item. Please try again.';
 
+// The category suggestions offered under the Category field's <datalist> — see
+// GearItemForm's own comment on that field for why a datalist rather than a <select>.
+// A query error here degrades to an empty suggestion list rather than failing the whole
+// page: a missing suggestion list costs a visitor nothing but the convenience of
+// autocomplete, and refusing to render the add-item form over that would turn a minor
+// inconvenience into a hard block on the one thing this page exists for.
+const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
+const categories = optionsError ? [] : extractGearOptions(optionRows ?? []).categories;
+
 let values: GearFormValues = EMPTY_GEAR_FORM_VALUES;
 let errors: Readonly<Record<string, string>> = {};
 let writeError: string | null = null;
+
+// The return-to-caller destination (PK-63) — "saving returns you where you were": the
+// same filtered/sorted/paged closet view Cancel would also send the visitor back to.
+// See src/lib/gear/return-path.ts for why this needs GEAR_PATH as its fallback rather
+// than reusing safeNextPath's own HOME_PATH default. Computed up front from the query
+// string so the GET render and cancelHref below have a value even before any POST is
+// seen; the POST branch overwrites it with the form's own carried value the moment the
+// form is available, since a hidden field can disagree with the query string that
+// produced this same page (see gearReturnPathFromForm's own comment on precedence).
+let returnPath = gearReturnPath(Astro.url.searchParams.get(NEXT_PARAM));
 
 // ---------------------------------------------------------------------------
 // POST: create the item.
@@ -51,6 +71,7 @@ let writeError: string | null = null;
 // ---------------------------------------------------------------------------
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
+  returnPath = gearReturnPathFromForm(form, Astro.url);
   const result = parseGearItemForm(form);
 
   if (!result.ok) {
@@ -77,7 +98,13 @@ if (Astro.request.method === 'POST') {
       // a value reconstructed from the already-reformatted GearItemInput.
       values = rawGearFormValues(form);
     } else {
-      return Astro.redirect(gearItemPath(data.id), 303);
+      // PK-63: "saving returns you where you were" — redirect to the carried return
+      // path (the closet view the visitor came from, or GEAR_PATH if none was carried)
+      // rather than the fresh item's own detail page. This replaces the previous
+      // behaviour of always redirecting to gearItemPath(data.id); `gearItemPath` is
+      // consequently not imported here any more, and `data.id` itself is only read now
+      // to confirm the insert produced a row at all.
+      return Astro.redirect(returnPath, 303);
     }
   }
 }
@@ -103,7 +130,14 @@ if (Astro.request.method === 'POST') {
     }
 
     <div class="mt-8">
-      <GearItemForm values={values} errors={errors} submitLabel="Add item" cancelHref={GEAR_PATH} />
+      <GearItemForm
+        values={values}
+        errors={errors}
+        submitLabel="Add item"
+        cancelHref={returnPath}
+        categories={categories}
+        next={returnPath}
+      />
     </div>
   </main>
 </Layout>

@@ -1,0 +1,128 @@
+---
+// A shared, hand-written inline-SVG icon for the three `GearStatus` values (PK-63),
+// factored out so the item form's status radio group and PK-62's closet list draw the
+// same tick/cart/trash-can shapes from one place rather than two components quietly
+// drifting apart on which glyph means what.
+//
+// KEEP THIS A PLAIN .astro COMPONENT. It takes no `client:*` directive anywhere it is
+// used and must never gain one: an icon is static markup, and hydrating it would pull a
+// Vue island onto a page whose whole point is to render without one — the same
+// "no hydration" rule GearNav and GearItemForm hold themselves to, and the one
+// tests/anonymous-read-path.test.ts enforces at build time for the anonymous read path.
+// For the same reason this does not import `lucide-vue-next`, which the repo carries as
+// a dependency for other, hydrated parts of the app: importing a Vue component library
+// here to draw a shape that a dozen lines of inline `<path>` can draw just as well would
+// buy nothing and risk everything, so the SVGs below are written out by hand instead.
+//
+// STATUS MUST NEVER BE CONVEYED BY COLOUR ALONE, and that is the reason this component
+// has two rendering modes rather than one. When the icon sits beside visible text that
+// already names the status — this ticket's three-way radio group, where the label reads
+// "Owned"/"Wishlist"/"Retired" right next to the glyph — a second accessible name on the
+// SVG is duplicate noise a screen reader would read out twice for the same radio option,
+// so the caller passes `decorative` and the icon disappears from the accessibility tree
+// entirely. When the icon stands alone as the ONLY indication of status — PK-62's closet
+// list, where a row has no adjacent "Wishlist" text — colour alone would fail exactly the
+// rule this paragraph opens with, so the icon must carry its own accessible name instead,
+// which is the non-decorative mode below.
+//
+// PK-62 WILL RENDER NO ICON AT ALL FOR `owned`, and that is deliberate, not an
+// inconsistency with this file. `owned` is the closet's default, unmarked state — every
+// item is assumed owned unless flagged otherwise — so the closet list only needs an icon
+// for the two exceptions, `wishlist` and `retired`. The `owned` icon defined here exists
+// for THIS form's three-way selector, where every option needs a glyph because all three
+// are presented as equal, explicit choices rather than one being the silent default.
+import { GEAR_STATUS_LABELS, type GearStatus } from '../lib/gear/fields';
+
+interface Props {
+  status: GearStatus;
+  /** True when a sighted, visible label already names this status next to the icon (see
+   *  the module comment above) — the SVG then renders `aria-hidden="true"` and
+   *  `focusable="false"` and carries no accessible name of its own. False or omitted
+   *  renders `role="img"` with a `<title>`, for the icon-only case. */
+  decorative?: boolean;
+  /** Merged onto the `<svg>` so a caller can size or position it without this component
+   *  needing to know every context it is used in. */
+  class?: string;
+}
+
+const { status, decorative = false, class: className } = Astro.props;
+
+/** Colour class and path data per status. Colours are the tokens `tokens.css` reserves
+ *  for exactly this meaning — `--moss` for a positive/owned state, `--ochre` for a
+ *  wanted-but-not-yet state, `--rust` for the same red the rest of this form already
+ *  uses for "gone"/error — exposed as Tailwind utilities via `global.css`'s
+ *  `@theme inline` block (`text-moss`, `text-ochre`, `text-rust`), not hex values typed
+ *  out again here. */
+const ICONS: Record<GearStatus, { colorClass: string; paths: readonly string[] }> = {
+  // A single check mark. Kept to one plain stroke rather than a filled badge so it reads
+  // at the small sizes this form's radio group renders it at.
+  owned: {
+    colorClass: 'text-moss',
+    paths: ['M5 13l4 4L19 7'],
+  },
+  // A shopping cart, in the same two-stroke-shapes-plus-two-wheels arrangement most
+  // icon sets use for "wanted, not yet acquired" — recognisable at a glance rather than
+  // this file inventing its own novel glyph for the same idea.
+  wishlist: {
+    colorClass: 'text-ochre',
+    paths: [
+      'M3 4h2l2.68 11.39a2 2 0 0 0 2 1.61h8.72a2 2 0 0 0 2-1.61L22 8H6',
+      'M9 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+      'M19 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+    ],
+  },
+  // A trash can, mirroring the "retired" copy in GEAR_STATUS_MEANINGS: gone from active
+  // use but kept on record, the same distinction the closet's own trash (soft-delete)
+  // draws elsewhere in this app.
+  retired: {
+    colorClass: 'text-rust',
+    paths: [
+      'M3 6h18',
+      'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
+      'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6',
+      'M10 11v6',
+      'M14 11v6',
+    ],
+  },
+};
+
+const icon = ICONS[status];
+const label = GEAR_STATUS_LABELS[status];
+const svgClass = [icon.colorClass, className].filter(Boolean).join(' ');
+---
+
+{
+  decorative ? (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={svgClass}
+      aria-hidden="true"
+      focusable="false"
+    >
+      {icon.paths.map((d) => (
+        <path d={d} />
+      ))}
+    </svg>
+  ) : (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class={svgClass}
+      role="img"
+    >
+      <title>{label}</title>
+      {icon.paths.map((d) => (
+        <path d={d} />
+      ))}
+    </svg>
+  )
+}

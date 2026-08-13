@@ -165,8 +165,31 @@ describe('parseGearItemForm: quantity', () => {
     if (!result.ok) expect(result.errors.quantity).toBeTruthy();
   });
 
-  it('a missing quantity field is rejected, not silently defaulted to 1', () => {
+  // PK-63: quantity integer not null default 1 — name is the only field left that can
+  // block a save, so a missing quantity field now resolves to the column's own default
+  // rather than being rejected as though the request were stale or tampered.
+  it('a missing quantity field defaults to 1, the column default, rather than being rejected', () => {
     const result = parseGearItemForm(formDataMissing('quantity'));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.quantity).toBe(1);
+  });
+
+  it('a blank quantity defaults to 1', () => {
+    const result = parseGearItemForm(formData({ quantity: '' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.quantity).toBe(1);
+  });
+
+  it('a whitespace-only quantity defaults to 1, the same as a fully blank one', () => {
+    const result = parseGearItemForm(formData({ quantity: '   ' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.quantity).toBe(1);
+  });
+
+  // The default only forgives a BLANK field — a non-blank value that fails to parse is
+  // still a wrong answer, not a missing one, and parseQuantity itself has not changed.
+  it('a malformed non-blank quantity still errors, the default does not paper over it', () => {
+    const result = parseGearItemForm(formData({ quantity: 'abc' }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.quantity).toBeTruthy();
   });
@@ -235,8 +258,31 @@ describe('parseGearItemForm: weight', () => {
     if (!result.ok) expect(result.errors.weight).toBeTruthy();
   });
 
-  it('a missing weight field is rejected, not silently defaulted to 0', () => {
+  // PK-63: weight numeric(12, 3) not null default 0 — same relaxation as quantity
+  // above, and for the same reason: name is the only field left that can block a save.
+  it('a missing weight field defaults to 0, the column default, rather than being rejected', () => {
     const result = parseGearItemForm(formDataMissing('weight'));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.weight).toBe(0);
+  });
+
+  it('a blank weight defaults to 0', () => {
+    const result = parseGearItemForm(formData({ weight: '' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.weight).toBe(0);
+  });
+
+  it('a whitespace-only weight defaults to 0, the same as a fully blank one', () => {
+    const result = parseGearItemForm(formData({ weight: '   ' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.weight).toBe(0);
+  });
+
+  // The default only forgives a BLANK field — a non-blank value that fails to parse is
+  // still a wrong answer, not a missing one, and parseNonNegativeDecimal itself has not
+  // changed.
+  it('a malformed non-blank weight still errors, the default does not paper over it', () => {
+    const result = parseGearItemForm(formData({ weight: 'NaN' }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.weight).toBeTruthy();
   });
