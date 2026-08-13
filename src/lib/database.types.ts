@@ -36,6 +36,7 @@ export type Database = {
     Tables: {
       gear_items: {
         Row: {
+          acquired_on: string | null
           brand: string | null
           category: string | null
           created_at: string
@@ -52,12 +53,12 @@ export type Database = {
           updated_at: string
           url: string | null
           user_id: string
-          volume_litres: number | null
           weight: number
           weight_grams: number | null
           weight_unit: string
         }
         Insert: {
+          acquired_on?: string | null
           brand?: string | null
           category?: string | null
           created_at?: string
@@ -74,12 +75,12 @@ export type Database = {
           updated_at?: string
           url?: string | null
           user_id?: string
-          volume_litres?: number | null
           weight?: number
           weight_grams?: number | null
           weight_unit?: string
         }
         Update: {
+          acquired_on?: string | null
           brand?: string | null
           category?: string | null
           created_at?: string
@@ -96,7 +97,6 @@ export type Database = {
           updated_at?: string
           url?: string | null
           user_id?: string
-          volume_litres?: number | null
           weight?: number
           weight_grams?: number | null
           weight_unit?: string

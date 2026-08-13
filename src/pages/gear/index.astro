@@ -37,7 +37,7 @@ import {
   bulkSoftDelete,
   undoBulkDelete,
 } from '../../lib/gear/mutations';
-import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
+import { formatGearAcquiredOn, formatGearPrice, formatGearStatus } from '../../lib/gear/format';
 import { WEIGHT_UNITS } from '../../lib/units';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
@@ -660,7 +660,9 @@ function pageHref(target: number): string {
                           <td class="numeric px-3 py-2">
                             {formatGearPrice(item.price, item.currency)}
                           </td>
-                          <td class="numeric px-3 py-2">{item.created_at.slice(0, 10)}</td>
+                          <td class="numeric px-3 py-2">
+                            {formatGearAcquiredOn(item.acquired_on)}
+                          </td>
                           <td class="px-3 py-2">
                             {item.photo_path ? (
                               <span

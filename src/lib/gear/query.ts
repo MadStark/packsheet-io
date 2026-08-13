@@ -470,16 +470,16 @@ export function buildSearchFilter(search: string): string {
  *  and fetching them for every row on every page load would be pure waste for a view
  *  that never renders them. */
 export const GEAR_SELECT =
-  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at';
+  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, acquired_on, photo_path, created_at, updated_at';
 
 /** The columns `src/pages/gear/[id].astro` needs: every `GEAR_FORM_FIELD` (so
  *  `gearItemToFormValues` can pre-fill the edit form) plus `id`, `photo_path` and
  *  `created_at` for the parts of the page that are not the form itself. Unlike
- *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes`, `url` and
- *  `volume_litres` — the very fields that comment says a list row has no business
- *  fetching — because a detail/edit page is exactly the view that renders them. */
+ *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes` and `url` — the
+ *  very fields that comment says a list row has no business fetching — because a
+ *  detail/edit page is exactly the view that renders them. */
 export const GEAR_DETAIL_SELECT =
-  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, volume_litres, url, notes, status, photo_path, created_at';
+  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, acquired_on, url, notes, status, photo_path, created_at';
 
 /** The columns `src/pages/gear/trash.astro` needs: the same list-row shape as
  *  `GEAR_SELECT` plus `deleted_at`, which every trash row needs and no active-closet row
@@ -609,7 +609,26 @@ export function applyGearQuery(
   // refuses to invent an exchange rate, and canonicalising a price needs one.
   const column = GEAR_SORT_COLUMNS[query.sort];
   const ascending = query.direction === 'asc';
-  next = next.order(column, { ascending }).order('id', { ascending });
+
+  // nullsFirst: false, ALWAYS, REGARDLESS OF DIRECTION (PK-61). `acquired_on` is
+  // nullable with no database default, so an "added" sort has to decide where an
+  // undated row goes — Postgres will not decide it neutrally on its own. Postgres's
+  // own default null ordering is NOT symmetric: NULLS LAST for ascending, but NULLS
+  // FIRST for descending. Left unpinned, "newest first" (`added` desc) would put every
+  // item with no date at all at the very TOP of the closet — the least informative rows
+  // crowding out the most relevant ones, on exactly the sort a visitor reaches for to
+  // see what they logged most recently. Pinning nulls last in BOTH directions means
+  // "undated" always reads as "at the end", whichever way the visitor sorted, rather
+  // than flipping to the front the moment they click the column header a second time.
+  next = next
+    .order(column, { ascending, nullsFirst: false })
+    // The `id` tiebreaker matters MORE now, not less. `acquired_on` is a `date`, not a
+    // timestamp — many items can genuinely share one calendar day — where `created_at`
+    // ties to the microsecond almost never happened in practice. A sort with no stable
+    // tiebreaker was always a latent pagination bug (see this function's own comment
+    // above); switching `added` to a coarser-grained column makes the tie case common
+    // rather than theoretical.
+    .order('id', { ascending });
 
   const offset = (query.page - 1) * GEAR_PAGE_SIZE;
   next = next.range(offset, offset + GEAR_PAGE_SIZE - 1);

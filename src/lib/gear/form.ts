@@ -26,8 +26,8 @@
  * requires the visitor to supply a real value rather than silently substituting the
  * column's default, because the rendered form always carries one (a pre-filled `0`, a
  * selected `g`, a selected `owned`) and an empty submission for one of these can only
- * mean a stale or tampered request. `price`, `currency`, `volume_litres`, `url`,
- * `brand`, `category`, `description` and `notes` are all nullable columns, so an empty
+ * mean a stale or tampered request. `price`, `currency`, `acquired_on`, `url`, `brand`,
+ * `category`, `description` and `notes` are all nullable columns, so an empty
  * submission is treated as "not provided" and becomes `null` rather than an error.
  *
  * NEVER A RAW POSTGRES OR POSTGREST STRING. Every message below is a complete,
@@ -56,7 +56,7 @@ export const GEAR_FORM_FIELD = {
   weightUnit: 'weight_unit',
   price: 'price',
   currency: 'currency',
-  volumeLitres: 'volume_litres',
+  acquiredOn: 'acquired_on',
   status: 'status',
   url: 'url',
   brand: 'brand',
@@ -78,8 +78,9 @@ const PRICE_MISSING_MESSAGE = 'Enter a price for this currency, or clear the cur
 const CURRENCY_MISSING_MESSAGE = 'Select a currency for this price.';
 const PRICE_INVALID_MESSAGE = 'Enter a price of zero or more, with up to two decimal places.';
 const CURRENCY_INVALID_MESSAGE = 'Enter a valid three-letter currency code, like GBP or USD.';
-const VOLUME_MESSAGE = 'Enter a volume of zero or more litres, with up to three decimal places.';
 const URL_MESSAGE = 'Enter a valid web address, starting with http:// or https://.';
+const ACQUIRED_ON_MESSAGE =
+  'Enter a valid date, or leave this blank if you do not know when you got it.';
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -95,7 +96,7 @@ export interface GearItemInput {
   weight_unit: WeightUnit;
   price: number | null;
   currency: CurrencyCode | null;
-  volume_litres: number | null;
+  acquired_on: string | null;
   status: GearStatus;
   url: string | null;
   brand: string | null;
@@ -115,7 +116,7 @@ export interface GearFormValues {
   weight_unit: string;
   price: string;
   currency: string;
-  volume_litres: string;
+  acquired_on: string;
   status: string;
   url: string;
   brand: string;
@@ -149,7 +150,7 @@ export type GearItemRow = Pick<
   | 'weight_unit'
   | 'price'
   | 'currency'
-  | 'volume_litres'
+  | 'acquired_on'
   | 'url'
   | 'notes'
   | 'status'
@@ -161,10 +162,12 @@ export type GearItemRow = Pick<
 // ---------------------------------------------------------------------------
 
 /** `numeric(12, 3)`'s exclusive upper bound: 12 total digits, 3 of them after the
- *  point, leaves 9 before it — `10**9`. Shared by `weight` and `volume_litres`, the
- *  two `numeric(12, 3)` columns this form writes. Kept here rather than trusting
- *  Postgres to enforce it, because an overflow there is a raw `numeric field overflow`
- *  error — exactly the kind of string this module exists to never let a visitor see. */
+ *  point, leaves 9 before it — `10**9`. Used by `weight`, the one `numeric(12, 3)`
+ *  column this form still writes (PK-61 dropped the other, `volume_litres`; this
+ *  constant is kept because `weight` still needs it, not out of caution). Kept here
+ *  rather than trusting Postgres to enforce it, because an overflow there is a raw
+ *  `numeric field overflow` error — exactly the kind of string this module exists to
+ *  never let a visitor see. */
 const NUMERIC_12_3_MAX = 10 ** 9;
 
 /** Same reasoning as `NUMERIC_12_3_MAX`, for `price numeric(12, 2)`: 12 digits, 2
@@ -194,8 +197,8 @@ const NUMERIC_12_2_MAX = 10 ** 10;
  *     `Number.isFinite` alone would accept; none of them are the shape this function
  *     exists to accept.
  *
- * `maxDecimals` mirrors the column's scale (3 for `weight`/`volume_litres`, 2 for
- * `price`) and `exclusiveMax` mirrors the column's precision via `NUMERIC_12_3_MAX`/
+ * `maxDecimals` mirrors the column's scale (3 for `weight`, 2 for `price`) and
+ * `exclusiveMax` mirrors the column's precision via `NUMERIC_12_3_MAX`/
  * `NUMERIC_12_2_MAX` above.
  */
 function parseNonNegativeDecimal(
@@ -265,6 +268,80 @@ function isAllowedGearUrl(trimmed: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Acquired date
+// ---------------------------------------------------------------------------
+
+/** The exact shape PostgREST expects for a `date` column and the only shape this
+ *  module will accept: four digits, a literal `-`, two digits, a literal `-`, two
+ *  digits. A gate BEFORE the calendar check below, for the same reason
+ *  `parseNonNegativeDecimal` gates with a regexp before calling `Number()` — it rules
+ *  out `2026-2-3`, `26-02-03` and anything else `new Date()` might parse leniently but
+ *  Postgres's own `date` input function would not accept as `YYYY-MM-DD`. */
+const ACQUIRED_ON_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * `acquired_on` (PK-61): whether `trimmed` (already non-empty) is a real calendar date
+ * in `YYYY-MM-DD` form. A regexp shape check alone is not enough — `2026-02-30` and
+ * `2026-13-01` both match `ACQUIRED_ON_PATTERN` but name no real day, and Postgres
+ * would reject either with a raw `date/time field value out of range` error, exactly
+ * the kind of string this module exists to never let a visitor see (see the module
+ * comment's "NEVER A RAW POSTGRES OR POSTGREST STRING").
+ *
+ * Validated by ROUND-TRIPPING through `Date.UTC`, not by hand-rolling a days-per-month
+ * table: `Date.UTC(y, m - 1, d)` normalises an out-of-range day or month forward
+ * (`Date.UTC(2026, 1, 30)` — February 30th — becomes March 2nd), so feeding the
+ * resulting timestamp back through `getUTC{FullYear,Month,Date}` and comparing against
+ * the components the visitor actually typed catches every case where the input was not
+ * a real date, without this module having to know which months have 30 days, which
+ * have 31, or when a given year is a leap year. UTC specifically, not local time — a
+ * local-time `Date` constructor call would fold in the server's own time zone offset,
+ * turning "the 1st" into "the 30th" depending on where the server happens to run, for a
+ * plain `YYYY-MM-DD` string that never named a time of day at all.
+ *
+ * ONE KNOWN CONSEQUENCE, DOCUMENTED RATHER THAN WORKED AROUND: years `0000`-`0099` are
+ * rejected. `Date.UTC` maps a two-digit year argument into the 1900s — `Date.UTC(26, …)`
+ * means 1926, not 26 AD — so the round-trip comparison above never matches for those
+ * years and `0026-02-03` comes back invalid. That is the right answer for this field
+ * anyway: `acquired_on` records when somebody acquired a piece of camping gear, so a
+ * first-century date is a typo every time, and it fails with `ACQUIRED_ON_MESSAGE`'s
+ * readable sentence rather than being stored. Worth knowing before anyone reuses this
+ * helper for a field where antique dates are meaningful.
+ */
+function isRealCalendarDate(trimmed: string): boolean {
+  const match = ACQUIRED_ON_PATTERN.exec(trimmed);
+  if (match === null) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  const asDate = new Date(Date.UTC(year, month - 1, day));
+  return (
+    asDate.getUTCFullYear() === year &&
+    asDate.getUTCMonth() === month - 1 &&
+    asDate.getUTCDate() === day
+  );
+}
+
+/**
+ * Parses the raw `acquired_on` field. A THREE-WAY RETURN, unlike `parseQuantity`/
+ * `parseNonNegativeDecimal` above which use a plain `T | null` for "invalid": those two
+ * fields are either well-formed or not, with no third state, but `acquired_on` has a
+ * case neither of them do — a value that is not merely optional-and-missing but ABSENT
+ * ON PURPOSE, which is not an error at all (see the module comment's "REQUIRED VS
+ * OPTIONAL" section). So here `null` means "the field was blank, store `null`, no
+ * error" and `undefined` means "the field had something in it, and it was not a real
+ * date" — the caller turns the latter, and only the latter, into `errors.acquired_on`.
+ * Storing the string EXACTLY as given on success, same as `url` above: this is a
+ * validator, not a normaliser.
+ */
+function parseAcquiredOn(raw: string): string | null | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  return isRealCalendarDate(trimmed) ? trimmed : undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Free text
 // ---------------------------------------------------------------------------
 
@@ -311,7 +388,7 @@ export function rawGearFormValues(form: FormData): GearFormValues {
     weight_unit: getFormString(form, GEAR_FORM_FIELD.weightUnit),
     price: getFormString(form, GEAR_FORM_FIELD.price),
     currency: getFormString(form, GEAR_FORM_FIELD.currency),
-    volume_litres: getFormString(form, GEAR_FORM_FIELD.volumeLitres),
+    acquired_on: getFormString(form, GEAR_FORM_FIELD.acquiredOn),
     status: getFormString(form, GEAR_FORM_FIELD.status),
     url: getFormString(form, GEAR_FORM_FIELD.url),
     brand: getFormString(form, GEAR_FORM_FIELD.brand),
@@ -412,14 +489,12 @@ export function parseGearItemForm(form: FormData): GearFormResult {
   }
   // else: both absent. price and currency stay null; not an error.
 
-  // pairs with: volume_litres numeric(12, 3)
-  //             check (volume_litres >= 0 and volume_litres < 'Infinity'::numeric)
-  const volumeRaw = values.volume_litres.trim();
-  let volumeLitres: number | null = null;
-  if (volumeRaw !== '') {
-    volumeLitres = parseNonNegativeDecimal(volumeRaw, WEIGHT_DECIMALS, NUMERIC_12_3_MAX);
-    if (volumeLitres === null) errors.volume_litres = VOLUME_MESSAGE;
-  }
+  // pairs with: acquired_on date — nullable, no default. UNLIKE every other check in
+  // this file, this one mirrors a TYPE rather than a CHECK constraint: `date` itself
+  // rejects anything that is not a real calendar date, so there is no separate
+  // constraint clause to name here the way `weight >= 0` or `status in (...)` have one.
+  const acquiredOn = parseAcquiredOn(values.acquired_on);
+  if (acquiredOn === undefined) errors.acquired_on = ACQUIRED_ON_MESSAGE;
 
   // gear_items.url carries no CHECK constraint — see isAllowedGearUrl's own comment for
   // why this parser is the entire defence against a javascript:/data: URL reaching an
@@ -460,7 +535,14 @@ export function parseGearItemForm(form: FormData): GearFormResult {
       weight_unit: weightUnit!,
       price,
       currency,
-      volume_litres: volumeLitres,
+      // `?? null` here, not `!`, because `undefined` (parseAcquiredOn's error sentinel)
+      // is a real member of acquiredOn's type that `!` would merely paper over. It is
+      // unreachable in this branch regardless — `errors` is confirmed empty above, and
+      // `parseAcquiredOn` only ever returns `undefined` alongside an `errors.acquired_on`
+      // entry — but folding it to `null` rather than asserting it away keeps this line
+      // correct even if that invariant were ever violated, for a field whose entire
+      // point is "absent is not an error".
+      acquired_on: acquiredOn ?? null,
       status: status!,
       url,
       brand,
@@ -494,7 +576,7 @@ export function gearItemToFormValues(row: GearItemRow): GearFormValues {
     weight_unit: row.weight_unit,
     price: row.price === null ? '' : String(row.price),
     currency: row.currency ?? '',
-    volume_litres: row.volume_litres === null ? '' : String(row.volume_litres),
+    acquired_on: row.acquired_on ?? '',
     status: row.status,
     url: row.url ?? '',
     brand: row.brand ?? '',
@@ -520,6 +602,16 @@ export function gearItemToFormValues(row: GearItemRow): GearFormValues {
  * pre-filled value matching the column's own default is what `parseGearItemForm` will
  * accept unchanged if the visitor never touches that field at all. Every other field is
  * a nullable column with no default, so `''` — "not provided" — is the honest blank.
+ *
+ * `acquired_on` IS ONE OF THOSE OTHERS, DELIBERATELY, not a fifth pre-filled field —
+ * it is a nullable column with no database default, exactly like `price` and `url`, so
+ * `''` is the honest blank here too and the NEXT READER SHOULD NOT "FIX" THIS BY
+ * PRE-FILLING TODAY'S DATE. A date the visitor did not choose is a guess this product
+ * does not make (see the module comment's "REQUIRED VS OPTIONAL" section and PK-61):
+ * an empty acquired-date box means "I don't know", not "today". Nothing is lost by
+ * leaving it blank, either — the browser's own `<input type="date">` picker already
+ * opens on the current month when its value is empty, so a visitor who DID mean "today"
+ * is not made to hunt for it.
  */
 export const EMPTY_GEAR_FORM_VALUES: GearFormValues = {
   name: '',
@@ -528,7 +620,7 @@ export const EMPTY_GEAR_FORM_VALUES: GearFormValues = {
   weight_unit: 'g',
   price: '',
   currency: '',
-  volume_litres: '',
+  acquired_on: '',
   status: 'owned',
   url: '',
   brand: '',

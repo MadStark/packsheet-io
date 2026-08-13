@@ -27,6 +27,12 @@ import { GEAR_STATUS_LABELS, isGearStatus } from './fields';
  *  error, the same role it plays in the rest of this product's tables. */
 const NO_PRICE_LABEL = '—';
 
+/** Shown for a `gear_items` row with no `acquired_on` — see `formatGearAcquiredOn`.
+ *  Same em dash as `NO_PRICE_LABEL`, and for the same reason: it reads as "nothing
+ *  here" in a column that is otherwise a plain date, without implying an error or a
+ *  missing-data problem the visitor is expected to fix. */
+const NO_DATE_LABEL = '—';
+
 /**
  * Renders a `gear_items` row's `price`/`currency` pair for the closet list, reusing
  * `fromDecimal` and `formatMoney` rather than re-deriving what a minor-unit scale or a
@@ -72,4 +78,26 @@ export function formatGearPrice(price: number | null, currency: string | null): 
  */
 export function formatGearStatus(status: string): string {
   return isGearStatus(status) ? GEAR_STATUS_LABELS[status] : status;
+}
+
+/**
+ * Renders a `gear_items` row's `acquired_on` for the closet list: the date string as-is
+ * when present, `NO_DATE_LABEL` when `null`. `acquired_on` is a nullable `date` column
+ * with no database default (PK-61) — the visitor's own claim about when they got the
+ * item, not a fact this product derives — so `null` is an ordinary, expected value here
+ * ("I don't know"), not a data problem to guard against the way `formatGearPrice`'s
+ * currency-shape checks do.
+ *
+ * WHY THIS TINY FUNCTION LIVES IN src/lib/ RATHER THAN INLINE IN THE PAGE. Same
+ * reasoning as this module's own top comment gives for `formatGearPrice`:
+ * `vitest.config.ts:64` excludes `src/pages/`, so a branch written in frontmatter is
+ * code no test in this repository can reach. And unlike `weight` — which that comment
+ * explains gets no formatter here because `` `${item.weight} ${item.weight_unit}` ``
+ * has no decision in it — "what does a visitor see when there is no date" IS a
+ * decision: it could have been a blank cell, "N/A", or "Unknown", and this module picks
+ * the em dash deliberately, the same choice `formatGearPrice` makes for its own
+ * no-value case.
+ */
+export function formatGearAcquiredOn(acquiredOn: string | null): string {
+  return acquiredOn === null ? NO_DATE_LABEL : acquiredOn;
 }

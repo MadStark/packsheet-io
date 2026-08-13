@@ -86,12 +86,25 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
  * would require an exchange rate, and `money.ts` argues at length for why this product
  * must never invent one. This is left as a known limitation for the UI to surface later
  * (e.g. grouping or flagging mixed-currency results) rather than solved here.
+ *
+ * `added` sorts by `acquired_on` (PK-61), NOT `created_at` — that swap is the entire
+ * point of PK-61. `created_at` is a database audit timestamp: when the row was
+ * inserted, which for an item logged weeks after it was actually bought answers a
+ * question nobody asked ("when did you get around to typing this in") rather than the
+ * one the "Added" column exists to answer ("when did you get this item"). `acquired_on`
+ * is the visitor's own claim about that, so it is what "Added" now means.
+ *
+ * `acquired_on` IS NULLABLE, WITH NO DATABASE DEFAULT — unlike `created_at`, which is
+ * always present. A row with no `acquired_on` cannot simply fall wherever Postgres's
+ * own default null ordering would put it; it has to be placed deliberately. See the
+ * `.order(column, { ascending, nullsFirst: false })` call in `query.ts`'s
+ * `applyGearQuery`, which pins undated rows LAST regardless of sort direction.
  */
 export const GEAR_SORT_COLUMNS: Record<GearSortKey, string> = {
   name: 'name',
   weight: 'weight_grams',
   price: 'price',
-  added: 'created_at',
+  added: 'acquired_on',
 };
 
 // ---------------------------------------------------------------------------
