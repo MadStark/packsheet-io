@@ -61,7 +61,9 @@ export const GET: APIRoute = async ({ url, cookies, request, redirect }) => {
     // AND THE BRANCH ABOVE FIXED ONLY ONE OF THE TWO NEW FLOWS, which the PK-56 review
     // caught and this line is the other half of. `signUpWithPassword` builds the
     // confirmation link with NO `?next=` on purpose (see its own comment), so a failed
-    // SIGN-UP confirmation exchange has `next === ACCOUNT_PATH` and lands here, not above
+    // SIGN-UP confirmation exchange has `next` at safeNextPath's default — HOME_PATH since
+    // `/` became the router, ACCOUNT_PATH before it, and either way not
+    // UPDATE_PASSWORD_PATH — so it lands here, not above
     // — where the copy used to name Google for a journey Google was never part of. It is
     // deliberately still this destination: GoTrue's `/verify` has already marked the
     // address confirmed by the time it redirects here with a code, so the account is

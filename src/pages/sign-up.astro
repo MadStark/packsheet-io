@@ -15,11 +15,23 @@ import {
   SIGN_IN_PATH,
   safeNextPath,
 } from '../lib/auth-routes';
+// Straight to the landing page rather than through `/`, for the same reason as
+// sign-in.astro: the guard above means nobody reading this page has a session.
+import { WELCOME_PATH } from '../lib/routes';
 
 // Same handling as sign-in.astro, and for the same reason — see safeNextPath and
 // nextFromForm in src/lib/auth-routes.ts. Seeded from the query string, re-read from the
 // submitted form below, and never trusted in its raw form from either source.
 let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
+
+// Already signed in? Same bounce as sign-in.astro, for the same reason and with the same
+// destination — see that file's comment. Worth stating for THIS page specifically: the
+// visitor arriving here with a session is most often somebody who followed "New here?
+// Create an account" from a sign-in page they should never have been shown either, and
+// offering them a second account to register is a worse answer than the sign-in form was.
+if (Astro.locals.user) {
+  return Astro.redirect(next, 302);
+}
 
 // The same shared, provider-neutral sentence sign-in.astro renders, for the same reason —
 // see AUTH_CALLBACK_FAILED_MESSAGE in src/lib/auth-routes.ts. Nothing in
@@ -128,7 +140,9 @@ if (Astro.request.method === 'POST') {
 
 <Layout title="Create an account — Packsheet" description="Create a free Packsheet account.">
   <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
-    <a href="/" class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Packsheet</a>
+    <a href={WELCOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
+      >Packsheet</a
+    >
     <h1 class="mt-6 text-3xl">Create an account</h1>
 
     {

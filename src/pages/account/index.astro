@@ -8,6 +8,10 @@ import Layout from '../../layouts/Layout.astro';
 import { deleteOwnAccount, signOut } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
 import { GEAR_PATH } from '../../lib/gear/routes';
+// This page redirects a visitor with no session, so the wordmark below is only ever
+// clicked by somebody signed in — and `/` now takes them to their closet rather than to
+// the anonymous landing page. See src/lib/routes.ts.
+import { HOME_PATH } from '../../lib/routes';
 import {
   confirmsAccountDeletion,
   CONFIRMATION_MISMATCH_MESSAGE,
@@ -84,7 +88,9 @@ if (Astro.request.method === 'POST') {
 
 <Layout title="Your account — Packsheet" description="Manage your Packsheet account.">
   <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
-    <a href="/" class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Packsheet</a>
+    <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
+      >Packsheet</a
+    >
     <h1 class="mt-6 text-3xl">Your account</h1>
 
     <p class="text-ink-2 mt-4 text-sm">Signed in as <span class="text-ink">{user.email}</span></p>

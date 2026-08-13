@@ -24,6 +24,13 @@
  * being carefully reviewed each time something new is added to it.
  */
 
+// The one import this file has, and it stays safe by the same construction: src/lib/
+// routes.ts is another dependency-free path module (it imports only src/lib/gear/
+// routes.ts, which is one too), so the edge added here reaches no SDK and Invariant A in
+// tests/anonymous-read-path.test.ts has nothing to object to. `safeNextPath` needs it for
+// its fallback — see that function's own comment for why the destination moved.
+import { HOME_PATH } from './routes';
+
 export const SIGN_IN_PATH = '/sign-in';
 export const SIGN_UP_PATH = '/sign-up';
 
@@ -69,8 +76,9 @@ export const AUTH_CALLBACK_PATH = '/auth/callback';
  * re-validates it exactly like any other `next` — the recovery link deliberately goes
  * through the same, already-tested exchange route Google sign-in uses rather than a
  * second copy of it. One constant is what closes that round trip: a hand-typed duplicate
- * at either end does not fail loudly, it lands the visitor on `ACCOUNT_PATH` with a live
- * recovery session and no password form anywhere in sight.
+ * at either end does not fail loudly, it lands the visitor on `HOME_PATH` — and from
+ * there, since a recovery session IS a session, straight into their gear closet with a
+ * live recovery session and no password form anywhere in sight.
  */
 export const FORGOT_PASSWORD_PATH = '/forgot-password';
 export const UPDATE_PASSWORD_PATH = '/update-password';
@@ -84,7 +92,7 @@ export const UPDATE_PASSWORD_PATH = '/update-password';
  * attacker's page immediately afterwards with a fresh sense of trust.
  *
  * The fix is to accept only a same-origin, absolute *path* and reject everything else
- * back to `ACCOUNT_PATH` — never by trying to enumerate bad inputs, which is a list
+ * back to `HOME_PATH` — never by trying to enumerate bad inputs, which is a list
  * that is never finished, but by defining the one shape a same-origin path is allowed
  * to take and refusing anything that doesn't match it:
  *
@@ -102,9 +110,19 @@ export const UPDATE_PASSWORD_PATH = '/update-password';
  *     cheaper and safer than trying to parse for just the dangerous schemes.
  *
  * Anything that fails any of those — including empty input, a full URL, or nothing at
- * all — falls back to `ACCOUNT_PATH` rather than being rejected as an error: this runs
+ * all — falls back to `HOME_PATH` rather than being rejected as an error: this runs
  * on the happy path for a great many sign-ins that never set `next` at all, so "no
  * value" and "bad value" both have to resolve to somewhere safe rather than a 400.
+ *
+ * THE FALLBACK IS `HOME_PATH`, NOT `ACCOUNT_PATH`, and the change is not cosmetic. It
+ * used to be the account page — a settings screen — so a sign-in carrying no `?next=`
+ * (which is most of them: every visitor who reached the form by choice rather than by
+ * being bounced off a page they wanted) landed somewhere nobody had asked to go, while
+ * the gear closet they actually came for sat one nav click away. `/` now answers that
+ * question for the whole site through `homeDestination` in src/lib/routes.ts, so pointing
+ * the fallback here costs one extra 302 and buys the property that changing where a
+ * signed-in person lands is one edit in one file rather than an edit plus a hunt for
+ * every default that had quietly hard-coded the old answer.
  */
 export function safeNextPath(raw: string | null | undefined): string {
   if (
@@ -116,7 +134,7 @@ export function safeNextPath(raw: string | null | undefined): string {
   ) {
     return raw;
   }
-  return ACCOUNT_PATH;
+  return HOME_PATH;
 }
 
 /** The form field, and the query parameter, that carry the post-sign-in destination.
@@ -196,9 +214,11 @@ export const AUTH_ERROR_PARAM = 'auth_error';
  * to the update-password page, which renders the expired-link state it already owns), but
  * the confirmation leg did not and could not: `signUpWithPassword` deliberately builds
  * that link with NO `?next=` (see its own comment for why a stale destination is worse
- * than none), so `next` falls back to ACCOUNT_PATH and a failed confirmation exchange
- * landed on the sign-in page being told about Google. Google was not involved anywhere in
- * that journey.
+ * than none), so `next` falls back to the default — ACCOUNT_PATH when PK-56 landed,
+ * HOME_PATH since `/` became the router that answers that question — and a failed
+ * confirmation exchange landed on the sign-in page being told about Google. Google was not
+ * involved anywhere in that journey. Which default it is has never mattered to this
+ * argument: what puts the visitor here is that `next` is not UPDATE_PASSWORD_PATH.
  *
  * THAT WAS MISLEADING COPY AND NOT A LOCKOUT, which is worth stating because it decides
  * how much this needed to change. The confirmation link points at GoTrue's own `/verify`

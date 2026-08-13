@@ -87,15 +87,50 @@ fetch() {
 }
 
 # ---------------------------------------------------------------------------
-# The home page is served, and is a page
+# The front door routes, and the landing page it routes an anonymous visitor to
 # ---------------------------------------------------------------------------
-home_status="$(fetch "$SITE/" "$work/home.html")"
-if [ "$home_status" != "200" ]; then
-  fail "$SITE/ answered $home_status, expected 200."
-elif ! grep -qi '<html' "$work/home.html"; then
-  # 200 with a non-HTML body is what an assets binding pointed at the wrong directory
-  # looks like: the deploy succeeds and the site serves something that is not the site.
-  fail "$SITE/ answered 200 but the body is not HTML."
+# `/` used to BE the landing page — a prerendered file — and this check was simply "200,
+# and the body is HTML". It is a router now (src/pages/index.astro, src/lib/routes.ts):
+# signed-in visitors go to their gear closet, everybody else to /welcome. This script is
+# credential-free by design and sends no cookies, so the answer it must get is the
+# redirect, and the page it used to assert on now lives one hop away.
+#
+# BOTH HALVES ARE CHECKED, because they fail separately and mean different things:
+#
+#   - `/` answering 200 means the router did not run. On a site where the assets binding
+#     serves anything it has and the Worker handles the rest, that is what a stale
+#     `dist/client/index.html` left behind by an older build looks like — the front door
+#     silently serving the wrong era of the site to everybody, signed in or not.
+#   - /welcome answering anything but HTML means the assets binding is pointed somewhere
+#     wrong: the deploy succeeded and the site is serving something that is not the site.
+#     That was this check's original purpose and it has not gone away, only moved.
+#
+# The path is duplicated from src/lib/routes.ts for the same reason the two auth paths
+# below are duplicated from src/lib/auth-routes.ts — a shell script cannot import a
+# TypeScript constant — and tests/deploy-workers.test.ts asserts the copies agree.
+home_headers="$work/home.headers"
+home_status="$(fetch "$SITE/" "$work/home.html" '^30[12378]$' "$home_headers")"
+if ! printf '%s' "$home_status" | grep -Eq '^30[12378]$'; then
+  fail "$SITE/ answered $home_status, expected a redirect to /welcome for a request with no session."
+else
+  # Same extraction as the /account check below — see its comment for why the LAST
+  # Location wins and why `|| true` is needed.
+  home_location="$(grep -i '^location:' "$home_headers" | tail -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//' || true)"
+  # Same-origin only, for the same reason as /account's: a front door that redirects
+  # anywhere a header says is an open redirect on the most-visited URL on the site.
+  case "$home_location" in
+    /welcome | "$SITE"/welcome) ;;
+    *)
+      fail "$SITE/ redirected to '$home_location', expected the landing page on this site."
+      ;;
+  esac
+fi
+
+welcome_status="$(fetch "$SITE/welcome" "$work/welcome.html")"
+if [ "$welcome_status" != "200" ]; then
+  fail "$SITE/welcome answered $welcome_status, expected 200."
+elif ! grep -qi '<html' "$work/welcome.html"; then
+  fail "$SITE/welcome answered 200 but the body is not HTML."
 fi
 
 # ---------------------------------------------------------------------------
@@ -181,4 +216,4 @@ if [ "$problems" -gt 0 ]; then
   exit 1
 fi
 
-echo "Verified: $SITE serves 200 HTML, an indexable robots.txt, and an on-demand route that redirects a signed-out visitor to sign-in."
+echo "Verified: $SITE routes / to a 200 HTML landing page for a signed-out visitor, serves an indexable robots.txt, and redirects an on-demand route to sign-in."

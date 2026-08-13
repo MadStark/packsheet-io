@@ -20,6 +20,7 @@ import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 // Route paths only — no auth SDK. src/lib/auth-routes.ts exists precisely so that
 // wanting a path does not drag the choke point along; see its own header comment.
 import { ACCOUNT_PATH, SIGN_IN_PATH } from '../src/lib/auth-routes';
+import { WELCOME_PATH } from '../src/lib/routes';
 
 /**
  * The deploy pipeline.
@@ -840,12 +841,15 @@ describe('verify-release.sh', () => {
     'User-agent: *\nAllow: /\n\nSitemap: https://packsheet.io/sitemap-index.xml\n';
   const STAGING_ROBOTS = '# Not the production site — do not index.\nUser-agent: *\nDisallow: /\n';
 
-  // A healthy production origin: a prerendered landing page, a production robots.txt,
-  // and — the half added by PK-19 — an on-demand route that actually ran. Only the third
-  // of these involves the Worker at all; the first two are served by the assets binding
-  // whether the script works or not.
+  // A healthy production origin: a front door that ROUTES (it stopped being a page when
+  // `/` became a redirect to /welcome or to the gear closet — see src/lib/routes.ts), the
+  // prerendered landing page it routes an anonymous visitor to, a production robots.txt,
+  // and an on-demand route that actually ran. `/welcome` and `/robots.txt` are served by
+  // the assets binding whether the script works or not; `/` and `/account` both prove the
+  // Worker ran, which is one more piece of evidence than this fixture used to carry.
   const HEALTHY: Record<string, Route | Route[]> = {
-    '/': [200, '<html>packsheet</html>'],
+    '/': [302, '', { location: '/welcome' }],
+    '/welcome': [200, '<html>packsheet</html>'],
     '/robots.txt': [200, PRODUCTION_ROBOTS],
     '/account': [302, '', { location: '/sign-in?next=%2Faccount' }],
   };
@@ -875,20 +879,53 @@ describe('verify-release.sh', () => {
     expect(output).toMatch(/no Sitemap/);
   });
 
+  /**
+   * `/` must ROUTE, and the 200 case is the one that matters most here.
+   *
+   * A 200 at `/` is not merely "the wrong status": on a site where the assets binding
+   * answers first for anything it holds, it is what a stale `dist/client/index.html` from
+   * a build before this change looks like. The front door would serve the old landing
+   * page to everybody, signed in or not — the exact defect this whole change removes,
+   * back in place and invisible to a check that only asked whether the site was up.
+   */
+  it.each([
+    ['200 — a stale prerendered page at the front door', 200],
+    ['500', 500],
+    ['404', 404],
+  ])('fails when the site root answers %s', async (_label, code) => {
+    const { status, output } = await verify(await stub({ ...HEALTHY, '/': [code, 'x'] }));
+    expect(status).toBe(1);
+    expect(output).toMatch(/expected a redirect to \/welcome/);
+  });
+
+  // Same-origin only. A front door that redirects wherever a header says is an open
+  // redirect on the most-visited URL on the site — the defect safeNextPath exists to
+  // prevent, so it is not a shape for the release check to wave through either.
+  it.each([
+    ['an off-site host', 'https://evil.example/welcome'],
+    ['a protocol-relative URL', '//evil.example/welcome'],
+    ['somewhere else entirely', '/gear'],
+  ])('fails when the site root redirects to %s', async (_label, location) => {
+    const site = await stub({ ...HEALTHY, '/': [302, '', { location }] });
+    const { status, output } = await verify(site);
+    expect(status).toBe(1);
+    expect(output).toMatch(/expected the landing page on this site/);
+  });
+
   it.each([
     ['500', 500],
     ['404', 404],
     ['302', 302],
-  ])('fails when the home page answers %s', async (_label, code) => {
-    const { status, output } = await verify(await stub({ ...HEALTHY, '/': [code, 'x'] }));
+  ])('fails when the landing page answers %s', async (_label, code) => {
+    const { status, output } = await verify(await stub({ ...HEALTHY, '/welcome': [code, 'x'] }));
     expect(status).toBe(1);
     expect(output).toMatch(/expected 200/);
   });
 
   // What an assets binding pointed at the wrong directory looks like: the deploy
   // succeeds and the site serves 200 of something that is not the site.
-  it('fails when the home page is 200 but not HTML', async () => {
-    const site = await stub({ ...HEALTHY, '/': [200, 'not a page'] });
+  it('fails when the landing page is 200 but not HTML', async () => {
+    const site = await stub({ ...HEALTHY, '/welcome': [200, 'not a page'] });
     const { status, output } = await verify(site);
     expect(status).toBe(1);
     expect(output).toMatch(/not HTML/);
@@ -911,7 +948,7 @@ describe('verify-release.sh', () => {
       ...HEALTHY,
       '/': [
         [403, 'cf challenge'],
-        [200, '<html>packsheet</html>'],
+        [302, '', { location: '/welcome' }],
       ],
     });
     const { status } = await verify(site, { attempts: '4' });
@@ -1025,20 +1062,34 @@ describe('verify-release.sh', () => {
     expect(script).toContain(SIGN_IN_PATH);
   });
 
+  /**
+   * And the same pinning for the landing page, which the script gained when `/` became a
+   * router. Moving WELCOME_PATH without editing the script is the quiet failure of the
+   * pair: the verifier would fetch a 404 at the old path AND assert a redirect target that
+   * no longer exists, on the one check that runs against production after every release.
+   */
+  it('checks the landing-page path src/lib/routes.ts actually declares', () => {
+    const script = readFileSync(SCRIPT, 'utf8');
+    expect(WELCOME_PATH).toBe('/welcome');
+    expect(script).toContain(`$SITE${WELCOME_PATH}`);
+  });
+
   // Exiting at the first problem hides the second until someone fixes the first and
   // deploys again — on the one deploy nobody re-runs casually.
   it('runs every check even when an earlier one fails, and counts them', async () => {
     const site = await stub({ '/': [500, 'x'], '/robots.txt': [200, STAGING_ROBOTS] });
     const { status, output } = await verify(site);
     expect(status).toBe(1);
-    expect(output).toMatch(/expected 200/);
+    expect(output).toMatch(/expected a redirect to \/welcome/);
+    expect(output).toMatch(/\/welcome answered 404/);
     expect(output).toMatch(/disallows crawling/);
     expect(output).toMatch(/\/account answered 404/);
-    // Four, not three: a staging robots.txt trips both robots assertions — it has no
-    // Sitemap line AND it disallows — and this origin serves no on-demand route either.
-    // The count is asserted exactly so that a check quietly ceasing to run shows up as a
-    // smaller number rather than as nothing.
-    expect(output).toMatch(/4 problem\(s\)/);
+    // Five, not four: a staging robots.txt trips both robots assertions — it has no
+    // Sitemap line AND it disallows — and this origin serves neither the landing page nor
+    // any on-demand route. It was four before `/` split into a router and the page it
+    // routes to, which is the fifth. The count is asserted exactly so that a check quietly
+    // ceasing to run shows up as a smaller number rather than as nothing.
+    expect(output).toMatch(/5 problem\(s\)/);
   });
 
   it('refuses to run without a site argument', async () => {

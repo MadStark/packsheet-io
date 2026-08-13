@@ -12,6 +12,12 @@
 // without ever becoming a reason for an auth SDK to reach the client.
 import { GEAR_NEW_PATH, GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
+// The wordmark's destination, which used to be a hard-coded "/" and is the single click
+// this whole change is about. Every page this nav renders on belongs to a signed-in
+// visitor, and `/` now takes that visitor to their own closet instead of to a marketing
+// page with a "Sign in" link on it. Named rather than inlined so the one place that
+// decides what `/` means (src/lib/routes.ts) is reachable from here by reading.
+import { HOME_PATH } from '../lib/routes';
 
 // aria-current="page" on whichever link matches the current path — a small,
 // server-computed affordance (no JS needed) that tells a screen reader, and a sighted
@@ -29,7 +35,9 @@ const links: readonly [href: string, label: string][] = [
     aria-label="Gear closet"
     class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4"
   >
-    <a href="/" class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Packsheet</a>
+    <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
+      >Packsheet</a
+    >
     <ul class="flex items-center gap-6 text-sm">
       {
         links.map(([href, label]) => (

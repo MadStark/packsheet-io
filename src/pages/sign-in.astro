@@ -17,6 +17,11 @@ import {
   SIGN_UP_PATH,
   safeNextPath,
 } from '../lib/auth-routes';
+// WELCOME_PATH and not HOME_PATH for the wordmark below, unlike the signed-in pages. The
+// guard above means anybody still reading this page has no session, so `/` would only
+// bounce them to `/welcome` anyway — linking straight there spends one request instead of
+// two for the identical destination.
+import { WELCOME_PATH } from '../lib/routes';
 
 // `next` is trusted nowhere near its raw form — see safeNextPath's own comment for the
 // open-redirect it closes. Seeded from the query string here, which is what a GET has,
@@ -24,6 +29,29 @@ import {
 // value from then on: the redirect target, the hidden field the next submission will
 // carry, and the sign-up link.
 let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
+
+// ALREADY SIGNED IN? Then this page has nothing to offer, and what it used to do instead
+// was the dead end this ticket exists to remove: a signed-in visitor who clicked "Sign in"
+// anywhere on the site was shown the sign-in form again, with no indication that they were
+// already signed in and no link back to their own gear — the only way forward was to sign
+// in a second time.
+//
+// Sent to `next` rather than to a fixed path, so a signed-in visitor who follows a
+// `?next=`-carrying link (a share page's "sign in to claim this", a bookmark from a
+// previous bounce) still lands where the link was taking them. With no `next`, safeNextPath
+// has already resolved it to HOME_PATH, and `/` decides from there.
+//
+// BEFORE THE POST BRANCH ON PURPOSE: a POST to this page from somebody who already has a
+// session is either a stale form or a double submit, and re-authenticating them would
+// replace a perfectly good session for no reason.
+//
+// `/update-password` and `/forgot-password` deliberately do NOT do this. They are password
+// MANAGEMENT, not "become signed in": one is reached with a live recovery session and must
+// render its form, and the other is the only route this site has for changing a password
+// at all, which a signed-in person is exactly the sort to want.
+if (Astro.locals.user) {
+  return Astro.redirect(next, 302);
+}
 
 // Set by src/pages/auth/callback.ts redirecting back here after a callback it could not
 // complete — see that file. Never Supabase's or Google's own error text, which is a
@@ -94,7 +122,9 @@ if (Astro.request.method === 'POST') {
 
 <Layout title="Sign in — Packsheet" description="Sign in to your Packsheet account.">
   <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
-    <a href="/" class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Packsheet</a>
+    <a href={WELCOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
+      >Packsheet</a
+    >
     <h1 class="mt-6 text-3xl">Sign in</h1>
 
     {
