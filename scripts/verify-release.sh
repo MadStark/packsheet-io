@@ -119,18 +119,26 @@ else
   # Same-origin only, for the same reason as /account's: a front door that redirects
   # anywhere a header says is an open redirect on the most-visited URL on the site.
   case "$home_location" in
-    /welcome | "$SITE"/welcome) ;;
+    /welcome/ | "$SITE"/welcome/) ;;
     *)
       fail "$SITE/ redirected to '$home_location', expected the landing page on this site."
       ;;
   esac
 fi
 
-welcome_status="$(fetch "$SITE/welcome" "$work/welcome.html")"
+# THE TRAILING SLASH IS REQUIRED HERE. Astro prerenders the landing page to
+# dist/client/welcome/index.html, and Cloudflare's assets binding defaults to
+# `html_handling: "auto-trailing-slash"` — so `$SITE/welcome` answers 307, not 200, and
+# this check written without the slash burned every retry and failed the release. It is
+# not a shape to "tidy up": `npm run dev` serves both spellings, so the mistake is
+# invisible until it reaches workerd. See WELCOME_PATH in src/lib/routes.ts, which carries
+# the slash for the same reason, and which tests/deploy-workers.test.ts pins against this
+# line.
+welcome_status="$(fetch "$SITE/welcome/" "$work/welcome.html")"
 if [ "$welcome_status" != "200" ]; then
-  fail "$SITE/welcome answered $welcome_status, expected 200."
+  fail "$SITE/welcome/ answered $welcome_status, expected 200."
 elif ! grep -qi '<html' "$work/welcome.html"; then
-  fail "$SITE/welcome answered 200 but the body is not HTML."
+  fail "$SITE/welcome/ answered 200 but the body is not HTML."
 fi
 
 # ---------------------------------------------------------------------------

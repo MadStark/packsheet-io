@@ -49,7 +49,19 @@ let next = safeNextPath(Astro.url.searchParams.get(NEXT_PARAM));
 // MANAGEMENT, not "become signed in": one is reached with a live recovery session and must
 // render its form, and the other is the only route this site has for changing a password
 // at all, which a signed-in person is exactly the sort to want.
-if (Astro.locals.user) {
+//
+// AND IT DOES NOT FIRE WHEN THE CALLBACK ROUTE SENT THEM HERE TO BE TOLD SOMETHING. An
+// earlier version of this guard sat above `authCallbackFailed` and bounced unconditionally,
+// which silently ate the one message this page exists to deliver on that leg: a SIGNED-IN
+// visitor who reopens an already-used sign-up confirmation link goes through
+// src/pages/auth/callback.ts, whose failed exchange redirects to
+// `/sign-in?auth_error=1` — and the bounce then forwarded them to `/` and on to their gear
+// closet having been told nothing at all. They are signed in, so nothing is broken for
+// them, but "your link did not work" is information they asked for by clicking it.
+// Rendering the page is the only way to say so, so `auth_error` suppresses the bounce.
+const authCallbackFailed = Astro.url.searchParams.has(AUTH_ERROR_PARAM);
+
+if (Astro.locals.user && !authCallbackFailed) {
   return Astro.redirect(next, 302);
 }
 
@@ -64,9 +76,9 @@ if (Astro.locals.user) {
 // googleAuthUnavailableMessage lives in src/lib/auth-routes.ts rather than in two
 // frontmatters: the rule about what this may and may not say belongs somewhere a test can
 // pin it. See AUTH_CALLBACK_FAILED_MESSAGE's own comment, and
-// tests/auth-callback-failed-message.test.ts.
-const authCallbackFailed = Astro.url.searchParams.has(AUTH_ERROR_PARAM);
-
+// tests/auth-callback-failed-message.test.ts. (Read above, where the signed-in bounce
+// needs it too — a visitor who was sent here to be told something must not be redirected
+// away before the page can tell them.)
 let errorMessage: string | null = authCallbackFailed ? AUTH_CALLBACK_FAILED_MESSAGE : null;
 
 // CSRF: this POST relies on Astro's on-demand origin check (security.checkOrigin,

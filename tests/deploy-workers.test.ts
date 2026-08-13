@@ -848,8 +848,13 @@ describe('verify-release.sh', () => {
   // the assets binding whether the script works or not; `/` and `/account` both prove the
   // Worker ran, which is one more piece of evidence than this fixture used to carry.
   const HEALTHY: Record<string, Route | Route[]> = {
-    '/': [302, '', { location: '/welcome' }],
-    '/welcome': [200, '<html>packsheet</html>'],
+    // The trailing slash on the landing page is the real shape, not a detail of this
+    // fixture: Astro prerenders it to welcome/index.html and Cloudflare's assets binding
+    // canonicalises to `/welcome/`. A fixture serving it at `/welcome` would pass a script
+    // that fetches the 307-ing spelling — which is exactly the release-breaking bug this
+    // pair of paths now exists to catch.
+    '/': [302, '', { location: '/welcome/' }],
+    '/welcome/': [200, '<html>packsheet</html>'],
     '/robots.txt': [200, PRODUCTION_ROBOTS],
     '/account': [302, '', { location: '/sign-in?next=%2Faccount' }],
   };
@@ -917,7 +922,7 @@ describe('verify-release.sh', () => {
     ['404', 404],
     ['302', 302],
   ])('fails when the landing page answers %s', async (_label, code) => {
-    const { status, output } = await verify(await stub({ ...HEALTHY, '/welcome': [code, 'x'] }));
+    const { status, output } = await verify(await stub({ ...HEALTHY, '/welcome/': [code, 'x'] }));
     expect(status).toBe(1);
     expect(output).toMatch(/expected 200/);
   });
@@ -925,7 +930,7 @@ describe('verify-release.sh', () => {
   // What an assets binding pointed at the wrong directory looks like: the deploy
   // succeeds and the site serves 200 of something that is not the site.
   it('fails when the landing page is 200 but not HTML', async () => {
-    const site = await stub({ ...HEALTHY, '/welcome': [200, 'not a page'] });
+    const site = await stub({ ...HEALTHY, '/welcome/': [200, 'not a page'] });
     const { status, output } = await verify(site);
     expect(status).toBe(1);
     expect(output).toMatch(/not HTML/);
@@ -948,7 +953,7 @@ describe('verify-release.sh', () => {
       ...HEALTHY,
       '/': [
         [403, 'cf challenge'],
-        [302, '', { location: '/welcome' }],
+        [302, '', { location: '/welcome/' }],
       ],
     });
     const { status } = await verify(site, { attempts: '4' });
@@ -1070,7 +1075,11 @@ describe('verify-release.sh', () => {
    */
   it('checks the landing-page path src/lib/routes.ts actually declares', () => {
     const script = readFileSync(SCRIPT, 'utf8');
-    expect(WELCOME_PATH).toBe('/welcome');
+    // With the trailing slash — the form Cloudflare's assets binding actually serves 200
+    // for. Pinned here as well as in tests/home-routing.test.ts because this is the
+    // assertion that ties the constant to the shell script, and dropping the slash in
+    // either place is the release-breaking edit.
+    expect(WELCOME_PATH).toBe('/welcome/');
     expect(script).toContain(`$SITE${WELCOME_PATH}`);
   });
 
@@ -1081,7 +1090,7 @@ describe('verify-release.sh', () => {
     const { status, output } = await verify(site);
     expect(status).toBe(1);
     expect(output).toMatch(/expected a redirect to \/welcome/);
-    expect(output).toMatch(/\/welcome answered 404/);
+    expect(output).toMatch(/\/welcome\/ answered 404/);
     expect(output).toMatch(/disallows crawling/);
     expect(output).toMatch(/\/account answered 404/);
     // Five, not four: a staging robots.txt trips both robots assertions — it has no

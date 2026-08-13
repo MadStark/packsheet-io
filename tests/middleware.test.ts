@@ -267,7 +267,7 @@ describe('the no-edge-cache rule', () => {
    */
   it('does not extend the site root’s rule to every path under it', async () => {
     expect(await cacheControl(contextFor('/pack/some-shared-pack'))).toBeNull();
-    expect(await cacheControl(contextFor('/welcome'))).toBeNull();
+    expect(await cacheControl(contextFor('/welcome/'))).toBeNull();
   });
 
   // Sub-paths inherit, which is the behaviour AUTH_ROUTE_PATHS' own comment argues for:
@@ -298,7 +298,7 @@ describe('the no-edge-cache rule', () => {
     // router now and belongs on the list above. The landing page it redirects to is what
     // inherited the property this assertion is about — a prerendered file, identical for
     // everybody, which the edge should serve to everybody from one copy.
-    expect(await cacheControl(contextFor('/welcome'))).toBeNull();
+    expect(await cacheControl(contextFor('/welcome/'))).toBeNull();
     expect(await cacheControl(contextFor('/some/shared/pack'))).toBeNull();
   });
 

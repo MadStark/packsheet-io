@@ -61,8 +61,17 @@ describe('the paths themselves', () => {
     expect(HOME_PATH).toBe('/');
   });
 
-  it('gives the landing page a URL of its own', () => {
-    expect(WELCOME_PATH).toBe('/welcome');
+  /**
+   * WITH THE TRAILING SLASH, which is the whole assertion and not an accident of how it
+   * was typed. Astro prerenders the landing page to `dist/client/welcome/index.html`, and
+   * Cloudflare's assets binding canonicalises that to `/welcome/` — `/welcome` answers a
+   * 307. Dropping the slash here costs the front door an extra hop AND fails
+   * `scripts/verify-release.sh`, which fetches this path expecting 200 and would burn
+   * every retry on the redirect. `npm run dev` serves both spellings, so nothing local
+   * catches it; this assertion and the one in tests/deploy-workers.test.ts are what do.
+   */
+  it('gives the landing page a URL of its own, in the form the assets binding serves', () => {
+    expect(WELCOME_PATH).toBe('/welcome/');
   });
 
   /**

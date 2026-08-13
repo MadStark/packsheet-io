@@ -25,6 +25,10 @@
  * `WELCOME_PATH` — the page that actually has content worth caching, and the one a
  * search engine indexes — stays prerendered exactly as `/` used to be. The redirect hop
  * is the price, and it is paid by anonymous visitors to `/` only.
+ *
+ * ONE hop, and keeping it at one is the reason `WELCOME_PATH` carries a trailing slash —
+ * see its own comment. Pointing `/` at a path that itself redirects would make the site's
+ * front door three responses deep for every stranger who types the domain.
  */
 
 import { GEAR_PATH } from './gear/routes';
@@ -41,14 +45,30 @@ export const HOME_PATH = '/';
  * also want to go — the entire point of the change is that a signed-in person has their
  * own home and this is not it.
  *
- * NOTE FOR LAUNCH, because it is invisible until it matters: this is now the canonical
- * marketing URL. `@astrojs/sitemap` emits prerendered routes only, so the sitemap will
- * list `/welcome` and not `/`, and a link to `packsheet.io` costs a stranger a 302 hop
- * before they see any content. Harmless today — `src/pages/robots.txt.ts` disallows
- * everything outside production — but it is a deliberate consequence to weigh again
- * before the site is indexed, not an oversight.
+ * THE TRAILING SLASH IS LOAD-BEARING AND IS NOT A TYPO. Astro prerenders this route to
+ * `dist/client/welcome/index.html`, and Cloudflare's assets binding defaults to
+ * `html_handling: "auto-trailing-slash"` — so `/welcome` is NOT the URL that serves the
+ * page, it is a URL that answers `307` and points at `/welcome/`. Writing the constant
+ * without the slash cost a hop everywhere it was used and, worse, broke the release:
+ * `scripts/verify-release.sh` fetches this path expecting `200`, got the `307`, burned
+ * every retry and failed `deploy-production.yml`'s verification step. The bug was
+ * invisible under `npm run dev`, which serves both spellings — it only appears under
+ * `astro preview`, against the real `dist/` through workerd, which is what the release
+ * verifier actually talks to.
+ *
+ * `@astrojs/sitemap` independently agrees: it emits `https://packsheet.io/welcome/`. So
+ * the slash is the canonical form on every surface that matters, and this constant now
+ * says the same thing they do rather than a prettier thing that redirects.
+ *
+ * NOTE FOR LAUNCH: this is now the canonical marketing URL, and a link to `packsheet.io`
+ * costs a stranger a 302 before they see any content. Harmless today — see
+ * `src/pages/robots.txt.ts`, which disallows everything outside production — but a
+ * deliberate consequence to weigh again before the site is indexed. Note also that the
+ * sitemap does NOT list only prerendered routes, as an earlier version of this comment
+ * claimed: it emits every non-dynamic route, `/` and the session-shaped pages included.
+ * `astro.config.mjs` filters `/` out for that reason.
  */
-export const WELCOME_PATH = '/welcome';
+export const WELCOME_PATH = '/welcome/';
 
 /**
  * Where `/` sends this visitor.
