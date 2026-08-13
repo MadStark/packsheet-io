@@ -360,17 +360,22 @@ export function gearListPath(query: GearQuery): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Escapes `text` for use as a Postgres `LIKE`/`ILIKE` pattern body, so that `%`, `_` and
- * `\` inside it are matched LITERALLY rather than interpreted as wildcards or an escape
- * introducer. Postgres's default `LIKE` escape character is backslash (there is no
- * `ESCAPE` clause anywhere in this codebase's queries, so that default is what applies),
- * and it has to be escaped FIRST, before `%` and `_` are escaped into sequences that
- * themselves contain backslashes — escaping in the other order would re-escape the
- * backslashes this step just introduced and turn `\%` into `\\%`, which `ILIKE` reads
- * back as "a literal backslash, then a wildcard" instead of "a literal percent sign".
+ * Escapes `text` for literal use inside a Postgres POSIX regular expression — the
+ * pattern language `~*`/`imatch` reads — so every ERE metacharacter (`\ ^ $ . | ? * +
+ * ( ) [ ] { }`) is matched literally rather than interpreted as regex syntax. This is
+ * the search text's own escaping layer, the direct analogue of what an `ilike`-based
+ * search would need `%`/`_`/`\` escaped for; see `buildSearchFilter`'s own "WHY imatch,
+ * NOT ilike" section for why the OPERATOR had to change, not merely this function's
+ * character set.
+ *
+ * ONE PASS IS CORRECT HERE, UNLIKE A LIKE-STYLE ESCAPE. `String.replace` with a global
+ * pattern scans the ORIGINAL string once, left to right, and never re-scans a
+ * replacement it has already written — so a literal `\` in `text` is matched by this
+ * same character class and escaped to `\\` in the one pass, with no risk of the
+ * backslash it just introduced being picked up and re-escaped a second time.
  */
-function escapeLikePattern(text: string): string {
-  return text.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+function escapeRegexPattern(text: string): string {
+  return text.replace(/[\\^$.|?*+()[\]{}]/g, '\\$&');
 }
 
 /**
@@ -405,32 +410,54 @@ function quoteForPostgrestFilterValue(value: string): string {
  * case-insensitively, as a SUBSTRING match: `search` can appear anywhere in either
  * column, not only at the start.
  *
+ * WHY `imatch` (`~*`), NOT `ilike` — THE `*` WILDCARD BUG (PK-4 review, I1). An earlier
+ * version of this function used `ilike`, LIKE-escaping `%`/`_`/`\` the way this comment
+ * used to describe. That has a hole no amount of escaping inside the value can close:
+ * PostgREST rewrites a literal `*` inside an `ilike`/`like` filter value into `%`
+ * BEFORE Postgres ever sees it — a documented convenience so a URL does not have to
+ * percent-encode `%` as `%25` — and the rewrite is unconditional, applied to the
+ * OPERATOR's value wholesale, not to unescaped input specifically. Backslash-escaping
+ * the asterisk does not save it: PostgREST rewrites `\*` to `\%`, which Postgres's own
+ * LIKE-escape handling then reads back as "a literal percent sign", not "a literal
+ * asterisk" — so `?q=*` returned the entire closet, and `a*b` matched rows that never
+ * contained the typed text. No fix inside `escapeLikePattern` could ever close this,
+ * because the substitution happens a layer above where that function's escaping is
+ * read. `imatch`/`~*` (POSIX case-insensitive regex match) carries no such rewrite —
+ * PostgREST's `*` → `%` convenience is specific to `like`/`ilike` — so switching
+ * operators removes the hazard outright rather than working around it. Verified
+ * empirically against the local stack, the same standard `tests/gear-search-
+ * escaping.test.ts` already holds every other character to: a decoy row with no
+ * literal `*` proves `?q=*` no longer matches it.
+ *
+ * A substring match needs no `%...%`-style wrapping under a regex engine — POSIX regex
+ * matches anywhere in the string by default — so the escaped literal alone is the whole
+ * pattern.
+ *
  * TWO INDEPENDENT ESCAPING LAYERS, APPLIED IN THIS ORDER AND FOR DIFFERENT REASONS:
  *
- *   1. `escapeLikePattern` first, so the raw search text's own `%`, `_` and `\`
- *      characters are neutralised as LIKE metacharacters — this is what stops a search
- *      for the literal string `50%` from becoming the pattern `%50%%`, which `ILIKE`
- *      reads as "fifty, then anything" and would match `500 grams` even though the
- *      visitor typed a percent sign, not a wildcard.
- *   2. `quoteForPostgrestFilterValue` second, over the ALREADY-LIKE-ESCAPED string
- *      (including the `%` wildcards this function itself adds around it) — this is what
- *      stops PostgREST's own filter-list grammar from misreading a value containing a
- *      comma, a parenthesis, or a double quote as more of the `or=(...)` expression
- *      rather than as the value of one `ilike` condition.
+ *   1. `escapeRegexPattern` first, so the raw search text's own regex metacharacters —
+ *      `\ ^ $ . | ? * + ( ) [ ] { }`, including the `*` this function exists to fix —
+ *      are neutralised before anything else sees them. This is what stops a search for
+ *      the literal string `a.b` from becoming a regex matching any single character
+ *      between `a` and `b`, and what stops `*` from being read as "zero or more of the
+ *      preceding token" (on top of PostgREST no longer rewriting it to `%` first).
+ *   2. `quoteForPostgrestFilterValue` second, over the ALREADY-REGEX-ESCAPED string —
+ *      including any `\(` / `\)` `escapeRegexPattern` itself just introduced — so
+ *      PostgREST's own filter-list grammar does not misread a comma, parenthesis or
+ *      double quote as more of the `or=(...)` expression rather than as the value of
+ *      one `imatch` condition.
  *
  * Applying these in the other order, or collapsing them into one escaping pass, is the
- * mistake this function exists to avoid: PostgREST-quoting the raw search text and only
- * then wrapping it in `%...%` would leave the wildcard percent signs OUTSIDE the quoted
- * value's own escaping, and LIKE-escaping the already-PostgREST-quoted string would
- * mangle the very backslashes and quote characters `quoteForPostgrestFilterValue` just
- * introduced. Both layers are exercised, independently, against the real local stack in
- * `tests/gear-search-escaping.test.ts` — see that file for exactly which awkward strings
- * are proven to round-trip correctly rather than merely reasoned about.
+ * mistake this function exists to avoid — the same reasoning as the two-layer design it
+ * replaces, just with a regex escape standing in for a LIKE escape. Both layers are
+ * exercised, independently, against the real local stack in `tests/gear-search-
+ * escaping.test.ts` — see that file for exactly which awkward strings (now including
+ * `*`) are proven to round-trip correctly rather than merely reasoned about.
  */
 export function buildSearchFilter(search: string): string {
-  const pattern = `%${escapeLikePattern(search)}%`;
+  const pattern = escapeRegexPattern(search);
   const value = quoteForPostgrestFilterValue(pattern);
-  return `name.ilike.${value},brand.ilike.${value}`;
+  return `name.imatch.${value},brand.imatch.${value}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,30 +512,46 @@ function _gearItemsQuery(client: PacksheetClient) {
 type GearItemsQueryBuilder = ReturnType<typeof _gearItemsQuery>;
 
 /**
- * Applies a parsed `GearQuery` to a `client.from('gear_items').select(GEAR_SELECT)`
- * builder: search, the three `in` filters, the weight range, the `deleted_at is null`
- * floor every closet-list query needs (a trashed item is never a "gear closet" row —
- * see `GEAR_TRASH_PATH` in `src/lib/gear/routes.ts` for the page that reads the OTHER
- * side of that filter), ordering, and `.range()` for pagination.
+ * I2 (PK-4 review): slack added to every `weight_grams` boundary comparison so a value
+ * entered in a non-gram unit still matches its OWN exact boundary. `toGrams(4.4, 'oz')`
+ * computes `124.73790175000002` in IEEE-754 double precision; Postgres computed the
+ * identical conversion with EXACT decimal arithmetic when the row was written and
+ * stored `124.73790175` — two different arithmetic systems multiplying the same
+ * operands, agreeing to a very large number of digits but not bitwise. Without slack,
+ * `weight_grams >= 124.73790175000002` excludes the row that IS "4.4 oz and heavier" —
+ * the boundary itself, hidden by the seventeenth significant digit.
  *
- * A STABLE `id` TIEBREAKER IS ADDED AFTER THE SORT COLUMN, ALWAYS. Without it, two rows
- * that tie on the sort column (two items literally named "Stakes", say, or two added in
- * the same transaction and so sharing `created_at` to the microsecond) have no defined
- * relative order, and Postgres is free to answer consecutive `.range()` requests for the
- * SAME query with those two rows swapped. Page 1 could then show both, or neither — the
- * classic pagination bug where the total item count looks right but a specific item is
- * missing or duplicated depending on exactly where a tie happened to fall across a page
- * boundary. `id` is a `uuid primary key`, so it is unique and always present, which is
- * what makes it a safe universal tiebreaker regardless of which column the visitor
- * actually chose to sort by.
+ * 1e-6 g is not picked freely: it is the exact figure `tests/gear-closet-schema.test.ts`
+ * already uses (`TOLERANCE_GRAMS`) for the read-back comparison between the same two
+ * arithmetic systems, chosen there as "far above where floating-point rounding noise
+ * could ever land, far below anything a real distinguishing weight needs" — reused here
+ * rather than re-derived, so the two files cannot quietly disagree on how much slack a
+ * gram figure is allowed.
  *
- * Does not itself run the query — the caller `await`s the returned builder, the same
- * way `packTreeQuery` in `tests/support/local-database.ts` is used.
+ * APPLIED TO BOTH BOUNDS, not only the minimum I2 was filed against: which direction a
+ * given value's floating-point conversion drifts (a hair above or a hair below the
+ * database's exact decimal result) depends on the specific operands, not on whether it
+ * is a `wmin` or a `wmax` — the failure mode I2 named for `gte` has an exact mirror on
+ * `lte` for a value that happens to drift the other way, and there is no reason to leave
+ * that one unfixed.
  */
-export function applyGearQuery(
-  builder: GearItemsQueryBuilder,
-  query: GearQuery,
-): GearItemsQueryBuilder {
+const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 1e-6;
+
+/**
+ * The search/category/status/brand/weight filters and the `deleted_at is null` floor
+ * every closet-list query needs (a trashed item is never a "gear closet" row — see
+ * `GEAR_TRASH_PATH` in `src/lib/gear/routes.ts` for the page that reads the OTHER side
+ * of that filter). Deliberately does NOT add ordering, `.range()`, or the owner scope —
+ * see `applyGearQuery` for the first two and `loadGearCloset` for the third.
+ *
+ * SPLIT OUT FROM `applyGearQuery` FOR C2 (PK-4 review): `loadGearCloset` needs to run
+ * this same filter set TWICE for one page render — once as an unranged, `head: true`
+ * count to learn how many rows actually match before deciding what page is real, and
+ * once as the full ranged query — and a `.range()` call baked into a shared helper
+ * would make the first of those two calls request a specific slice of a result set
+ * whose size is not yet known.
+ */
+function applyGearFilters(builder: GearItemsQueryBuilder, query: GearQuery): GearItemsQueryBuilder {
   let next = builder.is('deleted_at', null);
 
   if (query.search !== '') {
@@ -524,11 +567,41 @@ export function applyGearQuery(
     next = next.in('brand', query.brands as string[]);
   }
   if (query.minGrams !== null) {
-    next = next.gte('weight_grams', query.minGrams);
+    next = next.gte('weight_grams', query.minGrams - WEIGHT_COMPARISON_TOLERANCE_GRAMS);
   }
   if (query.maxGrams !== null) {
-    next = next.lte('weight_grams', query.maxGrams);
+    next = next.lte('weight_grams', query.maxGrams + WEIGHT_COMPARISON_TOLERANCE_GRAMS);
   }
+
+  return next;
+}
+
+/**
+ * Applies a parsed `GearQuery` to a `client.from('gear_items').select(GEAR_SELECT)`
+ * builder: `applyGearFilters` (search, the three `in` filters, the weight range, the
+ * `deleted_at is null` floor), ordering, and `.range()` for pagination.
+ *
+ * A STABLE `id` TIEBREAKER IS ADDED AFTER THE SORT COLUMN, ALWAYS. Without it, two rows
+ * that tie on the sort column (two items literally named "Stakes", say, or two added in
+ * the same transaction and so sharing `created_at` to the microsecond) have no defined
+ * relative order, and Postgres is free to answer consecutive `.range()` requests for the
+ * SAME query with those two rows swapped. Page 1 could then show both, or neither — the
+ * classic pagination bug where the total item count looks right but a specific item is
+ * missing or duplicated depending on exactly where a tie happened to fall across a page
+ * boundary. `id` is a `uuid primary key`, so it is unique and always present, which is
+ * what makes it a safe universal tiebreaker regardless of which column the visitor
+ * actually chose to sort by.
+ *
+ * Does not itself run the query — the caller `await`s the returned builder, the same
+ * way `packTreeQuery` in `tests/support/local-database.ts` is used. Does not scope by
+ * owner either — see `loadGearCloset` below, the only caller this module ships, for
+ * why that filter has to be added by something that actually knows who is asking.
+ */
+export function applyGearQuery(
+  builder: GearItemsQueryBuilder,
+  query: GearQuery,
+): GearItemsQueryBuilder {
+  let next = applyGearFilters(builder, query);
 
   // Sorting by `price` orders by the raw column, and that is a documented limitation
   // rather than an oversight — see GEAR_SORT_COLUMNS's own comment in fields.ts for why
@@ -542,4 +615,135 @@ export function applyGearQuery(
   next = next.range(offset, offset + GEAR_PAGE_SIZE - 1);
 
   return next;
+}
+
+// ---------------------------------------------------------------------------
+// loadGearCloset — the owner-scoped closet list, with the C2 page clamp
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT `loadGearCloset` HANDS BACK, deliberately left to TypeScript's own inference
+ * rather than a hand-written interface: `items` (the page of rows actually rendered,
+ * typed exactly as `GEAR_SELECT` produces — see `GearItemsQueryBuilder` above for why
+ * that type is derived rather than spelled out by hand), `count` (the total across
+ * every page, for the pager's "Showing X-Y of Z"), `error` (postgrest-js's own
+ * `PostgrestError | null`), and `page` — the CLAMPED page number that was actually
+ * queried, which the caller should use for every page-dependent computation from here
+ * on (range text, Previous/Next links) rather than the raw, possibly-over-range
+ * `query.page` it was asked for.
+ *
+ * The owner-scoped closet list query — moved here from `src/pages/gear/index.astro`
+ * (PK-4 review, C3) so a test can reach both the owner scope and the C2 clamp below
+ * directly, rather than only through a page `vitest.config.ts` excludes.
+ *
+ * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces. `gear_items` carries
+ * TWO permissive SELECT policies (core_schema.sql): `gear_items_select_own` (owner
+ * only) and `gear_items_select_via_public_pack`, granted to `anon, authenticated` alike
+ * so a shared pack link can render the gear behind it. RLS policies are UNIONED, not
+ * intersected, so a plain `.select()` relying on RLS alone would return this visitor's
+ * own rows OR any row that happens to sit on ANYONE's public pack — "Your gear closet"
+ * silently showing a stranger's gear the moment that stranger publishes a pack.
+ * `applyGearQuery`/`applyGearFilters` deliberately do not add this filter themselves
+ * (see their own comments); this function is the one place that knows the signed-in
+ * visitor's id, so this is where it has to be added — and where a test can now assert
+ * it is, by calling this function directly instead of a hand-copied stand-in.
+ *
+ * C2 (PK-4 review) — THE OVER-RANGE PAGE CLAMP. PostgREST answers a `.range()` whose
+ * offset exceeds the row count with `PGRST103` (416, "Requested range not
+ * satisfiable"), and an offset exactly EQUAL to the count with a 206 and an empty
+ * array (I11) — neither of which is "no items match", and treating the first as a load
+ * failure replaces the whole page (filter form, table, both empty states, pager) with
+ * an error that can never resolve, because the 416 is deterministic for that URL. Both
+ * are reachable ordinarily: delete enough rows on a page beyond the first and the page
+ * you were just looking at is now past the end.
+ *
+ * The fix runs the filters TWICE: once unranged, as a `head: true` count-only request,
+ * to learn how many rows actually match before any `.range()` is issued at all; then
+ * `query.page` is clamped to `max(1, ceil(count / GEAR_PAGE_SIZE))` — never lower than
+ * page 1, even for zero matches — before the real, ranged request runs. An offset built
+ * from an already-clamped page can never exceed the row count, so PGRST103 and the I11
+ * empty-206 case are both structurally unreachable afterwards, not merely handled.
+ */
+export async function loadGearCloset(client: PacksheetClient, userId: string, query: GearQuery) {
+  const countQuery = applyGearFilters(
+    client
+      .from('gear_items')
+      .select(GEAR_SELECT, { count: 'exact', head: true })
+      .eq('user_id', userId),
+    query,
+  );
+  const { count: unrangedCount, error: countError } = await countQuery;
+
+  if (countError) {
+    return { items: [], count: 0, page: query.page, error: countError };
+  }
+
+  const count = unrangedCount ?? 0;
+  const totalPages = Math.max(1, Math.ceil(count / GEAR_PAGE_SIZE));
+  const page = Math.min(query.page, totalPages);
+
+  const rangedQuery = applyGearQuery(
+    client.from('gear_items').select(GEAR_SELECT, { count: 'exact' }).eq('user_id', userId),
+    page === query.page ? query : { ...query, page },
+  );
+  const { data, error, count: exactCount } = await rangedQuery;
+
+  return { items: data ?? [], count: exactCount ?? count, page, error };
+}
+
+// ---------------------------------------------------------------------------
+// loadGearItem — the owner-scoped single-item load
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner-scoped detail-page load query — moved here from
+ * `src/pages/gear/[id].astro` (PK-4 review, C3) for the same reason as
+ * `loadGearCloset` above.
+ *
+ * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces — see the identical
+ * comment on `loadGearCloset`. Relying on RLS alone here would let this page render
+ * ANY visitor's gear item the moment it sits on someone's public pack — "your item"
+ * silently becoming a stranger's. `.is('deleted_at', null)` is the second guard: a
+ * soft-deleted item is not a page this id should keep answering for — see
+ * `GEAR_TRASH_PATH` for where a trashed item is read back.
+ *
+ * A missing row, another visitor's row, a soft-deleted row, and a malformed id (which
+ * PostgREST refuses with an error before RLS is even consulted) all collapse to the
+ * SAME `{ data: null }` shape here, on purpose — `src/pages/gear/[id].astro` turns that
+ * into one real 404 for all four, and none of the four is a distinction its visitor
+ * should be able to probe for.
+ */
+export async function loadGearItem(client: PacksheetClient, userId: string, id: string) {
+  return client
+    .from('gear_items')
+    .select(GEAR_DETAIL_SELECT)
+    .eq('id', id)
+    .eq('user_id', userId)
+    .is('deleted_at', null)
+    .maybeSingle();
+}
+
+// ---------------------------------------------------------------------------
+// loadGearTrash — the owner-scoped trash list
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner-scoped trash list query — moved here from `src/pages/gear/trash.astro`
+ * (PK-4 review, C3) for the same reason as `loadGearCloset` above.
+ *
+ * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces — see the identical
+ * comment on `loadGearCloset`. `gear_items_select_via_public_pack` is granted to
+ * `authenticated` visitors too, so a plain `.select()` relying on RLS alone could
+ * return a stranger's gear the moment it sits on their own public pack — "your trash"
+ * silently showing somebody else's item. `.not('deleted_at', 'is', null)` is what
+ * actually confines this to the trash; the two guards are independent, not redundant.
+ */
+export async function loadGearTrash(client: PacksheetClient, userId: string) {
+  return client
+    .from('gear_items')
+    .select(GEAR_TRASH_SELECT)
+    .eq('user_id', userId)
+    .not('deleted_at', 'is', null)
+    .order('deleted_at', { ascending: false })
+    .order('id', { ascending: true });
 }

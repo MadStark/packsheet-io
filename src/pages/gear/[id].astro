@@ -11,7 +11,7 @@ import GearItemForm from '../../components/GearItemForm.astro';
 import { createAuthClient } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
 import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
-import { GEAR_DETAIL_SELECT } from '../../lib/gear/query';
+import { loadGearItem } from '../../lib/gear/query';
 import {
   gearItemToFormValues,
   parseGearItemForm,
@@ -20,6 +20,7 @@ import {
   type GearItemRow,
 } from '../../lib/gear/form';
 import { UNDO_COUNT_PARAM, UNDO_PARAM, makeUndoToken } from '../../lib/gear/bulk';
+import { softDeleteGearItem, updateGearItem } from '../../lib/gear/mutations';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -76,18 +77,15 @@ if (Astro.request.method === 'POST') {
       pendingDelete = true;
     } else {
       const token = makeUndoToken();
-      // No explicit `.eq('user_id', ...)` here — mirroring src/pages/gear/index.astro's
-      // own bulk delete, this write relies on RLS alone (gear_items_update_own, which
-      // has no "via public pack" counterpart, unlike the SELECT policies the read query
-      // below has to work around explicitly). `.is('deleted_at', null)` IS load-bearing
-      // though: it is what stops a double-submitted or retried delete from re-stamping
-      // an already-trashed row with a NEW undo token — exactly the class of bug
-      // makeUndoToken's own "THE CALLER MUST GUARD" comment warns about.
-      const { error } = await client
-        .from('gear_items')
-        .update({ deleted_at: token })
-        .eq('id', id)
-        .is('deleted_at', null);
+      // softDeleteGearItem (src/lib/gear/mutations.ts) carries the same
+      // .is('deleted_at', null) guard the inline write here used to: it is what stops
+      // a double-submitted or retried delete from re-stamping an already-trashed row
+      // with a NEW undo token — exactly the class of bug makeUndoToken's own "THE
+      // CALLER MUST GUARD" comment warns about. It also adds an explicit
+      // .eq('user_id', ...) alongside RLS (gear_items_update_own) — see that module's
+      // own comment for why the write side gets the same belt-and-braces the read
+      // side (loadGearItem, below) needs for a different, load-bearing reason.
+      const { error, count } = await softDeleteGearItem(client, user.id, id, token);
 
       if (error) {
         writeError = GENERIC_WRITE_ERROR;
@@ -95,9 +93,12 @@ if (Astro.request.method === 'POST') {
         // Redirects to the SAME undo banner the closet list's own bulk delete uses —
         // UNDO_PARAM and UNDO_COUNT_PARAM are one shared vocabulary, so one banner on
         // GEAR_PATH serves both paths without needing to know which one produced it.
+        // I6 (PK-4 review): `count` (0 or 1) is what softDeleteGearItem actually
+        // touched, not an assumed 1 — a race that already trashed this item from
+        // another tab reports that honestly instead of claiming a fresh delete.
         const params = new URLSearchParams();
         params.set(UNDO_PARAM, token);
-        params.set(UNDO_COUNT_PARAM, '1');
+        params.set(UNDO_COUNT_PARAM, String(count));
         return Astro.redirect(`${GEAR_PATH}?${params.toString()}`, 303);
       }
     }
@@ -107,16 +108,12 @@ if (Astro.request.method === 'POST') {
       formErrors = result.errors;
       formValuesOverride = result.values;
     } else {
-      // Same "no explicit user_id filter on a write" reasoning as the delete branch
-      // above — RLS (gear_items_update_own) already confines this to the visitor's own
-      // row. `.is('deleted_at', null)` IS still added: an item already in the trash is
-      // not something this page's edit form should be able to reach back into and
-      // silently change a field on — restoring is GEAR_TRASH_PATH's job, not this one's.
-      const { error } = await client
-        .from('gear_items')
-        .update(result.values)
-        .eq('id', id)
-        .is('deleted_at', null);
+      // updateGearItem (src/lib/gear/mutations.ts) keeps the same
+      // .is('deleted_at', null) guard the inline write here used to: an item already
+      // in the trash is not something this page's edit form should be able to reach
+      // back into and silently change a field on — restoring is GEAR_TRASH_PATH's job,
+      // not this one's.
+      const { error } = await updateGearItem(client, user.id, id, result.values);
 
       if (error) {
         writeError = GENERIC_WRITE_ERROR;
@@ -141,23 +138,17 @@ if (Astro.request.method === 'POST') {
 // redirect (a validation failure, a write failure, or the delete confirmation reveal),
 // since all three still need the row's own current data to render the page around.
 //
-// `.eq('user_id', user.id)` IS LOAD-BEARING, not belt-and-braces — see the identical
-// comment on src/pages/gear/index.astro. gear_items carries TWO permissive SELECT
-// policies: gear_items_select_own (owner only) and gear_items_select_via_public_pack,
-// granted to anon AND authenticated so a shared pack link can render the gear behind
-// it. Relying on RLS alone here would let this page render ANY visitor's gear item
-// the moment it sits on someone's public pack — "your item" silently becoming a
-// stranger's. `.is('deleted_at', null)` is the second guard: a soft-deleted item is not
-// a page this URL should keep answering for — see GEAR_TRASH_PATH for where a trashed
-// item is read back.
+// loadGearItem (src/lib/gear/query.ts) carries the load-bearing `.eq('user_id', ...)`
+// — not belt-and-braces, see that function's own comment. gear_items carries TWO
+// permissive SELECT policies: gear_items_select_own (owner only) and gear_items_
+// select_via_public_pack, granted to anon AND authenticated so a shared pack link can
+// render the gear behind it. Relying on RLS alone here would let this page render ANY
+// visitor's gear item the moment it sits on someone's public pack — "your item"
+// silently becoming a stranger's. `.is('deleted_at', null)` is the second guard: a
+// soft-deleted item is not a page this URL should keep answering for — see
+// GEAR_TRASH_PATH for where a trashed item is read back.
 // ---------------------------------------------------------------------------
-const { data: item, error: loadError } = await client
-  .from('gear_items')
-  .select(GEAR_DETAIL_SELECT)
-  .eq('id', id)
-  .eq('user_id', user.id)
-  .is('deleted_at', null)
-  .maybeSingle();
+const { data: item, error: loadError } = await loadGearItem(client, user.id, id);
 
 // A missing row, another visitor's row, a soft-deleted row, and a malformed id (which
 // PostgREST refuses with an error before RLS is even consulted) all collapse to the
@@ -228,7 +219,7 @@ const updated = Astro.url.searchParams.get('updated') === '1';
               <input type="hidden" name={DELETE_CONFIRM_FIELD} value="1" />
               <button
                 type="submit"
-                class="bg-rust rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-95"
+                class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"
               >
                 Move to trash
               </button>

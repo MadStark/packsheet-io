@@ -10,7 +10,7 @@
 // downloads, and the whole point of src/lib/gear/routes.ts and src/lib/auth-routes.ts
 // being importable from anywhere is that a component like this one can render a link
 // without ever becoming a reason for an auth SDK to reach the client.
-import { GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
+import { GEAR_NEW_PATH, GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
 
 // aria-current="page" on whichever link matches the current path — a small,
@@ -44,6 +44,23 @@ const links: readonly [href: string, label: string][] = [
           </li>
         ))
       }
+      {
+        /* C1 (PK-4 review): GEAR_NEW_PATH used to be linked ONLY from the closet's
+           empty state, so once the closet held one item there was no route to it but
+           typing the URL. Present everywhere this nav renders, not only on the closet
+           list, so "add another item" stays reachable from the trash and detail pages
+           too. Blue marks it interactive per tokens.css's own rule, same vocabulary as
+           every other link in this header rather than a new button style. */
+      }
+      <li>
+        <a
+          href={GEAR_NEW_PATH}
+          aria-current={path === GEAR_NEW_PATH ? 'page' : undefined}
+          class="text-blue-deep hover:text-blue-ink aria-[current=page]:text-blue-ink font-medium aria-[current=page]:underline"
+        >
+          Add item
+        </a>
+      </li>
     </ul>
   </nav>
 </header>

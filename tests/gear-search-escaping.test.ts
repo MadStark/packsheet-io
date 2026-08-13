@@ -6,11 +6,14 @@ import { buildSearchFilter } from '../src/lib/gear/query';
  * `buildSearchFilter` (src/lib/gear/query.ts) is the highest-risk function in PK-4, and
  * this file is why: it is not enough to reason about the escaping by hand, because two
  * independent parsers are involved — PostgREST's own `or=(...)` grammar, which this
- * project has no source for and no unit-testable stand-in for, and Postgres's `LIKE`
- * pattern language underneath it — and a mistake in either layer, or in the ORDER the
- * two are applied, produces a query that still runs and still returns rows. It just
- * returns the WRONG rows, silently, which is a worse failure than an error would be:
- * `50%` unescaped does not fail loudly, it quietly starts matching `500 grams`.
+ * project has no source for and no unit-testable stand-in for, and Postgres's POSIX
+ * regex pattern language underneath `imatch`/`~*` — and a mistake in either layer, or
+ * in the ORDER the two are applied, produces a query that still runs and still returns
+ * rows. It just returns the WRONG rows, silently, which is a worse failure than an
+ * error would be: `50%` unescaped does not fail loudly, it quietly starts matching
+ * `500 grams`; an unescaped `*` does not fail loudly either, it quietly returns the
+ * entire closet (PK-4 review, I1 — see the `*` cases below, and `buildSearchFilter`'s
+ * own "WHY imatch, NOT ilike" comment for the mechanism).
  *
  * So this suite proves the escaping empirically, against the real local stack, the same
  * way tests/gear-closet-schema.test.ts and tests/rls-owner.test.ts do: fixtures
@@ -93,6 +96,17 @@ beforeAll(async () => {
   // \ — the LIKE escape character itself, and PostgREST's own quote-escape introducer
   await insertGear('backslash-target', { name: 'Has a back\\slash inside' });
 
+  // * — PK-4 review, I1: PostgREST rewrites a literal `*` inside an `ilike`/`like`
+  // filter value into `%` before Postgres ever sees it, even backslash-escaped, so
+  // `?q=*` used to return the entire closet and `a*b` matched rows that never
+  // contained the typed text. The decoy is the whole point: a search for a bare `*`
+  // must find ONLY rows that literally contain an asterisk, not every row in the
+  // fixture table — if it ever returns the decoy (or anything else), the wildcard
+  // rewrite is back.
+  await insertGear('asterisk-target', { name: 'Rated 5 stars *', brand: 'Star Brand' });
+  await insertGear('asterisk-compound-target', { name: 'a*b literal asterisk' });
+  await insertGear('asterisk-decoy', { name: 'Decoy with no asterisk at all' });
+
   // " — ends a quoted value early in PostgREST's or=(...) grammar
   await insertGear('quote-target', { name: 'Random gear 4', brand: 'Has a quote"inside here' });
 
@@ -127,6 +141,19 @@ describe('buildSearchFilter finds the literal string and only the literal string
 
   it('a literal backslash is matched, not consumed as an escape introducer', async () => {
     expect(await searchLabels('back\\slash')).toEqual(['backslash-target']);
+  });
+
+  // PK-4 review, I1. The assertion this test file exists to prove: a bare `*` finds
+  // ONLY the rows that literally contain an asterisk, out of the FULL fixture set
+  // this file has inserted by this point (every other `it` block's target and decoy
+  // rows too) — not the whole table, which is exactly what PostgREST's ilike-only
+  // `*` → `%` rewrite used to return.
+  it('a literal asterisk does not become an ILIKE wildcard, and does not return the whole table', async () => {
+    expect(await searchLabels('*')).toEqual(['asterisk-compound-target', 'asterisk-target']);
+  });
+
+  it('a literal asterisk embedded mid-string is matched, not read as "zero or more of the preceding token"', async () => {
+    expect(await searchLabels('a*b')).toEqual(['asterisk-compound-target']);
   });
 
   it('a literal double quote does not end the PostgREST value early', async () => {

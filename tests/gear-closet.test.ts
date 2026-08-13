@@ -4,8 +4,9 @@ import { createUser, type TestUser } from './support/local-database';
 import { createPack } from './support/fixtures';
 import {
   GEAR_SELECT,
-  GEAR_TRASH_SELECT,
   applyGearQuery,
+  loadGearCloset,
+  loadGearTrash,
   parseGearQuery,
 } from '../src/lib/gear/query';
 import {
@@ -15,6 +16,14 @@ import {
   type GearStatus,
 } from '../src/lib/gear/fields';
 import { makeUndoToken } from '../src/lib/gear/bulk';
+import {
+  bulkSetCategory,
+  bulkSetStatus,
+  bulkSoftDelete,
+  permanentlyDeleteGear,
+  restoreFromTrash,
+  undoBulkDelete,
+} from '../src/lib/gear/mutations';
 import type { WeightUnit } from '../src/lib/units';
 import type { Database } from '../src/lib/database.types';
 
@@ -28,11 +37,21 @@ type GearInsert = Database['public']['Tables']['gear_items']['Insert'];
  * validation, `gear-search-escaping.test.ts` for the two-layer search escaping,
  * `gear-closet-schema.test.ts` for the three new columns. This file is the one that
  * proves those layers actually compose correctly against a REAL database, through
- * PostgREST, as a real authenticated user — the same path `src/pages/gear/index.astro`
- * and `src/pages/gear/trash.astro` take.
+ * PostgREST, as a real authenticated user — the same path `src/pages/gear/index.astro`,
+ * `src/pages/gear/[id].astro` and `src/pages/gear/trash.astro` take.
  *
- * Same care as the rest of this project's suites: every assertion is commented with
- * the specific bug it would catch, not merely what the code does.
+ * WHAT CHANGED IN THE PK-4 INDEPENDENT REVIEW (C3). This file used to assert against
+ * `closetQuery()`, a hand-written COPY of the page's query living only in this test
+ * file — so `applyGearQuery` and an inline `.eq('user_id', ...)` were pinned, but the
+ * page's OWN query (`vitest.config.ts` excludes `src/pages/`) and all four of its write
+ * statements were not. Mutation testing on the page proved it: deleting the owner
+ * filter, or swapping the bulk soft delete for a hard `.delete()`, left the full suite
+ * green. The fix moved the owner-scoped queries and every write into `src/lib/gear/`
+ * (`loadGearCloset`/`loadGearTrash` in `query.ts`, `loadGearOptions` in `options.ts`,
+ * every mutation in `mutations.ts`) so the pages and this file call the SAME functions.
+ * `closetQuery`/`trashQuery` below are now thin adapters over those real functions —
+ * not reimplementations of them — so a bug in the shared function is a bug this file
+ * sees too.
  *
  * SHARED-DATABASE DISCIPLINE. `vitest.config.ts` does not reset the database between
  * files, and this suite's own RLS tests establish that `gear_items_select_via_public_pack`
@@ -44,7 +63,7 @@ type GearInsert = Database['public']['Tables']['gear_items']['Insert'];
  */
 
 // ---------------------------------------------------------------------------
-// Helpers: the real query shapes the pages build, not hand-rolled stand-ins.
+// Helpers: thin adapters over the real functions, not copies of what they do.
 // ---------------------------------------------------------------------------
 
 function toSearchParams(entries: Record<string, string | string[]>): URLSearchParams {
@@ -60,46 +79,37 @@ function toSearchParams(entries: Record<string, string | string[]>): URLSearchPa
 }
 
 /**
- * THE REAL CLOSET QUERY — byte-for-byte the same shape `src/pages/gear/index.astro`
- * builds: `parseGearQuery` over a URL query string, then `applyGearQuery` over a
- * builder that is ALREADY scoped with `.eq('user_id', user.id)` before
- * `applyGearQuery` ever sees it. See that page's own comment on why the owner filter
- * has to be added by the caller rather than by `applyGearQuery` itself.
+ * THE REAL CLOSET QUERY — a direct call to `loadGearCloset` (`src/lib/gear/query.ts`),
+ * the exact function `src/pages/gear/index.astro` calls. All this adapter does is turn
+ * the test's ergonomic `{ q: '...', category: '...' }` shape into the `GearQuery`
+ * `loadGearCloset` actually takes, via `parseGearQuery` — the same translation the page
+ * itself performs from `Astro.url.searchParams`. There is no query-building logic of
+ * this file's own left to drift from the page.
  */
 function closetQuery(user: TestUser, entries: Record<string, string | string[]> = {}) {
-  const query = parseGearQuery(toSearchParams(entries));
-  return applyGearQuery(
-    user.client.from('gear_items').select(GEAR_SELECT, { count: 'exact' }).eq('user_id', user.id),
-    query,
-  );
+  return loadGearCloset(user.client, user.id, parseGearQuery(toSearchParams(entries)));
 }
 
 /**
- * THE BROKEN CLOSET QUERY — identical to `closetQuery` in every way except the one
- * line that matters: no `.eq('user_id', user.id)`. This is what a closet query would
- * look like if the fix described in the file header had never been written, or were
- * ever deleted by someone "simplifying" the query. It exists ONLY so the leak test
- * below can demonstrate the leak actually happens absent that filter, rather than
- * merely asserting the filtered query looks correct in isolation.
+ * THE BROKEN CLOSET QUERY — everything `closetQuery`/`loadGearCloset` does, built by
+ * hand from the same exported building blocks (`applyGearQuery`, `GEAR_SELECT`) MINUS
+ * the one line that matters: no `.eq('user_id', user.id)`. This is what a closet query
+ * would look like if `loadGearCloset` never added that filter, or someone "simplified"
+ * it away. It exists ONLY so the leak test below can demonstrate the leak actually
+ * happens absent that filter, rather than merely asserting the real function looks
+ * correct in isolation.
  */
 function leakyClosetQuery(user: TestUser, entries: Record<string, string | string[]> = {}) {
   const query = parseGearQuery(toSearchParams(entries));
   return applyGearQuery(user.client.from('gear_items').select(GEAR_SELECT), query);
 }
 
-/** The real trash query — byte-for-byte the same shape `src/pages/gear/trash.astro`
- *  builds, `.eq('user_id', ...)` included for the identical reason as `closetQuery`. */
-function trashQuery(user: TestUser) {
-  return user.client
-    .from('gear_items')
-    .select(GEAR_TRASH_SELECT)
-    .eq('user_id', user.id)
-    .not('deleted_at', 'is', null)
-    .order('deleted_at', { ascending: false })
-    .order('id', { ascending: true });
-}
+/** THE REAL TRASH QUERY — `loadGearTrash` (`src/lib/gear/query.ts`) itself, the exact
+ *  function `src/pages/gear/trash.astro` calls. Aliased rather than wrapped: there is
+ *  nothing for this file to add on top of it. */
+const trashQuery = loadGearTrash;
 
-function names(rows: { name: string }[] | null | undefined): string[] {
+function names(rows: readonly { name: string }[] | null | undefined): string[] {
   return (rows ?? []).map((row) => row.name);
 }
 
@@ -123,22 +133,24 @@ function jsonField(value: unknown, key: string): unknown {
 // intersected — so a signed-in user's plain `select * from gear_items` is answered
 // with "my own rows OR any row that sits on ANYONE's public pack", and nothing in
 // that policy cares whose session is asking. The fix was an explicit
-// `.eq('user_id', user.id)` on every closet read, which both `closetQuery` above and
-// the real `src/pages/gear/index.astro` carry.
+// `.eq('user_id', user.id)` on every closet read, which `loadGearCloset` and the real
+// `src/pages/gear/index.astro` (which now just calls it) both carry.
 //
 // WHY THIS TEST ASSERTS BOTH HALVES, NOT JUST "A DOES NOT SEE B'S ITEM". Asserting
 // only the safe half would still pass if `applyGearQuery` or RLS had been changed in
 // some unrelated way that happened to also hide the item — it would prove nothing
 // about WHICH line of code is doing the work. Asserting only the leaky half would
 // prove the vulnerability exists but not that the shipped fix closes it. Asserting
-// both — the exact same query, once with the owner filter and once without it, one
+// both — the exact same query, once through `loadGearCloset` (owner filter included)
+// and once through the hand-built `leakyClosetQuery` (owner filter removed), one
 // returning nothing and the other returning the item — is what pins the fix to the
-// one line responsible for it. Delete `.eq('user_id', user.id)` from `closetQuery`
-// (or from the real page) and this test fails; that is the entire reason it exists,
-// and why it belongs in this file rather than being read as redundant with the RLS
-// suite: `tests/rls-owner.test.ts` proves the POLICY layer behaves as designed
+// one line responsible for it. Delete `.eq('user_id', userId)` from `loadGearCloset`
+// itself — the function `src/pages/gear/index.astro` actually calls, not a stand-in —
+// and this test fails; that is the entire reason it exists, and why it belongs in
+// this file rather than being read as redundant with the RLS suite:
+// `tests/rls-owner.test.ts` proves the POLICY layer behaves as designed
 // (`gear_items_select_via_public_pack` does what its own comment says); this test
-// proves the APPLICATION layer does not lean on that policy alone for a page whose
+// proves the APPLICATION layer does not lean on that policy alone for a function whose
 // entire premise is "your own gear, and nothing else".
 describe('THE CROSS-USER LEAK — a closet query never returns another user’s gear, even when that gear sits on a public pack', () => {
   let victim: TestUser;
@@ -168,7 +180,7 @@ describe('THE CROSS-USER LEAK — a closet query never returns another user’s 
       .eq('id', leakedItemId);
   });
 
-  it('the real closet query excludes it; the same query with the owner filter removed includes it', async () => {
+  it('loadGearCloset excludes it; the same query with the owner filter removed includes it', async () => {
     // Scoped by search to the one distinctive row, so this assertion is not at the
     // mercy of pagination or of how much other public-pack fixture data this shared
     // database already holds by the time this file runs.
@@ -176,7 +188,7 @@ describe('THE CROSS-USER LEAK — a closet query never returns another user’s 
     expect(safe.error).toBeNull();
     // The bug this catches: "your gear closet" silently showing a stranger's item
     // the moment that stranger publishes a pack.
-    expect((safe.data ?? []).map((row) => row.id)).toEqual([]);
+    expect(safe.items.map((row) => row.id)).toEqual([]);
 
     const leaky = await leakyClosetQuery(attacker, { q: leakedBrand });
     expect(leaky.error).toBeNull();
@@ -304,9 +316,9 @@ describe('filters compose correctly', () => {
   });
 
   async function filteredNames(entries: Record<string, string | string[]>): Promise<string[]> {
-    const { data, error } = await closetQuery(filterUser, entries);
+    const { items, error } = await closetQuery(filterUser, entries);
     expect(error).toBeNull();
-    return names(data);
+    return names(items);
   }
 
   it('search AND category — "Bag" alone matches two items, category=Sleep must narrow to one', async () => {
@@ -369,9 +381,10 @@ describe('filters compose correctly', () => {
 });
 
 // Character-escaping edge cases (commas, %, _, quotes, parentheses, backslashes,
-// non-ASCII) are already covered exhaustively by tests/gear-search-escaping.test.ts
-// against buildSearchFilter directly — not duplicated here. This section only
-// confirms the higher-level behaviour: name-or-brand, case-insensitive, mid-word.
+// asterisks, non-ASCII) are already covered exhaustively by
+// tests/gear-search-escaping.test.ts against buildSearchFilter directly — not
+// duplicated here. This section only confirms the higher-level behaviour: name-or
+// -brand, case-insensitive, mid-word.
 describe('search matches name or brand, case-insensitively, mid-word', () => {
   let filterUser: TestUser;
 
@@ -393,9 +406,9 @@ describe('search matches name or brand, case-insensitively, mid-word', () => {
   });
 
   async function searchNames(q: string): Promise<string[]> {
-    const { data, error } = await closetQuery(filterUser, { q });
+    const { items, error } = await closetQuery(filterUser, { q });
     expect(error).toBeNull();
-    return names(data);
+    return names(items);
   }
 
   it('matches a substring in the middle of a name, not only a prefix', async () => {
@@ -456,9 +469,9 @@ describe('sorting', () => {
   });
 
   async function sortedNames(sort: GearSortKey, direction: 'asc' | 'desc'): Promise<string[]> {
-    const { data, error } = await closetQuery(sortUser, { sort, dir: direction });
+    const { items, error } = await closetQuery(sortUser, { sort, dir: direction });
     expect(error).toBeNull();
-    return names(data);
+    return names(items);
   }
 
   it('sorts by name, both directions', async () => {
@@ -557,12 +570,12 @@ describe('pagination walks every item exactly once, including when many rows tie
     const seen = new Map<string, number>();
 
     for (let page = 1; page <= pageCount; page++) {
-      const { data, error } = await closetQuery(paginationUser, {
+      const { items, error } = await closetQuery(paginationUser, {
         sort: 'weight',
         page: String(page),
       });
       expect(error).toBeNull();
-      for (const row of data ?? []) {
+      for (const row of items) {
         seen.set(row.name, (seen.get(row.name) ?? 0) + 1);
       }
     }
@@ -582,11 +595,124 @@ describe('pagination walks every item exactly once, including when many rows tie
 });
 
 // ---------------------------------------------------------------------------
-// 6. Soft delete, undo and the trash.
+// 5b. C2 (PK-4 review) — an over-range page clamps to the last real page.
+// ---------------------------------------------------------------------------
+//
+// PostgREST answers a `.range()` whose offset exceeds the row count with PGRST103
+// (416, "Requested range not satisfiable"), and an offset exactly EQUAL to the count
+// with a 206 and an empty array (I11). Both were previously treated as, or rendered
+// as, "no items" — the first as a load failure that replaced the whole page with an
+// error, the second as the "No items match these filters" empty state with no filters
+// active. `loadGearCloset` clamps `page` to `max(1, ceil(count / GEAR_PAGE_SIZE))`
+// BEFORE the ranged request ever runs, so neither case can reach PostgREST at all.
+describe('C2 — loadGearCloset clamps an over-range page to the last real page instead of erroring', () => {
+  let clampUser: TestUser;
+  const ITEM_COUNT = GEAR_PAGE_SIZE; // exactly one full page — the I11 boundary case
+
+  beforeAll(async () => {
+    clampUser = await createUser('gear-closet-clamp');
+    const rows = Array.from({ length: ITEM_COUNT }, (_, i) => ({
+      name: `Clamp Item ${String(i).padStart(3, '0')}`,
+      category: 'ClampFixture',
+    }));
+    const { error } = await clampUser.client.from('gear_items').insert(rows);
+    if (error) {
+      throw new Error(`Fixture failed to insert clamp items: ${error.message}`, { cause: error });
+    }
+  });
+
+  it('page 1 of exactly one full page returns every row, unclamped', async () => {
+    const result = await closetQuery(clampUser, { category: 'ClampFixture', page: '1' });
+    expect(result.error).toBeNull();
+    expect(result.page).toBe(1);
+    expect(result.count).toBe(ITEM_COUNT);
+    expect(result.items.length).toBe(ITEM_COUNT);
+  });
+
+  it('I11 — page 2 (offset exactly equal to the count) no longer returns an empty page; it clamps to page 1', async () => {
+    // Before the clamp: offset = (2-1)*50 = 50, count = 50 — PostgREST's 206-with-
+    // empty-array case, previously rendered as "No items match these filters" with
+    // zero filters actually excluding anything. After the clamp: page is reported as
+    // 1, and the full set of 50 rows comes back, not an empty page.
+    const result = await closetQuery(clampUser, { category: 'ClampFixture', page: '2' });
+    expect(result.error).toBeNull();
+    expect(result.page).toBe(1);
+    expect(result.count).toBe(ITEM_COUNT);
+    expect(result.items.length).toBe(ITEM_COUNT);
+  });
+
+  it('C2 — a wildly over-range page (PGRST103 territory) also clamps to page 1, not an error', async () => {
+    const result = await closetQuery(clampUser, { category: 'ClampFixture', page: '999' });
+    expect(result.error).toBeNull();
+    expect(result.page).toBe(1);
+    expect(result.items.length).toBe(ITEM_COUNT);
+  });
+
+  it('an over-range page against a filter matching NOTHING clamps to page 1 with an empty (not errored) result', async () => {
+    const result = await closetQuery(clampUser, { category: 'NoSuchCategoryAtAll', page: '5' });
+    expect(result.error).toBeNull();
+    expect(result.page).toBe(1);
+    expect(result.count).toBe(0);
+    expect(result.items).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5c. I2 (PK-4 review) — the weight boundary includes an exact match.
+// ---------------------------------------------------------------------------
+//
+// `4.4 oz` stores `weight_grams = 124.73790175` exactly in Postgres numeric, but
+// `toGrams(4.4, 'oz')` computes `124.73790175000002` in IEEE-754 double precision —
+// so an unmodified `>=` comparison excludes the very row that IS "4.4 oz and
+// heavier". `applyGearFilters` (query.ts) now widens both bounds by
+// `WEIGHT_COMPARISON_TOLERANCE_GRAMS` (1e-6 g) to close this without letting in a
+// row that is genuinely outside the requested range.
+describe('I2 — a weight-range boundary entered in a non-gram unit includes an item stored at exactly that weight', () => {
+  let weightUser: TestUser;
+
+  beforeAll(async () => {
+    weightUser = await createUser('gear-closet-weight-boundary');
+    await weightUser.client.from('gear_items').insert([
+      { name: 'Exactly 4.4oz Item', weight: 4.4, weight_unit: 'oz' },
+      { name: 'Lighter 4.3oz Item', weight: 4.3, weight_unit: 'oz' },
+      { name: 'Heavier 4.5oz Item', weight: 4.5, weight_unit: 'oz' },
+    ]);
+  });
+
+  it('wmin=4.4oz includes the item entered as exactly 4.4oz, not only strictly heavier ones', async () => {
+    const { items, error } = await closetQuery(weightUser, { wmin: '4.4', wunit: 'oz' });
+    expect(error).toBeNull();
+    // The bug this catches: toGrams(4.4, 'oz') rounds up in IEEE-754, so an
+    // unwidened `>=` would silently drop "Exactly 4.4oz Item" from its own boundary.
+    expect(names(items)).toEqual(['Exactly 4.4oz Item', 'Heavier 4.5oz Item']);
+  });
+
+  it('wmax=4.4oz includes the item entered as exactly 4.4oz, not only strictly lighter ones', async () => {
+    const { items, error } = await closetQuery(weightUser, { wmax: '4.4', wunit: 'oz' });
+    expect(error).toBeNull();
+    expect(names(items)).toEqual(['Exactly 4.4oz Item', 'Lighter 4.3oz Item']);
+  });
+
+  it('the tolerance does not widen the range enough to pull in a genuinely different weight', async () => {
+    // The negative control: a range tight enough to name only the exact item must
+    // still exclude both neighbours, one full tenth of an ounce away — proving the
+    // fix is a boundary-precision correction, not a loosened filter.
+    const { items, error } = await closetQuery(weightUser, {
+      wmin: '4.4',
+      wmax: '4.4',
+      wunit: 'oz',
+    });
+    expect(error).toBeNull();
+    expect(names(items)).toEqual(['Exactly 4.4oz Item']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Soft delete, undo and the trash — now through the real mutation functions.
 // ---------------------------------------------------------------------------
 
 describe('soft delete, undo and the trash', () => {
-  it('a soft-deleted item leaves the closet and appears in the trash; undo restores exactly its own batch, leaving an earlier batch untouched; the restored item keeps its original created_at', async () => {
+  it('bulkSoftDelete moves an item to the trash; undoBulkDelete restores exactly its own batch, leaving an earlier batch untouched; the restored item keeps its original created_at', async () => {
     const user = await createUser('gear-closet-trash');
 
     // An EARLIER batch, soft-deleted first with its own token. This is the batch
@@ -599,11 +725,9 @@ describe('soft delete, undo and the trash', () => {
       .single();
     const earlierId = earlier.data!.id as string;
     const earlierToken = makeUndoToken();
-    await user.client
-      .from('gear_items')
-      .update({ deleted_at: earlierToken })
-      .eq('id', earlierId)
-      .is('deleted_at', null);
+    const earlierDelete = await bulkSoftDelete(user.client, user.id, [earlierId], earlierToken);
+    expect(earlierDelete.error).toBeNull();
+    expect(earlierDelete.count).toBe(1);
 
     // A short real wait between the two batches: makeUndoToken has millisecond
     // resolution, and two batches minted back-to-back on a fast local stack could
@@ -622,37 +746,46 @@ describe('soft delete, undo and the trash', () => {
     const laterToken = makeUndoToken();
     expect(laterToken).not.toBe(earlierToken);
 
-    // The soft delete itself — mirrors src/pages/gear/index.astro's bulk delete
-    // exactly, including the `.is('deleted_at', null)` guard. That guard is what
-    // stops this UPDATE from re-stamping the EARLIER batch (already in the trash)
-    // with THIS batch's new token too, which would silently widen what undoing
-    // laterToken restores — see bulk.ts's own "THE CALLER MUST GUARD" comment.
-    await user.client
-      .from('gear_items')
-      .update({ deleted_at: laterToken })
-      .eq('id', laterId)
-      .is('deleted_at', null);
+    // The soft delete itself — bulkSoftDelete (src/lib/gear/mutations.ts), the EXACT
+    // function src/pages/gear/index.astro's bulk delete calls, guard included:
+    // `.is('deleted_at', null)` is what stops this UPDATE from re-stamping the
+    // EARLIER batch (already in the trash) with THIS batch's new token too, which
+    // would silently widen what undoing laterToken restores — see bulk.ts's own "THE
+    // CALLER MUST GUARD" comment.
+    const laterDelete = await bulkSoftDelete(user.client, user.id, [laterId], laterToken);
+    expect(laterDelete.error).toBeNull();
+    // I6 (PK-4 review): the affected count is read off the write's own result, not
+    // assumed from the length of the id list passed in.
+    expect(laterDelete.count).toBe(1);
 
     // 1a. Disappears from the closet.
     const closetAfterDelete = await closetQuery(user);
-    expect((closetAfterDelete.data ?? []).map((row) => row.id)).not.toContain(laterId);
+    expect(closetAfterDelete.items.map((row) => row.id)).not.toContain(laterId);
 
     // 1b. Appears in the trash, alongside the earlier batch.
-    const trashAfterDelete = await trashQuery(user);
+    const trashAfterDelete = await trashQuery(user.client, user.id);
     const trashIdsAfterDelete = (trashAfterDelete.data ?? []).map((row) => row.id);
     expect(trashIdsAfterDelete).toContain(laterId);
     expect(trashIdsAfterDelete).toContain(earlierId);
 
-    // 2. Undo the LATER batch only — mirrors the production undo statement exactly:
-    // `update gear_items set deleted_at = null where deleted_at = $token`.
-    await user.client.from('gear_items').update({ deleted_at: null }).eq('deleted_at', laterToken);
+    // 2. Undo the LATER batch only — undoBulkDelete, the exact function the closet
+    // list's undo POST branch calls.
+    const undo = await undoBulkDelete(user.client, user.id, laterToken);
+    expect(undo.error).toBeNull();
+    expect(undo.count).toBe(1);
+
+    // Undoing an ALREADY-undone token touches nothing — proving I6's count fix means
+    // what it says: a second, redundant undo reports 0, not a phantom 1.
+    const secondUndo = await undoBulkDelete(user.client, user.id, laterToken);
+    expect(secondUndo.error).toBeNull();
+    expect(secondUndo.count).toBe(0);
 
     // The earlier batch is untouched: still in the trash, still carrying ITS OWN
     // token. If the `.is('deleted_at', null)` guard on the delete above were
     // missing, the earlier item would already have been silently re-stamped with
     // laterToken and would incorrectly vanish from the trash here too — this is
     // exactly what that guard protects.
-    const trashAfterUndo = await trashQuery(user);
+    const trashAfterUndo = await trashQuery(user.client, user.id);
     const trashRowsAfterUndo = trashAfterUndo.data ?? [];
     expect(trashRowsAfterUndo.map((row) => row.id)).toEqual([earlierId]);
     // PostgREST serialises timestamptz with a "+00:00" offset rather than the "Z"
@@ -670,9 +803,70 @@ describe('soft delete, undo and the trash', () => {
     // real "date added" — see the gear-closet migration's own reasoning. A wrong
     // created_at here would mean that reasoning was not actually honoured.
     const closetAfterUndo = await closetQuery(user);
-    const restored = (closetAfterUndo.data ?? []).find((row) => row.id === laterId);
+    const restored = closetAfterUndo.items.find((row) => row.id === laterId);
     expect(restored).toBeDefined();
     expect(restored?.created_at).toBe(laterCreatedAt);
+  });
+
+  it('restoreFromTrash and permanentlyDeleteGear are owner-scoped: a stranger cannot restore or purge another visitor’s trashed item', async () => {
+    const owner = await createUser('gear-closet-mutation-owner');
+    const stranger = await createUser('gear-closet-mutation-stranger');
+
+    const created = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Owner-only trashed item' })
+      .select('id')
+      .single();
+    const itemId = created.data!.id as string;
+    const token = makeUndoToken();
+    const softDelete = await bulkSoftDelete(owner.client, owner.id, [itemId], token);
+    expect(softDelete.count).toBe(1);
+
+    // A stranger's restoreFromTrash, scoped to the STRANGER's own id, touches
+    // nothing — both RLS (gear_items_update_own) and the explicit
+    // `.eq('user_id', userId)` this function adds refuse it independently.
+    const strangerRestore = await restoreFromTrash(stranger.client, stranger.id, [itemId]);
+    expect(strangerRestore.error).toBeNull();
+    expect(strangerRestore.count).toBe(0);
+
+    // Still in the owner's trash, unaffected by the stranger's attempt.
+    const ownerTrash = await trashQuery(owner.client, owner.id);
+    expect((ownerTrash.data ?? []).map((row) => row.id)).toContain(itemId);
+
+    // Same story for a permanent delete: a stranger's call touches nothing, and the
+    // owner's own row survives to prove it.
+    const strangerPurge = await permanentlyDeleteGear(stranger.client, stranger.id, [itemId]);
+    expect(strangerPurge.error).toBeNull();
+    expect(strangerPurge.count).toBe(0);
+
+    const ownerTrashAfter = await trashQuery(owner.client, owner.id);
+    expect((ownerTrashAfter.data ?? []).map((row) => row.id)).toContain(itemId);
+  });
+
+  it('bulkSetCategory and bulkSetStatus report the actual affected count, not the requested one', async () => {
+    const user = await createUser('gear-closet-mutation-counts');
+    const created = await user.client
+      .from('gear_items')
+      .insert({ name: 'Recategorised Item', category: 'Old' })
+      .select('id')
+      .single();
+    const itemId = created.data!.id as string;
+
+    const setCategory = await bulkSetCategory(user.client, user.id, [itemId], 'New');
+    expect(setCategory.error).toBeNull();
+    expect(setCategory.count).toBe(1);
+
+    const setStatus = await bulkSetStatus(user.client, user.id, [itemId], 'retired');
+    expect(setStatus.error).toBeNull();
+    expect(setStatus.count).toBe(1);
+
+    // Soft-delete it, then try to bulk-set its category again — `.is('deleted_at',
+    // null)` guards both writes, so a trashed item reports 0 affected, not 1.
+    const token = makeUndoToken();
+    await bulkSoftDelete(user.client, user.id, [itemId], token);
+    const setCategoryAfterTrash = await bulkSetCategory(user.client, user.id, [itemId], 'Ignored');
+    expect(setCategoryAfterTrash.error).toBeNull();
+    expect(setCategoryAfterTrash.count).toBe(0);
   });
 });
 
@@ -681,20 +875,21 @@ describe('soft delete, undo and the trash', () => {
 // ---------------------------------------------------------------------------
 
 describe('a permanent delete still freezes the pack it sits on', () => {
-  it('DELETE fires gear_items_snapshot_before_delete: the pack_items row survives, gear_item_id becomes null, and the snapshot captures the item', async () => {
+  it('permanentlyDeleteGear fires gear_items_snapshot_before_delete: the pack_items row survives, gear_item_id becomes null, and the snapshot captures the item', async () => {
     const user = await createUser('gear-closet-freeze');
     const pack = await createPack(user, { visibility: 'private', itemCount: 1 });
     const gearItemId = pack.gearItemIds[0];
     const packItemId = pack.itemIds[0];
 
-    // A REAL delete, not a soft delete — this proves the soft-delete work in this
-    // ticket did not quietly change the pre-existing freeze semantics for the case
-    // where a gear item is actually removed from the database.
-    const { error: deleteError } = await user.client
-      .from('gear_items')
-      .delete()
-      .eq('id', gearItemId);
+    // A REAL delete, through the real mutations.ts function — not a soft delete —
+    // proving the soft-delete work in this ticket did not quietly change the
+    // pre-existing freeze semantics for the case where a gear item is actually
+    // removed from the database.
+    const { error: deleteError, count } = await permanentlyDeleteGear(user.client, user.id, [
+      gearItemId,
+    ]);
     expect(deleteError).toBeNull();
+    expect(count).toBe(1);
 
     const { data, error: readError } = await user.client
       .from('pack_items')
@@ -753,7 +948,7 @@ describe('500 items remain responsive', () => {
     });
 
     const start = performance.now();
-    const { data, error, count } = await closetQuery(user, {
+    const { items, error, count, page } = await closetQuery(user, {
       category: 'Shelter',
       sort: 'weight',
       dir: 'asc',
@@ -762,24 +957,29 @@ describe('500 items remain responsive', () => {
     const elapsedMs = performance.now() - start;
 
     expect(error).toBeNull();
+    expect(page).toBe(2);
     // The bug this catches: a missing .range() (returns every match, or the wrong
     // slice), a broken tiebreaker at this scale, or the weight filter/sort not
     // actually composing over 500 rows the way section 2 already proved they do at
     // fixture scale.
-    expect(names(data)).toEqual(expectedPage2);
+    expect(names(items)).toEqual(expectedPage2);
     // The list page's own pager text ("Showing X-Y of Z", total page count) is
     // computed straight from this count — a wrong number here is a wrong pager, not
     // merely a display nit.
     expect(count).toBe(100);
 
     // A GENEROUS ceiling, not a performance SLO — this is "not pathological", not a
-    // promise about milliseconds. A single scoped, sorted, range-limited query over
-    // 500 rows should take low tens of milliseconds on this local stack; 3000ms
-    // leaves enormous headroom for a slow or loaded CI machine while still catching
-    // the class of regression this test exists for — an accidental full-table scan,
-    // a per-row N+1, or a missing .range() that fetches and paginates 500 rows in
-    // application memory instead of asking Postgres to.
-    expect(elapsedMs).toBeLessThan(3000);
+    // promise about milliseconds. loadGearCloset now issues TWO requests per render
+    // (an unranged count, then the ranged page — see its own C2 comment for why),
+    // so the ceiling is doubled from the single-request version's 3000ms to keep the
+    // same headroom per request while accounting for the extra round trip. A single
+    // scoped, sorted, range-limited query over 500 rows should take low tens of
+    // milliseconds on this local stack; 6000ms leaves enormous headroom for a slow
+    // or loaded CI machine while still catching the class of regression this test
+    // exists for — an accidental full-table scan, a per-row N+1, or a missing
+    // .range() that fetches and paginates 500 rows in application memory instead of
+    // asking Postgres to.
+    expect(elapsedMs).toBeLessThan(6000);
     console.log(
       `[gear-closet] 500-item filtered/sorted/paginated query: ${elapsedMs.toFixed(1)}ms`,
     );

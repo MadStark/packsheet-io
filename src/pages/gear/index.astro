@@ -11,10 +11,9 @@ import { createAuthClient } from '../../lib/auth';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
 import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import {
-  GEAR_SELECT,
-  applyGearQuery,
   gearListPath,
   gearQueryToSearchParams,
+  loadGearCloset,
   parseGearQuery,
   sortLinkSearchParams,
   type GearQuery,
@@ -31,7 +30,13 @@ import {
   parseUndoCount,
   parseUndoToken,
 } from '../../lib/gear/bulk';
-import { extractGearOptions } from '../../lib/gear/options';
+import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
+import {
+  bulkSetCategory,
+  bulkSetStatus,
+  bulkSoftDelete,
+  undoBulkDelete,
+} from '../../lib/gear/mutations';
 import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
 import { WEIGHT_UNITS } from '../../lib/units';
 
@@ -80,21 +85,32 @@ if (Astro.request.method === 'POST') {
   if (rawIntent === UNDO_INTENT) {
     // Reject anything malformed rather than passing it to a query — parseUndoToken is
     // total, so a missing, tampered or merely-plausible token all become `null` here
-    // rather than reaching `.eq('deleted_at', ...)`.
+    // rather than reaching undoBulkDelete.
     const rawToken = form.get(UNDO_PARAM);
     const token = parseUndoToken(typeof rawToken === 'string' ? rawToken : null);
-    if (token !== null) {
-      await client.from('gear_items').update({ deleted_at: null }).eq('deleted_at', token);
+    if (token === null) {
+      // Nothing valid to act on: redirect to a clean URL the same way a successful
+      // undo does, rather than surfacing an error for input that was never trusted
+      // enough to reach a query in the first place.
+      return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
     }
-    // Redirect either way: a stale or forged token undoes nothing, but the visitor
-    // still gets a clean URL back — the SAME filtered/sorted/paged view the undo
-    // banner was shown on, not a bare GEAR_PATH. Astro.url.searchParams here still
-    // carries `undo`/`count` alongside whatever real filter was active; parsing it
-    // with parseGearQuery and handing the result to gearListPath is what drops those
-    // two (so a refresh cannot re-trigger the undo) while keeping every other filter
-    // — see gearListPath's own comment for why this is done through GearQuery rather
-    // than deleting `undo`/`count` off a copied URLSearchParams by name.
-    return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
+
+    // I5 (PK-4 review): the write's result is now checked like every other write on
+    // this page, rather than discarded — an undo that fails at the database no longer
+    // looks byte-identical to one that succeeded.
+    const { error } = await undoBulkDelete(client, user.id, token);
+    if (error) {
+      bulkError = GENERIC_WRITE_ERROR;
+    } else {
+      // Redirect to the SAME filtered/sorted/paged view the undo banner was shown on,
+      // not a bare GEAR_PATH. Astro.url.searchParams here still carries `undo`/`count`
+      // alongside whatever real filter was active; parsing it with parseGearQuery and
+      // handing the result to gearListPath is what drops those two (so a refresh
+      // cannot re-trigger the undo) while keeping every other filter — see
+      // gearListPath's own comment for why this is done through GearQuery rather than
+      // deleting `undo`/`count` off a copied URLSearchParams by name.
+      return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
+    }
   }
 
   const result = parseBulkAction(form);
@@ -115,14 +131,12 @@ if (Astro.request.method === 'POST') {
         pendingDelete = { ids };
       } else {
         const token = makeUndoToken();
-        // Guarded with .is('deleted_at', null): re-submitting an already-processed
-        // delete must not re-stamp rows an earlier batch already put in the trash with
-        // THIS batch's new token — see bulk.ts's own "THE CALLER MUST GUARD" comment.
-        const { error } = await client
-          .from('gear_items')
-          .update({ deleted_at: token })
-          .in('id', ids)
-          .is('deleted_at', null);
+        // bulkSoftDelete (src/lib/gear/mutations.ts) carries the same
+        // .is('deleted_at', null) guard the inline write here used to: re-submitting
+        // an already-processed delete must not re-stamp rows an earlier batch already
+        // put in the trash with THIS batch's new token — see bulk.ts's own "THE CALLER
+        // MUST GUARD" comment.
+        const { error, count } = await bulkSoftDelete(client, user.id, ids, token);
         if (error) {
           bulkError = GENERIC_WRITE_ERROR;
         } else {
@@ -133,18 +147,19 @@ if (Astro.request.method === 'POST') {
           // forward an EARLIER, unrelated undo/count pair that happened to already be
           // sitting in the current URL (e.g. a second bulk delete performed while a
           // previous delete's undo banner was still showing).
+          //
+          // I6 (PK-4 review): `count` is the number of rows bulkSoftDelete actually
+          // touched, read off its own `.select('id')` — not `ids.length`, the number
+          // the visitor merely asked for. A stale selection racing another tab now
+          // reports honestly instead of claiming every requested id was moved.
           const redirectParams = gearQueryToSearchParams(parseGearQuery(Astro.url.searchParams));
           redirectParams.set(UNDO_PARAM, token);
-          redirectParams.set(UNDO_COUNT_PARAM, String(ids.length));
+          redirectParams.set(UNDO_COUNT_PARAM, String(count));
           return Astro.redirect(`${GEAR_PATH}?${redirectParams.toString()}`, 303);
         }
       }
     } else if (action.intent === BULK_INTENT.setCategory) {
-      const { error } = await client
-        .from('gear_items')
-        .update({ category: action.category })
-        .in('id', ids)
-        .is('deleted_at', null);
+      const { error } = await bulkSetCategory(client, user.id, ids, action.category);
       if (error) {
         bulkError = GENERIC_WRITE_ERROR;
       } else {
@@ -158,11 +173,7 @@ if (Astro.request.method === 'POST') {
         return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
     } else if (action.intent === BULK_INTENT.setStatus) {
-      const { error } = await client
-        .from('gear_items')
-        .update({ status: action.status })
-        .in('id', ids)
-        .is('deleted_at', null);
+      const { error } = await bulkSetStatus(client, user.id, ids, action.status);
       if (error) {
         bulkError = GENERIC_WRITE_ERROR;
       } else {
@@ -185,42 +196,30 @@ if (Astro.request.method === 'POST') {
 // ---------------------------------------------------------------------------
 const query: GearQuery = parseGearQuery(Astro.url.searchParams);
 
-// BOTH queries below are scoped with an explicit `.eq('user_id', user.id)`, and that
-// is not belt-and-braces — it is load-bearing. `gear_items` carries TWO permissive
-// SELECT policies (core_schema.sql): `gear_items_select_own` (owner only) and
-// `gear_items_select_via_public_pack`, granted to `anon, authenticated` alike so a
-// shared pack link can render the gear behind it. RLS policies are UNIONED, so a
-// plain `.select()` relying on RLS alone would return this visitor's own rows OR any
-// row that happens to sit on ANYONE's public pack — "Your gear closet" silently
-// showing a stranger's gear the moment that stranger publishes a pack. `applyGearQuery`
-// deliberately does not add this filter itself (see its own module comment on why it
-// only ever borrows an authenticated client rather than knowing who that client is
-// for); the page is what knows the signed-in visitor's id, so the page is where this
-// has to be added. Mutations further down do not need the same filter: `gear_items_
-// update_own`/`_delete_own` are scoped to `user_id = auth.uid()` with no "via public
-// pack" counterpart, so a write against another visitor's row already affects zero
-// rows under RLS alone.
-const { data: optionRows, error: optionsError } = await client
-  .from('gear_items')
-  .select('category, brand')
-  .eq('user_id', user.id)
-  .is('deleted_at', null);
-
-const {
-  data: rows,
-  error: listError,
-  count,
-} = await applyGearQuery(
-  client.from('gear_items').select(GEAR_SELECT, { count: 'exact' }).eq('user_id', user.id),
-  query,
-);
+// Both queries are owner-scoped and live in src/lib/gear/ now — loadGearOptions
+// (src/lib/gear/options.ts) and loadGearCloset (src/lib/gear/query.ts) — so a test can
+// reach the `.eq('user_id', user.id)` scoping directly rather than only through a page
+// vitest.config.ts excludes. See loadGearCloset's own module comment for why that
+// filter is load-bearing rather than belt-and-braces (the short version: gear_items
+// carries a second SELECT policy, granted to authenticated visitors too, that a bare
+// `.select()` would UNION in — "your gear closet" silently showing a stranger's gear
+// the moment that stranger publishes a pack).
+//
+// loadGearCloset ALSO performs the C2 (PK-4 review) page clamp: `page` below is
+// whatever page was actually queried, which may be LOWER than `query.page` if the
+// visitor's own `?page=` was past the end of the result set — see that function's own
+// comment for why this makes an over-range page land on the last real page instead of
+// PGRST103's "Requested range not satisfiable" replacing the whole render with an error
+// that could never resolve.
+const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
+const { items: rows, error: listError, count, page } = await loadGearCloset(client, user.id, query);
 
 const loadError = optionsError || listError ? GENERIC_LOAD_ERROR : null;
 const gearOptions = extractGearOptions(optionRows ?? []);
 const items = rows ?? [];
 const totalCount = count ?? 0;
 const totalPages = Math.max(1, Math.ceil(totalCount / GEAR_PAGE_SIZE));
-const rangeStart = totalCount === 0 ? 0 : (query.page - 1) * GEAR_PAGE_SIZE + 1;
+const rangeStart = totalCount === 0 ? 0 : (page - 1) * GEAR_PAGE_SIZE + 1;
 const rangeEnd = totalCount === 0 ? 0 : rangeStart + items.length - 1;
 
 // "The closet has no active items at all" is exactly optionRows being empty: that
@@ -277,8 +276,8 @@ function sortIndicator(key: GearSortKey): string {
   return query.direction === 'asc' ? ' ▲' : ' ▼';
 }
 
-function pageHref(page: number): string {
-  return `${GEAR_PATH}?${gearQueryToSearchParams({ ...query, page }).toString()}`;
+function pageHref(target: number): string {
+  return `${GEAR_PATH}?${gearQueryToSearchParams({ ...query, page: target }).toString()}`;
 }
 ---
 
@@ -288,7 +287,23 @@ function pageHref(page: number): string {
 >
   <GearNav />
   <main class="mx-auto max-w-5xl px-6 py-10">
-    <h1 class="text-3xl">Your gear closet</h1>
+    <div class="flex items-center justify-between gap-4">
+      <h1 class="text-3xl">Your gear closet</h1>
+      {
+        /* C1 (PK-4 review): a primary action in the heading row, reachable regardless
+           of whether the closet is empty or full — GearNav's own "Add item" link
+           covers every gear page, and this is the closet list's own, more prominent
+           copy of the same route, matching the empty state's already-established
+           border-blue-deep button styling rather than inventing a second vocabulary
+           for "add an item". */
+      }
+      <a
+        href={GEAR_NEW_PATH}
+        class="border-blue-deep text-blue-deep hover:bg-blue-tint shrink-0 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+      >
+        Add item
+      </a>
+    </div>
 
     {
       undoToken && (
@@ -349,7 +364,7 @@ function pageHref(page: number): string {
             ))}
             <button
               type="submit"
-              class="bg-rust rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-95"
+              class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"
             >
               Move to trash
             </button>
@@ -718,17 +733,17 @@ function pageHref(page: number): string {
                   Showing {rangeStart}–{rangeEnd} of {totalCount}
                 </p>
                 <div class="flex gap-2">
-                  {query.page > 1 && (
+                  {page > 1 && (
                     <a
-                      href={pageHref(query.page - 1)}
+                      href={pageHref(page - 1)}
                       class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm transition-colors"
                     >
                       Previous
                     </a>
                   )}
-                  {query.page < totalPages && (
+                  {page < totalPages && (
                     <a
-                      href={pageHref(query.page + 1)}
+                      href={pageHref(page + 1)}
                       class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm transition-colors"
                     >
                       Next

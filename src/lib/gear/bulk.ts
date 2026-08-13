@@ -11,11 +11,12 @@
  * only runs as part of rendering a route.
  *
  * WHAT THIS MODULE DOES NOT DO. It does not run a query. `parseBulkAction` decides
- * WHICH ids and WHAT action; the calling page is responsible for issuing the actual
- * `.update()`/`.delete()` against `gear_items`, scoped by RLS to that visitor's own
- * rows the same way every other write in this product is. See "THE UNDO TOKEN" below
- * for the one piece of query shape this module does dictate, because getting it wrong
- * silently breaks Undo rather than failing loudly.
+ * WHICH ids and WHAT action; `src/lib/gear/mutations.ts` is what issues the actual
+ * `.update()`/`.delete()` against `gear_items` for both the pages and their tests,
+ * scoped by an explicit `.eq('user_id', …)` alongside RLS the same way every other
+ * write in this product is (see that module's own comment for why both). See "THE
+ * UNDO TOKEN" below for the one piece of query shape this module does dictate, because
+ * getting it wrong silently breaks Undo rather than failing loudly.
  */
 
 import { isGearStatus, type GearStatus } from './fields';
