@@ -9,6 +9,10 @@ import {
   SIGN_UP_PATH,
   UPDATE_PASSWORD_PATH,
 } from './lib/auth-routes';
+// Dependency-free, same footing as ./lib/auth-routes — see that file's own module
+// comment, and src/lib/gear/routes.ts's, for why a path constant lives one door away
+// from the auth choke point rather than inside it.
+import { GEAR_PATH } from './lib/gear/routes';
 
 /**
  * Every path this middleware treats as "an auth route" for the caching rule below — not
@@ -55,6 +59,17 @@ const AUTH_ROUTE_PATHS: readonly string[] = [
   // second to the next visitor is the failure this rule exists to prevent.
   FORGOT_PASSWORD_PATH,
   UPDATE_PASSWORD_PATH,
+  // PK-4's gear closet, added as the same kind of deliberate line as the two above
+  // rather than inherited from a prefix that did not previously exist. GEAR_PATH
+  // (`/gear`) is itself session-shaped — it lists, filters and bulk-edits the
+  // signed-in visitor's own gear_items, and redirects a signed-out visitor to sign-in
+  // before rendering anything else — and every sub-path this ticket and the ones after
+  // it add (`/gear/new`, `/gear/<id>`, `/gear/trash`) is exactly the kind of thing this
+  // list's own comment says belongs under an enumerated root: a page where a shared
+  // cache handing one visitor's closet to the next visitor is the failure this rule
+  // exists to prevent. One line here covers all of them, the same way ACCOUNT_PATH
+  // covers every future `/account/` sub-page without each one earning its own entry.
+  GEAR_PATH,
 ];
 
 /** The path itself, or anything beneath it. `${path}/` and not `path` as a bare prefix:
