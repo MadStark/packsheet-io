@@ -5,32 +5,40 @@
 // drifting apart on which glyph means what.
 //
 // KEEP THIS A PLAIN .astro COMPONENT. It takes no `client:*` directive anywhere it is
-// used and must never gain one: an icon is static markup, and hydrating it would pull a
-// Vue island onto a page whose whole point is to render without one — the same
-// "no hydration" rule GearNav and GearItemForm hold themselves to, and the one
-// tests/anonymous-read-path.test.ts enforces at build time for the anonymous read path.
-// For the same reason this does not import `lucide-vue-next`, which the repo carries as
-// a dependency for other, hydrated parts of the app: importing a Vue component library
-// here to draw a shape that a dozen lines of inline `<path>` can draw just as well would
-// buy nothing and risk everything, so the SVGs below are written out by hand instead.
+// used and must never gain one — the same "no hydration" rule GearNav and GearItemForm
+// hold themselves to: this icon is static markup, every field on this form works with
+// JavaScript disabled, and nothing about a status glyph needs a browser-side decision to
+// render. For the same reason this does not import `lucide-vue-next`, which the repo
+// carries as a dependency for other, hydrated parts of the app: importing a Vue
+// component library here to draw a shape that a dozen lines of inline `<path>` can draw
+// just as well would buy nothing and risk everything, so the SVGs below are written out
+// by hand instead.
 //
-// STATUS MUST NEVER BE CONVEYED BY COLOUR ALONE, and that is the reason this component
-// has two rendering modes rather than one. When the icon sits beside visible text that
-// already names the status — this ticket's three-way radio group, where the label reads
+// STATUS MUST NEVER BE CONVEYED BY COLOUR ALONE, and that accessibility contract is why
+// this component has two rendering modes rather than one, not a preference for either.
+// An icon that is the ONLY indicator of status on the page must carry its own accessible
+// name, exactly as any icon-only control would — so when nothing else nearby names the
+// status, the caller renders the non-decorative mode below (`role="img"` plus a
+// `<title>`). When the icon instead sits beside visible text that already names the
+// status — this ticket's three-way radio group, where the label reads
 // "Owned"/"Wishlist"/"Retired" right next to the glyph — a second accessible name on the
-// SVG is duplicate noise a screen reader would read out twice for the same radio option,
-// so the caller passes `decorative` and the icon disappears from the accessibility tree
-// entirely. When the icon stands alone as the ONLY indication of status — PK-62's closet
-// list, where a row has no adjacent "Wishlist" text — colour alone would fail exactly the
-// rule this paragraph opens with, so the icon must carry its own accessible name instead,
-// which is the non-decorative mode below.
+// SVG would be duplicate noise a screen reader reads out twice for the same radio
+// option, so the caller passes `decorative` and the icon disappears from the
+// accessibility tree entirely. PK-62's closet list, where a row has no adjacent
+// "Wishlist" text next to its icon, is expected to be the first caller of the
+// non-decorative mode — an example of when the contract applies, not the reason it
+// exists.
 //
-// PK-62 WILL RENDER NO ICON AT ALL FOR `owned`, and that is deliberate, not an
-// inconsistency with this file. `owned` is the closet's default, unmarked state — every
-// item is assumed owned unless flagged otherwise — so the closet list only needs an icon
-// for the two exceptions, `wishlist` and `retired`. The `owned` icon defined here exists
-// for THIS form's three-way selector, where every option needs a glyph because all three
-// are presented as equal, explicit choices rather than one being the silent default.
+// EVERY STATUS GETS A GLYPH HERE, `owned` INCLUDED, because this form's own radio group
+// presents all three statuses as equal, explicit choices — nothing here treats `owned`
+// as a silent default the way a list row might, so an icon-less "owned" option would
+// stand out as the one choice with no visual marker next to it. That holds regardless of
+// what any other caller of this component decides to do with the `owned` icon.
+// PK-62, as scoped, is expected to render no icon at all for `owned` on the closet list:
+// `owned` is that list's default, unmarked state, so an icon there is expected to be
+// needed only for the two exceptions, `wishlist` and `retired`. That is a decision for
+// PK-62's own page to make, not a fact this file enforces — the `owned` icon stays
+// defined here regardless, for this form's use.
 import { GEAR_STATUS_LABELS, type GearStatus } from '../lib/gear/fields';
 
 interface Props {

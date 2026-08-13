@@ -22,11 +22,7 @@ import {
 import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
 import { UNDO_COUNT_PARAM, UNDO_PARAM, makeUndoToken } from '../../lib/gear/bulk';
 import { softDeleteGearItem, updateGearItem } from '../../lib/gear/mutations';
-import {
-  gearReturnPath,
-  gearReturnPathFromForm,
-  gearReturnPathOrNull,
-} from '../../lib/gear/return-path';
+import { gearReturnPathFromFormOrNull, gearReturnPathOrNull } from '../../lib/gear/return-path';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -71,23 +67,6 @@ const categories = optionsError ? [] : extractGearOptions(optionRows ?? []).cate
 const GEAR_ITEM_INTENT = { edit: 'edit-item', delete: 'delete-item' } as const;
 const DELETE_CONFIRM_FIELD = 'confirm';
 
-/**
- * Reads the raw `next` carrier off `form`/`url`, mirroring `gearReturnPathFromForm`'s
- * (`src/lib/gear/return-path.ts`) field-then-query precedence, but handing back the
- * UNVALIDATED string rather than the already-defaulted destination that function
- * returns. Needed only for the successful-edit fork below: that fork has to tell "a
- * valid return target was carried" apart from "nothing usable was carried", and
- * `gearReturnPathFromForm` itself has already collapsed both "absent" and "refused"
- * into `GEAR_PATH` by the time it returns — exactly the distinction `gearReturnPathOrNull`
- * exists to preserve. Duplicating the two-line read here (rather than adding a second
- * exported function to return-path.ts for one call site) keeps the module's public
- * surface to the three functions the ticket asks for.
- */
-function rawNextCarrier(form: FormData, url: URL): string | null {
-  const field = form.get(NEXT_PARAM);
-  return typeof field === 'string' ? field : url.searchParams.get(NEXT_PARAM);
-}
-
 let formErrors: Readonly<Record<string, string>> = {};
 let formValuesOverride: GearFormValues | null = null;
 let writeError: string | null = null;
@@ -95,11 +74,14 @@ let pendingDelete = false;
 
 // The return-to-caller destination (PK-63) — "saving returns you where you were", and
 // Cancel agrees with it: both this GET render's cancelHref/next and a POSTed edit's
-// validation-failure re-render use the same value. Computed up front from the query
-// string, then overwritten from the form's own carried value once a POST body is
-// available — see gearReturnPathFromForm's own comment for why the form field takes
-// precedence over the query string that produced this same page.
-let returnPath = gearReturnPath(Astro.url.searchParams.get(NEXT_PARAM));
+// validation-failure re-render use the same value. `null` means "nothing usable was
+// carried" — no `?next=` on this GET, or a refused/absent value on a POST — which the
+// successful-edit fork below has to tell apart from a real carried destination; see
+// that fork's own comment. Computed up front from the query string, then overwritten
+// from the form's own carried value once a POST body is available — see
+// gearReturnPathFromFormOrNull's own comment for why the form field takes precedence
+// over the query string that produced this same page.
+let returnPath: string | null = gearReturnPathOrNull(Astro.url.searchParams.get(NEXT_PARAM));
 
 // ---------------------------------------------------------------------------
 // POST: save an edit, or soft-delete (with the same two-step reveal the closet list's
@@ -109,7 +91,7 @@ let returnPath = gearReturnPath(Astro.url.searchParams.get(NEXT_PARAM));
 // ---------------------------------------------------------------------------
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
-  returnPath = gearReturnPathFromForm(form, Astro.url);
+  returnPath = gearReturnPathFromFormOrNull(form, Astro.url);
   const intent = form.get('intent');
 
   if (intent === GEAR_ITEM_INTENT.delete) {
@@ -166,18 +148,17 @@ if (Astro.request.method === 'POST') {
         // PK-63: "saving returns you where you were" — but only when there IS a
         // "where you were" to return to. If a valid return target was carried on this
         // submission (via the hidden `next` field or the query string that rendered the
-        // form — see rawNextCarrier above), Cancel and Save now agree: both send the
-        // visitor back to the same closet view. If NOT — this page was reached
-        // directly, with no `?next=` anywhere — this keeps today's exact behaviour
+        // form), Cancel and Save now agree: both send the visitor back to the same
+        // closet view. If NOT — this page was reached directly, with no `?next=`
+        // anywhere, so `returnPath` is `null` — this keeps today's exact behaviour
         // instead: redirect to the item's own page with `?updated=1` and show "Saved."
         // there. That is a deliberate fork, not an oversight: bouncing a visitor who
         // has nowhere to go back to into the closet list would silently swallow the
         // "Saved." confirmation this page has always given a visitor who reached it
         // directly (a bookmark, a shared link, GearNav), trading a real feedback
         // message for a redirect nobody asked for.
-        const carriedReturnPath = gearReturnPathOrNull(rawNextCarrier(form, Astro.url));
-        if (carriedReturnPath !== null) {
-          return Astro.redirect(carriedReturnPath, 303);
+        if (returnPath !== null) {
+          return Astro.redirect(returnPath, 303);
         }
         return Astro.redirect(`${gearItemPath(id)}?updated=1`, 303);
       }
@@ -257,10 +238,10 @@ const updated = Astro.url.searchParams.get('updated') === '1';
         values={values}
         errors={formErrors}
         submitLabel="Save changes"
-        cancelHref={returnPath}
+        cancelHref={returnPath ?? GEAR_PATH}
         intentField={{ name: 'intent', value: GEAR_ITEM_INTENT.edit }}
         categories={categories}
-        next={returnPath}
+        next={returnPath ?? undefined}
       />
     </div>
 

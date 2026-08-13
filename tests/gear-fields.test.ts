@@ -27,12 +27,15 @@ describe('GEAR_STATUS_MEANINGS', () => {
   // Guards against a meaning silently regressing into a synonym for its own label — the
   // whole point of the tooltip is to add information the visible label does not already
   // carry (see this constant's own "NOT A SUBSTITUTE FOR GEAR_STATUS_LABELS" comment).
+  // Asserted directly against what "a full sentence" actually means — ends with a full
+  // stop, contains a space (so it is more than one word) — rather than a length
+  // comparison against GEAR_STATUS_LABELS, which a short-but-still-a-sentence meaning
+  // could fail even while being perfectly fine copy.
   it('is a full sentence, not a repeat of the short GEAR_STATUS_LABELS text', () => {
     for (const status of GEAR_STATUSES) {
       expect(GEAR_STATUS_MEANINGS[status]).not.toBe(GEAR_STATUS_LABELS[status]);
-      expect(GEAR_STATUS_MEANINGS[status].length).toBeGreaterThan(
-        GEAR_STATUS_LABELS[status].length,
-      );
+      expect(GEAR_STATUS_MEANINGS[status]).toMatch(/\.$/);
+      expect(GEAR_STATUS_MEANINGS[status]).toContain(' ');
     }
   });
 });

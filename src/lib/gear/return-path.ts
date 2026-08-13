@@ -12,17 +12,24 @@
  * edit to the accepted shape could forget to touch, and the whole reason `safeNextPath`
  * carries the long "THE TABLE THAT LOOKED FULL AND TESTED ONE CLAUSE" warning in its own
  * test file is that this class of guard rots exactly that way. So this module never
- * inspects `raw` itself; it only ever asks `safeNextPath` and reads the answer.
+ * inspects `raw` itself; it only ever asks `safeNextPath` and reads the answer —
+ * everything below is a thin wrapper that keeps its verdict and swaps only the fallback
+ * destination.
  *
- * THE ONLY REASON THIS MODULE EXISTS AT ALL is that `safeNextPath` cannot be handed a
- * fallback — it always resolves a refusal to `HOME_PATH` (`/`), because that is the
- * right default for a sign-in/sign-up journey with no gear-specific meaning. The gear
- * closet pages need a different fallback: `GEAR_PATH`. Redirecting a refused or absent
- * `next` on `/gear/new` or `/gear/:id` to `/` would silently strand the visitor on the
- * generic router in `src/lib/routes.ts` instead of back on their own closet list — one
- * hop worse than simply landing on `GEAR_PATH` directly, for no benefit. Everything
- * below is a thin wrapper that keeps `safeNextPath`'s verdict and swaps only its
- * fallback destination.
+ * WHY THIS MODULE NEEDS ITS OWN FALLBACK AT ALL. `safeNextPath` cannot be handed one —
+ * it always resolves a refusal to `HOME_PATH` (`/`), the right default for a sign-in/
+ * sign-up journey with no gear-specific meaning. The gear closet pages want `GEAR_PATH`
+ * instead. That is NOT because `/` would strand a signed-in visitor: `homeDestination
+ * (true)` (`src/lib/routes.ts:94-96`) already resolves `/` to `GEAR_PATH` for anyone
+ * signed in, so redirecting there would cost one extra hop, not a wrong destination.
+ * `src/lib/routes.ts:88-92` states the house rule this departs from — a journey that
+ * wants to "send the visitor home" should route through `homeDestination` rather than
+ * hard-coding a destination, so that changing what "home" means is one edit in one
+ * place. This module hard-codes `GEAR_PATH` anyway because that rule is about a generic
+ * "and then send them home" step; every caller here is a gear-closet page whose fallback
+ * is not "home" in that general sense, it is "back to the closet list a moment ago",
+ * which is `GEAR_PATH` regardless of what `/` means for anyone else. One redirect fewer
+ * for the common case is the actual reason, not a stranding this file used to claim.
  *
  * HOW `gearReturnPathOrNull` TELLS "ACCEPTED" FROM "REFUSED" WITHOUT RE-VALIDATING.
  * `safeNextPath` returns its input VERBATIM when it accepts, and `HOME_PATH` when it
@@ -74,9 +81,7 @@ export function gearReturnPathOrNull(raw: string | null | undefined): string | n
  * `gearReturnPathOrNull(raw) ?? GEAR_PATH` — the gear closet's own equivalent of
  * `safeNextPath`, for every caller that just wants a URL to send the visitor to and has
  * no use for telling "absent" apart from "refused". Both new.astro and [id].astro use
- * this for their GET-render `cancelHref`/`next`, and new.astro also uses it for its
- * POST-success redirect, since a fresh item has no row of its own to fall back to
- * showing a confirmation on the way `[id].astro` does.
+ * this for their GET-render `cancelHref`/`next`.
  */
 export function gearReturnPath(raw: string | null | undefined): string {
   return gearReturnPathOrNull(raw) ?? GEAR_PATH;
@@ -85,23 +90,55 @@ export function gearReturnPath(raw: string | null | undefined): string {
 /**
  * Mirrors `nextFromForm`'s (`src/lib/auth-routes.ts`) field-then-query precedence —
  * read the hidden `NEXT_PARAM` field off the POSTed form first, falling back to the
- * URL's own query string — with the gear closet's `GEAR_PATH` fallback in place of
- * `HOME_PATH`.
- *
- * WHY NOT CALL `nextFromForm` DIRECTLY. Only the fallback destination differs between
- * the two; the precedence (field, then query) and the security decision (`safeNextPath`)
- * are identical and must stay identical, since `nextFromForm` already delegates to
- * `safeNextPath` for that decision. But `nextFromForm` bakes `HOME_PATH` into its own
- * return value with no way for a caller to ask for a different fallback — it calls
- * `safeNextPath` and returns the result directly, so by the time this function saw that
- * return value, "refused" and "not supplied" would already have collapsed into
- * `HOME_PATH` with no way to tell them apart from a value that legitimately validated to
- * `/`. Duplicating the two-line field-then-query read here, then handing the raw result
- * to `gearReturnPath` above, keeps the ONE security decision in `safeNextPath` while
- * still landing on `GEAR_PATH` rather than `HOME_PATH` for this form.
+ * URL's own query string — but, like `gearReturnPathOrNull` above, hands back `null`
+ * rather than a defaulted destination when neither carries an accepted value. Needed
+ * by any caller that has to tell "a valid return target was carried on this submission"
+ * apart from "nothing usable was carried" — `src/pages/gear/[id].astro`'s successful-
+ * edit fork is exactly that caller: see its own comment for why the two cases redirect
+ * differently. `gearReturnPathFromForm` below is this function plus `?? GEAR_PATH`, for
+ * the common case that just wants a destination.
  */
-export function gearReturnPathFromForm(form: FormData, url: URL): string {
+export function gearReturnPathFromFormOrNull(form: FormData, url: URL): string | null {
   const field = form.get(NEXT_PARAM);
   const raw = typeof field === 'string' ? field : url.searchParams.get(NEXT_PARAM);
-  return gearReturnPath(raw);
+  return gearReturnPathOrNull(raw);
+}
+
+/**
+ * `gearReturnPathFromFormOrNull(form, url) ?? GEAR_PATH` — for every caller that just
+ * wants a destination and has no use for telling "absent" apart from "refused". Kept as
+ * a separate export, rather than making every call site spell out the `?? GEAR_PATH`
+ * itself, because `src/pages/gear/new.astro` and the GET-render defaults on both pages
+ * want exactly this and nothing more.
+ *
+ * WHY NOT CALL `nextFromForm` DIRECTLY. Only the fallback destination differs between
+ * the two — `nextFromForm` bakes `HOME_PATH` into its own return value with no way for a
+ * caller to ask for a different one. Duplicating the two-line field-then-query read here
+ * keeps the one security decision in `safeNextPath` (which both this module and
+ * `nextFromForm` delegate to) while still landing on `GEAR_PATH` for this form.
+ */
+export function gearReturnPathFromForm(form: FormData, url: URL): string {
+  return gearReturnPathFromFormOrNull(form, url) ?? GEAR_PATH;
+}
+
+/**
+ * Builds the href a link INTO the gear item form (Add item, an item-name link) must
+ * carry so `new.astro`/`[id].astro` can hand `currentView` back to `gearReturnPath` on
+ * Cancel and on a successful save (PK-63) — the counterpart to `gearReturnPathFromForm`
+ * for the read side of the same round trip. Lives here, rather than as a page-local
+ * helper, so a test can reach it: `vitest.config.ts` excludes `src/pages/`, and this is
+ * the entry point of this ticket's headline behaviour.
+ *
+ * Appends with `?` when `path` carries no query yet and `&` when it already does, so a
+ * future caller whose `path` argument has its own query string is not silently handed a
+ * malformed URL with two `?` characters in it. Built with `URLSearchParams` and
+ * `NEXT_PARAM` — never hand-rolled string concatenation for the parameter itself — so
+ * `currentView` is correctly percent-encoded regardless of what it contains (an `&`, a
+ * `#`, a space).
+ */
+export function gearFormHrefReturningTo(path: string, currentView: string): string {
+  const params = new URLSearchParams();
+  params.set(NEXT_PARAM, currentView);
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}${params.toString()}`;
 }

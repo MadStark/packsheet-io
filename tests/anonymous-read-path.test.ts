@@ -544,7 +544,8 @@ const AUTH_CONSUMERS: readonly string[] = [
   // visitor to sign-in with `next` set; builds a request-scoped client via
   // createAuthClient and, on POST, insert()s one gear_items row (user_id defaulted
   // from auth.uid(), never sent by the client — see the page's own comment) before
-  // redirecting to the new item. A page, never an island.
+  // redirecting to the view the visitor came from (PK-63; it redirected to the new
+  // item's own page until that ticket). A page, never an island.
   'src/pages/gear/new.astro',
   // The gear item detail/edit page (PK-4): reads Astro.locals.user the same way; builds
   // a request-scoped client and issues a single-row select (explicitly scoped to

@@ -21,12 +21,14 @@ import { GEAR_STATUS_MEANINGS, GEAR_STATUSES } from '../lib/gear/fields';
 import { formatGearStatus } from '../lib/gear/format';
 import { WEIGHT_UNITS } from '../lib/units';
 import GearStatusIcon from './GearStatusIcon.astro';
-// `NEXT_PARAM` only — src/lib/auth-routes.ts is dependency-free BY DESIGN (see its own
-// header comment, "the constants live out here, one door away from the choke point"),
-// which is exactly what lets a plain gear-item form import a single string constant from
-// it without that import becoming a reason `tests/anonymous-read-path.test.ts`'s
-// Invariant A would ever have to object to. Nothing here touches an auth SDK or a
-// Supabase client; this form does not become an AUTH_CONSUMERS entry by reading a path.
+// `NEXT_PARAM` only — safe not because src/lib/auth-routes.ts is dependency-free (it is
+// not: it imports `./routes`, its own header comment's "the one import this file has"),
+// but because it sits OUTSIDE `src/lib/auth/`, the only directory Invariant A in
+// `tests/anonymous-read-path.test.ts` guards edges into. That is what "one door away
+// from the choke point" (auth-routes.ts's own phrase) means — a module that can import
+// freely because it never crosses the guarded boundary, not one with no imports of its
+// own. Nothing here touches an auth SDK or a Supabase client; this form does not become
+// an AUTH_CONSUMERS entry by reading a path.
 import { NEXT_PARAM } from '../lib/auth-routes';
 
 interface Props {
@@ -46,8 +48,8 @@ interface Props {
   categories: readonly string[];
   /** The post-submit return path, rendered as a hidden field when the caller supplies
    *  one — see the field itself, further down, for why this travels through the form
-   *  rather than the page reading it straight off the URL. Which pages pass this is a
-   *  later task's job; this component only accepts and renders it. */
+   *  rather than the page reading it straight off the URL. This component only accepts
+   *  and renders it; both new.astro and [id].astro pass it. */
   next?: string;
 }
 
@@ -63,10 +65,7 @@ const LABEL_CLASS = 'text-ink-2 block text-sm';
 const ERROR_CLASS = 'text-rust mt-1 text-sm';
 /** One option in the status fieldset (PK-63) — a bordered, clickable card around the
  *  radio input and its label, echoing INPUT_CLASS's own border/radius vocabulary rather
- *  than inventing a second visual language just for this one field. Pulled out as a
- *  named constant, not inlined, because it is long enough that repeating it once per
- *  `GEAR_STATUSES` entry would make the markup below harder to scan than the value
- *  itself. */
+ *  than inventing a second visual language just for this one field. */
 const STATUS_OPTION_CLASS =
   'border-hairline has-[:checked]:border-blue-deep has-[:checked]:bg-blue-tint flex cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border px-3 py-2 text-sm';
 
@@ -88,9 +87,8 @@ function invalid(field: string): 'true' | undefined {
        carried only in the query string would already survive an ordinary submit, but
        putting it in the form as well means it also survives an `action` being added to
        this form later for any reason — the exact silent-drop failure mode
-       `nextFromForm`'s own comment describes for those two pages. Which page passes
-       `next`, and where it points, is a later task's decision; this component only
-       renders whatever it is given. */
+       `nextFromForm`'s own comment describes for those two pages. This component only
+       renders whatever it is given; new.astro and [id].astro decide where it points. */
   }
   {next !== undefined && <input type="hidden" name={NEXT_PARAM} value={next} />}
 
@@ -129,11 +127,13 @@ function invalid(field: string): 'true' | undefined {
          constraint validation, which blocks the form submit entirely in-browser the
          moment Name is blank — the visitor never leaves the page, `parseGearItemForm`
          never runs, and this ticket's own acceptance criterion ("a blank Name re-renders
-         the form with the field outlined in --rust") could never be observed, because
-         the server round-trip that produces it would never happen. `aria-required`
+         the form with the field outlined in --rust") could not be demonstrated in a
+         browser, because the browser would refuse the submit first — constraint
+         validation is bypassed by `novalidate` and by any non-browser client, so the
+         server path this comment describes always runs regardless. `aria-required`
          communicates the same thing to assistive tech without touching submission
          behaviour, and the red asterisk communicates it visually; the actual
-         enforcement — and the --rust outline on `errors.name` below — stays entirely
+         enforcement — and the --rust border on `errors.name` below — stays entirely
          server-side in parseGearItemForm, same as every other field on this form. */
     }
     {
