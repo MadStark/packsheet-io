@@ -3,17 +3,13 @@ import {
   BULK_FORM_FIELD,
   BULK_INTENT,
   MAX_BULK_IDS,
-  confirmsPermanentDeletion,
   isBulkIntent,
-  makeUndoToken,
   parseBulkAction,
-  parseUndoCount,
-  parseUndoToken,
 } from '../src/lib/gear/bulk';
 
 /**
- * `src/lib/gear/bulk.ts` is the pure validation layer PK-4's bulk actions and undo
- * token need precisely because `vitest.config.ts:64` excludes `src/pages/` — see that
+ * `src/lib/gear/bulk.ts` is the pure validation layer the closet list's bulk actions
+ * need precisely because `vitest.config.ts:64` excludes `src/pages/` — see that
  * module's own doc comment for the fuller argument, and `tests/gear-form.test.ts` for
  * the sibling suite covering the single-item form.
  *
@@ -42,7 +38,7 @@ describe('isBulkIntent', () => {
     }
   });
 
-  it('rejects a near-miss string that is not one of the five declared values', () => {
+  it('rejects a near-miss string that is not one of the three declared values', () => {
     expect(isBulkIntent('bulk-archive')).toBe(false);
   });
 
@@ -305,193 +301,41 @@ describe('parseBulkAction: bulk-set-status', () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseBulkAction: delete / restore / delete-permanently — ids only
+// parseBulkAction: bulk-delete — ids only
 // ---------------------------------------------------------------------------
 
-describe('parseBulkAction: delete, restore, delete-permanently', () => {
-  it.each([BULK_INTENT.delete, BULK_INTENT.restore, BULK_INTENT.deletePermanently])(
-    'accepts %s with a valid selection and no extra fields',
+describe('parseBulkAction: delete', () => {
+  it('accepts a valid selection with no extra fields', () => {
+    const result = parseBulkAction(
+      formData([
+        [BULK_FORM_FIELD.intent, BULK_INTENT.delete],
+        [BULK_FORM_FIELD.id, UUID_A],
+        [BULK_FORM_FIELD.id, UUID_C],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.action.ids).toEqual([UUID_A, UUID_C]);
+  });
+
+  // The two intents a closet with a trash behind it would need, held out by name. Each
+  // is a string a stale bookmark, a cached page or a crafted request can still post, and
+  // neither describes anything this product does: there is ONE delete, `bulk-delete`,
+  // and it removes the rows (`deleteGearItems`, src/lib/gear/mutations.ts). The bug this
+  // catches is either of them acquiring a code path again by accident — an intent
+  // `isBulkIntent` accepts falls out of `parseBulkAction` as a well-formed `BulkAction`
+  // and lands in src/pages/gear/index.astro's final `else`, the branch that means "set
+  // status", so a silently-accepted extra intent is a wrong WRITE rather than a refusal.
+  it.each(['bulk-restore', 'bulk-delete-permanently'])(
+    'rejects %s — not an action this module offers, however the string reaches the form',
     (intent) => {
       const result = parseBulkAction(
         formData([
           [BULK_FORM_FIELD.intent, intent],
           [BULK_FORM_FIELD.id, UUID_A],
-          [BULK_FORM_FIELD.id, UUID_C],
         ]),
       );
-      expect(result.ok).toBe(true);
-      if (result.ok) expect(result.action.ids).toEqual([UUID_A, UUID_C]);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.intent).toBeTruthy();
     },
   );
-});
-
-// ---------------------------------------------------------------------------
-// makeUndoToken / parseUndoToken
-// ---------------------------------------------------------------------------
-
-describe('makeUndoToken', () => {
-  it('produces a value parseUndoToken accepts back — the two halves of this module must agree', () => {
-    const token = makeUndoToken();
-    expect(parseUndoToken(token)).toBe(token);
-  });
-
-  it('produces the exact shape new Date().toISOString() always does: milliseconds, Z suffix', () => {
-    const token = makeUndoToken();
-    expect(token).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-  });
-});
-
-describe('parseUndoToken', () => {
-  it('accepts a well-formed ISO-8601 UTC timestamp', () => {
-    expect(parseUndoToken('2026-01-15T10:30:00.000Z')).toBe('2026-01-15T10:30:00.000Z');
-  });
-
-  it('rejects null — no undo parameter was present in the URL at all', () => {
-    expect(parseUndoToken(null)).toBeNull();
-  });
-
-  it('rejects the empty string', () => {
-    expect(parseUndoToken('')).toBeNull();
-  });
-
-  // The hostile case named explicitly in the ticket: a malformed token must never
-  // reach a query.
-  it('rejects a plain date with no time component', () => {
-    expect(parseUndoToken('2026-01-15')).toBeNull();
-  });
-
-  it('rejects a timestamp with a numeric offset instead of Z', () => {
-    expect(parseUndoToken('2026-01-15T10:30:00.000+00:00')).toBeNull();
-  });
-
-  it('rejects a timestamp with no milliseconds', () => {
-    expect(parseUndoToken('2026-01-15T10:30:00Z')).toBeNull();
-  });
-
-  it('rejects a timestamp with the wrong number of millisecond digits', () => {
-    expect(parseUndoToken('2026-01-15T10:30:00.00Z')).toBeNull();
-  });
-
-  it('rejects free text', () => {
-    expect(parseUndoToken('not-a-timestamp')).toBeNull();
-  });
-
-  // The near-miss the ticket calls out by name: Date's own parser silently ROLLS OVER
-  // an impossible day-of-month (Feb 30 -> Mar 1) rather than refusing it. A token that
-  // rolls over to a different instant must be refused, not silently reinterpreted —
-  // matching it against deleted_at would then restore nothing, since deleted_at was
-  // stamped with a value that was never "Feb 30" in the first place.
-  it('rejects an impossible date (Feb 30) that Date would silently roll over to March 1', () => {
-    expect(parseUndoToken('2026-02-30T00:00:00.000Z')).toBeNull();
-  });
-
-  it('rejects an impossible time (24:00) that Date would silently roll over to the next day', () => {
-    expect(parseUndoToken('2026-01-15T24:00:00.000Z')).toBeNull();
-  });
-
-  it('rejects an impossible minute value (60) that Date would silently roll into the next hour', () => {
-    expect(parseUndoToken('2026-01-15T10:60:00.000Z')).toBeNull();
-  });
-
-  it('rejects a value with trailing garbage after an otherwise well-formed timestamp', () => {
-    expect(parseUndoToken('2026-01-15T10:30:00.000Z ')).toBeNull();
-  });
-
-  it('rejects a value with leading garbage before an otherwise well-formed timestamp', () => {
-    expect(parseUndoToken(' 2026-01-15T10:30:00.000Z')).toBeNull();
-  });
-
-  it('rejects lowercase z — not the exact shape toISOString() produces', () => {
-    expect(parseUndoToken('2026-01-15T10:30:00.000z')).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseUndoCount
-// ---------------------------------------------------------------------------
-
-describe('parseUndoCount', () => {
-  it('accepts a plain positive integer string', () => {
-    expect(parseUndoCount('12')).toBe(12);
-  });
-
-  it('accepts 1 — the smallest count a real bulk delete can ever produce', () => {
-    expect(parseUndoCount('1')).toBe(1);
-  });
-
-  it('rejects null — no count parameter was present in the URL at all', () => {
-    expect(parseUndoCount(null)).toBeNull();
-  });
-
-  it('rejects the empty string', () => {
-    expect(parseUndoCount('')).toBeNull();
-  });
-
-  it('rejects 0 — a bulk delete that moved nothing never redirects with a count at all', () => {
-    expect(parseUndoCount('0')).toBeNull();
-  });
-
-  it('rejects a negative number', () => {
-    expect(parseUndoCount('-1')).toBeNull();
-  });
-
-  it('rejects a decimal', () => {
-    expect(parseUndoCount('1.5')).toBeNull();
-  });
-
-  it('rejects scientific notation, mirroring parsePage in query.ts', () => {
-    expect(parseUndoCount('1e3')).toBeNull();
-  });
-
-  it('rejects free text', () => {
-    expect(parseUndoCount('Infinity')).toBeNull();
-    expect(parseUndoCount('NaN')).toBeNull();
-    expect(parseUndoCount('twelve')).toBeNull();
-  });
-
-  it('rejects a value with surrounding whitespace rather than trimming it', () => {
-    expect(parseUndoCount(' 12 ')).toBeNull();
-  });
-
-  it('rejects a number too large to be a safe integer', () => {
-    expect(parseUndoCount('99999999999999999999')).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// confirmsPermanentDeletion
-// ---------------------------------------------------------------------------
-
-describe('confirmsPermanentDeletion', () => {
-  it('accepts the exact word DELETE', () => {
-    expect(confirmsPermanentDeletion('DELETE')).toBe(true);
-  });
-
-  it('is case-insensitive, mirroring confirmsAccountDeletion — autocapitalisation is a keyboard artefact, not evidence the visitor did not mean it', () => {
-    expect(confirmsPermanentDeletion('delete')).toBe(true);
-    expect(confirmsPermanentDeletion('Delete')).toBe(true);
-  });
-
-  it('ignores surrounding whitespace from a paste', () => {
-    expect(confirmsPermanentDeletion('  DELETE  ')).toBe(true);
-  });
-
-  it('rejects null — no confirmation field was present in the request at all', () => {
-    expect(confirmsPermanentDeletion(null)).toBe(false);
-  });
-
-  it('rejects undefined', () => {
-    expect(confirmsPermanentDeletion(undefined)).toBe(false);
-  });
-
-  it('rejects an empty or whitespace-only entry — the shape of an unfilled field, not a deliberate confirmation', () => {
-    expect(confirmsPermanentDeletion('')).toBe(false);
-    expect(confirmsPermanentDeletion('   ')).toBe(false);
-  });
-
-  it('rejects a near-miss that is not the exact word', () => {
-    expect(confirmsPermanentDeletion('DELET')).toBe(false);
-    expect(confirmsPermanentDeletion('DELETE ME')).toBe(false);
-    expect(confirmsPermanentDeletion('confirm')).toBe(false);
-  });
 });

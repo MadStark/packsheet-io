@@ -1,0 +1,68 @@
+-- Deleting gear deletes it (PK-60): drop public.gear_items.deleted_at.
+--
+-- One column removed, and nothing else. No index to drop — 20260813000000_gear_closet.sql
+-- closes with a "Deliberately no new indexes" section, so nothing indexes this column. No
+-- policy, grant or constraint change either: the table-level grants and owner-scoped
+-- policies in 20260810120000_core_schema.sql are column-agnostic and never named it. And
+-- no trigger change — gear_items_snapshot_before_delete is left exactly as it is, for
+-- reasons the second section below is entirely about.
+
+-- ---------------------------------------------------------------------------
+-- Retired is the trash
+-- ---------------------------------------------------------------------------
+--
+-- The product decision this column was built for has changed. Gear the user no longer owns
+-- gets `status = 'retired'` (core_schema.sql:104) and stays in the closet, visibly marked
+-- as retired. That is where "I got rid of this but I still want it in my history" lives,
+-- and it is a state the owner can see, sort by and reverse with the same controls they use
+-- for everything else. A soft delete added a SECOND kind of gone on top of it — invisible,
+-- reached by a different gesture, recovered through a different route — and having two of
+-- them was the confusion this ticket removes. Removing it means choosing one, and retired
+-- is the one that survives, because it is the one already on screen. Delete now means what
+-- the word means: the row leaves the database.
+
+-- ---------------------------------------------------------------------------
+-- Answering the three reasons in 20260813000000_gear_closet.sql
+-- ---------------------------------------------------------------------------
+--
+-- That migration argued for this column at length and gave three numbered reasons. None of
+-- them were wrong, and this is not a correction of them. Every one was an argument about
+-- how to preserve an UNDO — so with no undo left to preserve, two are made moot rather
+-- than refuted, and the third is a real cost that this migration accepts deliberately.
+--
+--   1. MOOT. set_row_timestamps() stamping a re-inserted row with a fresh created_at only
+--      bites something that gets re-inserted. Nothing is: deleted gear does not come back,
+--      so there is no second row whose date added could be wrong.
+--
+--   2. NOT MOOT — this is the price, and it should be read as one. The freeze that
+--      gear_items_snapshot_before_delete (core_schema.sql:437-439) performs into every
+--      referencing pack_item, nulling their gear_item_id, is irreversible by design and
+--      remains so. What soft delete really bought was keeping that trigger OUT of ordinary
+--      use, reachable only by emptying the trash; this migration puts it back into
+--      ordinary use, because deleting is now the ordinary gesture. Once Ref 37 (pack
+--      composition) lands and packs genuinely reference closet gear, deleting an item will
+--      rewrite every pack carrying it to a frozen snapshot with no gear_item_id, and
+--      nothing anywhere can walk that back. That is a decision, not an oversight: the
+--      weight this column used to carry now rests entirely on the confirmation the UI puts
+--      in front of the user before the DELETE is issued.
+--
+--   3. MOOT, for the same reason as 1. Trash/undo needed the row to still exist somewhere
+--      it could be found by id. There is no trash to find it from.
+
+-- ---------------------------------------------------------------------------
+-- Forward-only, and what that does to rows that are soft-deleted right now
+-- ---------------------------------------------------------------------------
+--
+-- Dropping a column destroys its data and this project ships no down-migrations; recovery
+-- from a bad migration is another migration (.github/workflows/deploy-staging.yml). So the
+-- consequence worth naming is that any row currently holding a non-null deleted_at becomes
+-- an ordinary, visible item in its owner's closet again. It is NOT hard-deleted on the way
+-- through — the record that someone once trashed it is simply gone, and the item itself
+-- stays. That is the right outcome for the only place it can happen: hosted staging, where
+-- the column has existed for less than a day. Production has never had it. Written down so
+-- a later reader of this history can see this was considered rather than missed.
+alter table public.gear_items
+  drop column deleted_at;
+
+-- No `comment on table` change: the table comment from core_schema.sql never mentioned this
+-- column, and the `comment on column` goes with the column it was attached to.

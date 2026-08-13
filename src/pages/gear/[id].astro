@@ -1,6 +1,6 @@
 ---
 // On-demand: this page requires a session, reads Astro.locals.user, and both updates
-// and soft-deletes gear_items on POST — none of which a prerendered file can do. See
+// and deletes gear_items on POST — none of which a prerendered file can do. See
 // src/middleware.ts for why GEAR_PATH carries the no-store rule the same way /account
 // does, and src/pages/gear/index.astro for the page this one shares its shape with.
 export const prerender = false;
@@ -19,8 +19,7 @@ import {
   type GearFormValues,
   type GearItemRow,
 } from '../../lib/gear/form';
-import { UNDO_COUNT_PARAM, UNDO_PARAM, makeUndoToken } from '../../lib/gear/bulk';
-import { softDeleteGearItem, updateGearItem } from '../../lib/gear/mutations';
+import { deleteGearItems, updateGearItem } from '../../lib/gear/mutations';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -48,7 +47,7 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 const GENERIC_WRITE_ERROR = 'Something went wrong updating this item. Please try again.';
 
 // This page answers two different POSTs from two different forms — save the edit, or
-// move the item to the trash — told apart by this hidden `intent` field the same way
+// delete the item — told apart by this hidden `intent` field the same way
 // src/lib/gear/bulk.ts's BULK_FORM_FIELD.intent tells the closet list's several bulk
 // forms apart. Not exported from src/lib/gear/ because there is no decision buried in
 // naming two strings — see GearItemForm's own "NO DECISION-MAKING LIVES HERE" for the
@@ -62,8 +61,8 @@ let writeError: string | null = null;
 let pendingDelete = false;
 
 // ---------------------------------------------------------------------------
-// POST: save an edit, or soft-delete (with the same two-step reveal the closet list's
-// own bulk delete uses — see src/pages/gear/index.astro's "Method discipline" comment,
+// POST: save an edit, or delete (with the same two-step reveal the closet list's own
+// bulk delete uses — see src/pages/gear/index.astro's "Method discipline" comment,
 // which applies here unchanged: every mutating branch redirects with 303, and the one
 // branch that does not (an unconfirmed delete) has changed nothing yet.
 // ---------------------------------------------------------------------------
@@ -76,30 +75,28 @@ if (Astro.request.method === 'POST') {
     if (!confirmed) {
       pendingDelete = true;
     } else {
-      const token = makeUndoToken();
-      // softDeleteGearItem (src/lib/gear/mutations.ts) carries the same
-      // .is('deleted_at', null) guard the inline write here used to: it is what stops
-      // a double-submitted or retried delete from re-stamping an already-trashed row
-      // with a NEW undo token — exactly the class of bug makeUndoToken's own "THE
-      // CALLER MUST GUARD" comment warns about. It also adds an explicit
-      // .eq('user_id', ...) alongside RLS (gear_items_update_own) — see that module's
-      // own comment for why the write side gets the same belt-and-braces the read
-      // side (loadGearItem, below) needs for a different, load-bearing reason.
-      const { error, count } = await softDeleteGearItem(client, user.id, id, token);
+      // The same deleteGearItems the closet list's bulk delete calls, handed a
+      // one-element array — there is deliberately no single-id variant, because a
+      // delete of one row does nothing a delete of twelve does not (see that
+      // function's own comment in src/lib/gear/mutations.ts, including what its BEFORE
+      // DELETE trigger freezes into any pack still referencing this item). It adds an
+      // explicit .eq('user_id', ...) alongside RLS (gear_items_delete_own) — see that
+      // module's own comment for why the write side gets the same belt-and-braces the
+      // read side (loadGearItem, below) needs for a different, load-bearing reason.
+      // Its `count` is not read: there is no banner to report a figure into, so the
+      // only thing this page needs from the write is whether it failed.
+      const { error } = await deleteGearItems(client, user.id, [id]);
 
       if (error) {
         writeError = GENERIC_WRITE_ERROR;
       } else {
-        // Redirects to the SAME undo banner the closet list's own bulk delete uses —
-        // UNDO_PARAM and UNDO_COUNT_PARAM are one shared vocabulary, so one banner on
-        // GEAR_PATH serves both paths without needing to know which one produced it.
-        // I6 (PK-4 review): `count` (0 or 1) is what softDeleteGearItem actually
-        // touched, not an assumed 1 — a race that already trashed this item from
-        // another tab reports that honestly instead of claiming a fresh delete.
-        const params = new URLSearchParams();
-        params.set(UNDO_PARAM, token);
-        params.set(UNDO_COUNT_PARAM, String(count));
-        return Astro.redirect(`${GEAR_PATH}?${params.toString()}`, 303);
+        // Straight back to the closet, with nothing appended. The item's absence from
+        // that list is the confirmation — a banner announcing a deletion the visitor
+        // just asked for twice would say less than the empty space where the row was,
+        // and every flash-message mechanism this page could grow for it (a query
+        // param, a cookie, a session flash) is state that then has to be cleared, kept
+        // off a shared/bookmarked URL, and stopped from reappearing on a refresh.
+        return Astro.redirect(GEAR_PATH, 303);
       }
     }
   } else if (intent === GEAR_ITEM_INTENT.edit) {
@@ -108,11 +105,10 @@ if (Astro.request.method === 'POST') {
       formErrors = result.errors;
       formValuesOverride = result.values;
     } else {
-      // updateGearItem (src/lib/gear/mutations.ts) keeps the same
-      // .is('deleted_at', null) guard the inline write here used to: an item already
-      // in the trash is not something this page's edit form should be able to reach
-      // back into and silently change a field on — restoring is GEAR_TRASH_PATH's job,
-      // not this one's.
+      // updateGearItem (src/lib/gear/mutations.ts) scopes its own write with an
+      // explicit .eq('user_id', ...) alongside RLS (gear_items_update_own), for the
+      // reason that module's comment gives: a function whose contract is "edit THIS
+      // visitor's row" enforces that itself rather than taking a policy's word for it.
       const { error } = await updateGearItem(client, user.id, id, result.values);
 
       if (error) {
@@ -144,18 +140,17 @@ if (Astro.request.method === 'POST') {
 // select_via_public_pack, granted to anon AND authenticated so a shared pack link can
 // render the gear behind it. Relying on RLS alone here would let this page render ANY
 // visitor's gear item the moment it sits on someone's public pack — "your item"
-// silently becoming a stranger's. `.is('deleted_at', null)` is the second guard: a
-// soft-deleted item is not a page this URL should keep answering for — see
-// GEAR_TRASH_PATH for where a trashed item is read back.
+// silently becoming a stranger's.
 // ---------------------------------------------------------------------------
 const { data: item, error: loadError } = await loadGearItem(client, user.id, id);
 
-// A missing row, another visitor's row, a soft-deleted row, and a malformed id (which
+// A missing row (including one this page's own delete branch has just removed, if the
+// visitor comes back to the URL), another visitor's row, and a malformed id (which
 // PostgREST refuses with an error before RLS is even consulted) all collapse to the
 // SAME response: a real 404, not a redirect and not a 200 that merely says "not found"
-// in prose. None of the four is a distinction this page's visitor should be able to
+// in prose. None of the three is a distinction this page's visitor should be able to
 // probe for — telling "belongs to someone else" apart from "never existed" is exactly
-// the kind of leak a 404 for all four refuses to make.
+// the kind of leak a 404 for all three refuses to make.
 if (loadError || item === null) {
   return new Response('Not found', { status: 404 });
 }
@@ -209,10 +204,18 @@ const updated = Astro.url.searchParams.get('updated') === '1';
       {
         pendingDelete ? (
           <div>
-            <h2 class="text-rust text-lg">Move to trash?</h2>
+            <h2 class="text-rust text-lg">Confirm delete</h2>
+            {/* The same two sentences the closet list's bulk confirmation uses
+                (src/pages/gear/index.astro), narrowed to one named item: the
+                irreversibility first, then the one thing a visitor might reasonably
+                fear losing alongside it. gear_items_snapshot_before_delete
+                (core_schema.sql) freezes this row's name, weight and price into every
+                pack_items row still pointing at it, so a pack that lists this item
+                keeps its line rather than losing it. No typed-word confirmation, for
+                the reason that page's own comment gives. */}
             <p class="text-ink-2 mt-2 text-sm">
-              {item.name} will move to the trash. You can undo this from the closet list right
-              after, or restore it from the trash later.
+              Delete {item.name} permanently? This cannot be undone. If it appears on a saved pack,
+              that pack keeps a frozen copy.
             </p>
             <form method="POST" class="mt-4 flex gap-3">
               <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
@@ -221,7 +224,7 @@ const updated = Astro.url.searchParams.get('updated') === '1';
                 type="submit"
                 class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"
               >
-                Move to trash
+                Delete permanently
               </button>
               <a
                 href={gearItemPath(id)}
@@ -233,10 +236,9 @@ const updated = Astro.url.searchParams.get('updated') === '1';
           </div>
         ) : (
           <div>
-            <h2 class="text-lg">Move to trash</h2>
+            <h2 class="text-lg">Delete</h2>
             <p class="text-ink-2 mt-2 text-sm">
-              Moves this item to the trash. It stops appearing in your closet, but can be restored
-              (or permanently deleted) from the trash at any time.
+              Deletes this item permanently. It cannot be restored.
             </p>
             <form method="POST" class="mt-4">
               <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
@@ -244,7 +246,7 @@ const updated = Astro.url.searchParams.get('updated') === '1';
                 type="submit"
                 class="border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
               >
-                Move to trash
+                Delete
               </button>
             </form>
           </div>

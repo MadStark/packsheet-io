@@ -1,7 +1,7 @@
 ---
 // A plain, non-hydrated header for the gear closet's pages (PK-4) — the wordmark and
-// links to Closet, Trash and Account, shared by src/pages/gear/index.astro and the
-// closet pages that follow it.
+// links to Closet and Account, shared by src/pages/gear/index.astro and the closet
+// pages that follow it.
 //
 // KEEP THIS A PLAIN .astro COMPONENT. It imports nothing from src/lib/auth/ (only the
 // dependency-free path constants below, which is exactly what those modules exist
@@ -10,7 +10,7 @@
 // downloads, and the whole point of src/lib/gear/routes.ts and src/lib/auth-routes.ts
 // being importable from anywhere is that a component like this one can render a link
 // without ever becoming a reason for an auth SDK to reach the client.
-import { GEAR_NEW_PATH, GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
+import { GEAR_NEW_PATH, GEAR_PATH } from '../lib/gear/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
 // The wordmark's destination, which used to be a hard-coded "/" and is the single click
 // this whole change is about. Every page this nav renders on belongs to a signed-in
@@ -25,7 +25,6 @@ import { HOME_PATH } from '../lib/routes';
 const path = Astro.url.pathname;
 const links: readonly [href: string, label: string][] = [
   [GEAR_PATH, 'Closet'],
-  [GEAR_TRASH_PATH, 'Trash'],
   [ACCOUNT_PATH, 'Account'],
 ];
 ---
@@ -56,7 +55,7 @@ const links: readonly [href: string, label: string][] = [
         /* C1 (PK-4 review): GEAR_NEW_PATH used to be linked ONLY from the closet's
            empty state, so once the closet held one item there was no route to it but
            typing the URL. Present everywhere this nav renders, not only on the closet
-           list, so "add another item" stays reachable from the trash and detail pages
+           list, so "add another item" stays reachable from an item's own detail page
            too. Blue marks it interactive per tokens.css's own rule, same vocabulary as
            every other link in this header rather than a new button style. */
       }
