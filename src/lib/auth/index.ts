@@ -739,8 +739,10 @@ export async function getUser({
  * `next` that was meaningful when they submitted the form ("claim this pack") is a
  * destination they may well no longer be looking at, on a device that never saw the page
  * that set it. `AUTH_CALLBACK_PATH` with no `next` resolves through `safeNextPath` to
- * `ACCOUNT_PATH`, which is somewhere a newly confirmed visitor can always usefully be, and
- * they arrive signed in and free to navigate.
+ * `HOME_PATH`, and `/` sends a newly confirmed visitor — who by then has a session — to
+ * their own gear closet. That is a better landing than the `ACCOUNT_PATH` this used to
+ * resolve to (a settings screen nobody had asked for), and it needed no change here: the
+ * destination moved because `safeNextPath`'s fallback did. See src/lib/routes.ts.
  */
 export async function signUpWithPassword(params: {
   cookies: AstroCookies;

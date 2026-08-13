@@ -13,6 +13,10 @@ import {
 // comment, and src/lib/gear/routes.ts's, for why a path constant lives one door away
 // from the auth choke point rather than inside it.
 import { GEAR_PATH } from './lib/gear/routes';
+import { HOME_PATH } from './lib/routes';
+// Also dependency-free, and load-bearing for what this file costs rather than for what
+// it decides: see the gate on the user lookup in `onRequest` below.
+import { hasSupabaseAuthCookie } from './lib/session-cookie';
 
 /**
  * Every path this middleware treats as "an auth route" for the caching rule below — not
@@ -70,6 +74,21 @@ const AUTH_ROUTE_PATHS: readonly string[] = [
   // exists to prevent. One line here covers all of them, the same way ACCOUNT_PATH
   // covers every future `/account/` sub-page without each one earning its own entry.
   GEAR_PATH,
+  // `/` — the site root, which stopped being a static landing page and became a router
+  // that answers differently depending on who is asking (src/pages/index.astro). Its
+  // response is a 302 whose Location is the visitor's session in one header, and a 302 is
+  // exactly the kind of small, cheap response a shared cache is happy to keep and re-serve
+  // — so without this line the first anonymous visitor to reach an edge could pin every
+  // later signed-in visitor to the landing page, and vice versa.
+  //
+  // NOTE WHAT THIS ONE ENTRY DOES NOT DO, because `HOME_PATH` is `'/'` and the prefix rule
+  // below looks alarming with it: `isAuthRoute` degenerates to an EXACT match here. The
+  // second arm tests `pathname.startsWith('/' + '/')` — that is, `'//'` — and a pathname
+  // beginning `//` is not something a URL this Worker serves can produce. So `/` is marked
+  // and nothing beneath it is, which is the intent: `/gear` and `/account` are on this
+  // list on their own merits, and a genuinely public page added at `/pack/<id>` tomorrow
+  // must stay cacheable.
+  HOME_PATH,
 ];
 
 /** The path itself, or anything beneath it. `${path}/` and not `path` as a bare prefix:
@@ -111,10 +130,32 @@ function isAuthRoute(pathname: string): boolean {
  * notice. `isPrerendered` has no such gap, because it asks what the CURRENT render
  * is, not what this file happened to remember to list.
  *
+ * THE SECOND GATE, AND WHY IT ARRIVED WITH `/`. `isPrerendered` is about which RENDER is
+ * happening; `hasSupabaseAuthCookie` is about whether this particular request could
+ * possibly have a session at all. Until `/` became an on-demand route, the second gate
+ * would have bought little — every path that reached this function was one a visitor had
+ * gone out of their way to open, and most of them belonged to somebody signed in. `/` is
+ * different in kind: it is the busiest URL on the site, the one every stranger and every
+ * crawler arrives at first, and its answer for all of them is a 302 to the landing page.
+ * Paying a network round trip to Supabase's auth server before issuing that redirect —
+ * on every one of those visits, to be told what the absence of a cookie already said —
+ * is the cost this gate refuses.
+ *
+ * It is safe in the only direction that matters because middleware runs BEFORE any route,
+ * so the inbound `Cookie` header is the entire evidence available: the per-request
+ * overlay `createAuthClient` maintains (src/lib/auth/index.ts) is necessarily empty at
+ * this point, because nothing has had a chance to write a cookie yet. A request with no
+ * `sb-` cookie on it is a request `getUser()` would have resolved to `null` after a round
+ * trip. See src/lib/session-cookie.ts for why the check is deliberately broad, and which
+ * way it is tuned to be wrong.
+ *
  * WHY `getUser()` and not `getSession()`, covered again here because it is the one
  * line most likely to be "simplified" back to the unsafe form: see the identical
  * comment on `getUser` itself in `src/lib/auth/index.ts`. It verifies the session
- * against the auth server rather than trusting whatever the cookie claims.
+ * against the auth server rather than trusting whatever the cookie claims. Note that the
+ * gate above does NOT weaken this: it decides whether to ASK, never what the answer is.
+ * A forged or expired `sb-` cookie reaches `getUser()` exactly as before and is refused
+ * by the auth server, not by anything in this file.
  *
  * THE CACHING RULE ITSELF. `Cache-Control: private, no-store` is set whenever either
  * is true: the request resolved to a signed-in user (so the response is personal —
@@ -137,9 +178,12 @@ function isAuthRoute(pathname: string): boolean {
  * happen to touch a Supabase call on every request.
  */
 export const onRequest = defineMiddleware(async (context, next) => {
-  context.locals.user = context.isPrerendered
-    ? null
-    : await getUser({ cookies: context.cookies, request: context.request });
+  const worthAsking =
+    !context.isPrerendered && hasSupabaseAuthCookie(context.request.headers.get('cookie'));
+
+  context.locals.user = worthAsking
+    ? await getUser({ cookies: context.cookies, request: context.request })
+    : null;
 
   const response = await next();
 

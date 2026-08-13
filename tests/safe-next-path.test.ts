@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { ACCOUNT_PATH, NEXT_PARAM, nextFromForm, safeNextPath } from '../src/lib/auth-routes';
+import { NEXT_PARAM, nextFromForm, safeNextPath } from '../src/lib/auth-routes';
+// The fallback destination moved from ACCOUNT_PATH to HOME_PATH when `/` became the
+// router that decides where a signed-in person belongs — see src/lib/routes.ts, and the
+// dedicated cases in tests/home-routing.test.ts. Nothing about the GUARD changed; only
+// where it sends a value it refuses.
+import { HOME_PATH } from '../src/lib/routes';
 
 /**
  * `safeNextPath` — the open-redirect guard on `?next=`, in its own file rather than
@@ -79,8 +84,8 @@ describe('safeNextPath', () => {
     expect(safeNextPath(input)).toBe(input);
   });
 
-  it.each(rejected)('falls back to ACCOUNT_PATH for %s (%s)', (_label, input) => {
-    expect(safeNextPath(input)).toBe(ACCOUNT_PATH);
+  it.each(rejected)('falls back to HOME_PATH for %s (%s)', (_label, input) => {
+    expect(safeNextPath(input)).toBe(HOME_PATH);
   });
 });
 
@@ -118,8 +123,8 @@ describe('nextFromForm', () => {
     expect(nextFromForm(form({}), url('?next=/from-query'))).toBe('/from-query');
   });
 
-  it('falls back to ACCOUNT_PATH when neither carries one', () => {
-    expect(nextFromForm(form({}), url())).toBe(ACCOUNT_PATH);
+  it('falls back to HOME_PATH when neither carries one', () => {
+    expect(nextFromForm(form({}), url())).toBe(HOME_PATH);
   });
 
   /**
@@ -134,8 +139,8 @@ describe('nextFromForm', () => {
     ['a javascript: scheme behind a slash', '/javascript:alert(1)'],
     ['a backslash-disguised host', '/\\evil.com'],
   ])('refuses %s in the hidden field, exactly as in the query string', (_label, value) => {
-    expect(nextFromForm(form({ [NEXT_PARAM]: value }), url())).toBe(ACCOUNT_PATH);
-    expect(nextFromForm(form({}), url(`?next=${encodeURIComponent(value)}`))).toBe(ACCOUNT_PATH);
+    expect(nextFromForm(form({ [NEXT_PARAM]: value }), url())).toBe(HOME_PATH);
+    expect(nextFromForm(form({}), url(`?next=${encodeURIComponent(value)}`))).toBe(HOME_PATH);
   });
 
   // A file upload under that name is not a string. `FormData.get` returns a `File` for

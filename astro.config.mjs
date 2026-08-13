@@ -7,13 +7,19 @@ import tailwindcss from '@tailwindcss/vite';
 
 import sitemap from '@astrojs/sitemap';
 
+// One value for `site` below and for the sitemap filter that has to compare against it.
+// The filter receives fully-qualified URLs, so it needs the origin — and a second copy of
+// this string would be a copy that silently stops matching the day the domain changes,
+// turning the filter into a no-op rather than into an error.
+const SITE = 'https://packsheet.io';
+
 // https://astro.build/config
 export default defineConfig({
   // Canonical URLs, the sitemap and OG/Twitter tags all key off `site`, and
   // robots.txt resolves the sitemap URL against it. Both hostnames serve the
   // same build, so this is the production origin on staging too — which is
   // exactly why staging must never be indexable. See src/pages/robots.txt.ts.
-  site: 'https://packsheet.io',
+  site: SITE,
 
   // Nothing uses `Astro.session`, and the adapter's default is to switch it on
   // backed by a Cloudflare KV namespace — which then has to exist, be bound in
@@ -48,7 +54,29 @@ export default defineConfig({
     imageService: 'compile',
   }),
 
-  integrations: [vue(), sitemap()],
+  integrations: [
+    vue(),
+    sitemap({
+      // `@astrojs/sitemap` emits every non-dynamic route, NOT only the prerendered ones —
+      // verified against a real build, whose sitemap lists `/`, `/account/`, `/gear/`,
+      // `/sign-in/` and the rest alongside `/welcome/`.
+      //
+      // `/` has to come out. It stopped being a page when it became a session-dependent
+      // router (src/lib/routes.ts): every request to it now answers a `no-store` 302 to
+      // either the gear closet or the landing page, so advertising it to a crawler as
+      // canonical, indexable content is advertising a redirect whose destination depends
+      // on a cookie the crawler does not have. The page that actually holds the marketing
+      // content is `/welcome/`, and the sitemap still lists that.
+      //
+      // NOT FIXED HERE, and deliberately so rather than by oversight: the session-shaped
+      // routes — `/account/`, `/gear/`, `/sign-in/` and their siblings — are also emitted,
+      // and probably should not be either. That predates this change, costs nothing while
+      // src/pages/robots.txt.ts disallows crawling everywhere but production, and is a
+      // decision about which pages this site wants indexed rather than a consequence of
+      // `/` becoming a router. It wants its own ticket, not a silent widening of this one.
+      filter: (page) => page !== `${SITE}/`,
+    }),
+  ],
 
   // PK-19's CSRF protection for every mutating on-demand route (sign-in, sign-up,
   // account deletion, sign-out) rests on this plus the session cookie's `sameSite:

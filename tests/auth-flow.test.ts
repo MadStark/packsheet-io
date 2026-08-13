@@ -130,6 +130,11 @@ import {
   signUpWithPassword,
   updatePassword,
 } from '../src/lib/auth';
+// Not auth code — a pure function over a Cookie header. Imported here because this is the
+// only file that produces a REAL one, which is what makes it the right place to pin the
+// assumption src/middleware.ts's fast path rests on. See the test at the end of the
+// password sign-in block.
+import { hasSupabaseAuthCookie } from '../src/lib/session-cookie';
 import { createPack } from './support/fixtures';
 import {
   asAstroCookies,
@@ -331,6 +336,9 @@ describe('signing in with a password', () => {
   let signedInUser: Awaited<ReturnType<typeof getUser>>;
   let wrongPasswordResult: Awaited<ReturnType<typeof signInWithPassword>>;
   let noSuchAccountResult: Awaited<ReturnType<typeof signInWithPassword>>;
+  /** The Cookie header a really-signed-in browser sends on its next request — captured
+   *  here for the fast-path assertion at the bottom of this describe. */
+  let signedInCookieHeader: string;
 
   beforeAll(async () => {
     const signUpVisit = freshVisit();
@@ -352,6 +360,7 @@ describe('signing in with a password', () => {
     });
     if (!signIn.ok) throw new Error(`Fixture failed to sign in as ${email}: ${signIn.error}`);
     const header = signInVisit.cookies.asRequestCookieHeader();
+    signedInCookieHeader = header;
     const next = continueWith(header);
     signedInUser = await getUser({ cookies: asAstroCookies(next.cookies), request: next.request });
 
@@ -385,6 +394,32 @@ describe('signing in with a password', () => {
 
   it('signing in as an account that does not exist is refused too', () => {
     expect(noSuchAccountResult.ok).toBe(false);
+  });
+
+  /**
+   * THE PREMISE BEHIND `src/middleware.ts`'s FAST PATH, pinned against a real sign-in
+   * rather than against a belief about how `@supabase/ssr` names things.
+   *
+   * That middleware skips its `getUser()` call — an auth-server round trip — when the
+   * request carries no cookie whose name starts `sb-`. Every case in
+   * tests/session-cookie.test.ts is hand-written, so all of them would go on passing if
+   * the SDK renamed its cookies tomorrow: they would be edited alongside the code and
+   * keep agreeing with it. This is the assertion that would not, because the header below
+   * came out of a genuine `signInWithPassword` against the local Supabase.
+   *
+   * If this ever fails, the fast path is signing real people out on the site's front door
+   * and the fix is in src/lib/session-cookie.ts — not here.
+   */
+  it('writes cookies the middleware’s fast path recognises as a possible session', () => {
+    expect(signedInCookieHeader).not.toBe('');
+    expect(hasSupabaseAuthCookie(signedInCookieHeader)).toBe(true);
+  });
+
+  // And the other direction, from the same real harness: a browser that has never signed
+  // in carries nothing the fast path mistakes for a session. Without this, a function that
+  // simply returned `true` would satisfy the assertion above.
+  it('leaves a never-signed-in request with nothing that looks like one', () => {
+    expect(hasSupabaseAuthCookie(new FakeAstroCookies().asRequestCookieHeader())).toBe(false);
   });
 
   /**

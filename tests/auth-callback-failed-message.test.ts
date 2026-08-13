@@ -22,7 +22,9 @@ import {
  * "expired or already used" state and the control to ask for another link. The
  * CONFIRMATION leg was not, and could not be by the same trick: `signUpWithPassword`
  * builds that link with no `?next=` at all (deliberately — see its comment), so `next`
- * falls back to ACCOUNT_PATH, the failed exchange took the other branch, and somebody
+ * falls back to safeNextPath's default (ACCOUNT_PATH then, HOME_PATH now that `/` is the
+ * router — the branch turns on `next` NOT being UPDATE_PASSWORD_PATH, which either
+ * satisfies), the failed exchange took the other branch, and somebody
  * confirming a brand-new account was told a sign-in with Google had gone wrong. Google
  * was not involved at any point in that journey.
  *
