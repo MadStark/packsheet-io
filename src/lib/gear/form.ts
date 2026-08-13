@@ -13,12 +13,18 @@
  * thin shell: read the form, call this, either re-render with `.errors`/`.values` or
  * write `.values` to the database.
  *
- * EVERY VALIDATION HERE MIRRORS A DATABASE CHECK CONSTRAINT ON `gear_items`
- * (`supabase/migrations/20260810120000_core_schema.sql`), the same convention
- * `supabase/migrations/20260812000000_worn_consumable_exclusive.sql` uses for its own
- * application-side pair. Each check below names the exact constraint it mirrors in its
- * own comment, because the two files have no shared import and nothing else keeps them
- * from drifting apart.
+ * EVERY VALIDATION HERE MIRRORS EITHER A DATABASE CHECK CONSTRAINT ON `gear_items`
+ * (`supabase/migrations/20260810120000_core_schema.sql`) OR, WHERE THE COLUMN CARRIES
+ * NO CONSTRAINT OF ITS OWN, THE COLUMN'S TYPE OR THE DELIBERATE ABSENCE OF ONE — the
+ * same convention `supabase/migrations/20260812000000_worn_consumable_exclusive.sql`
+ * uses for its own application-side pair. Each check below names the exact constraint
+ * (or type, or absence of one) it mirrors in its own comment, because the two files
+ * have no shared import and nothing else keeps them from drifting apart. TWO FIELDS
+ * ARE THE EXCEPTIONS TO "MIRRORS A CHECK CONSTRAINT": `url` mirrors nothing at the
+ * database at all — `gear_items.url` carries no CHECK constraint, so `isAllowedGearUrl`
+ * is the entire defence — and `acquired_on` mirrors its column's TYPE (`date`) rather
+ * than a CHECK, plus a future-date rejection (PK-61) that has no database-side mirror
+ * whatsoever, CHECK or otherwise.
  *
  * REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS, NOT A GUESS. `name`, `quantity`, `weight`,
  * `weight_unit` and `status` are all `not null` columns on `gear_items` — even where a
@@ -81,6 +87,10 @@ const CURRENCY_INVALID_MESSAGE = 'Enter a valid three-letter currency code, like
 const URL_MESSAGE = 'Enter a valid web address, starting with http:// or https://.';
 const ACQUIRED_ON_MESSAGE =
   'Enter a valid date, or leave this blank if you do not know when you got it.';
+// Deliberately a SEPARATE message from ACQUIRED_ON_MESSAGE above, not a reuse of it —
+// see isAcquiredOnInFuture's own comment for why a future date needs a message that
+// does not call a real, valid date "invalid".
+const ACQUIRED_ON_FUTURE_MESSAGE = 'An acquired date cannot be in the future.';
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -271,12 +281,30 @@ function isAllowedGearUrl(trimmed: string): boolean {
 // Acquired date
 // ---------------------------------------------------------------------------
 
-/** The exact shape PostgREST expects for a `date` column and the only shape this
- *  module will accept: four digits, a literal `-`, two digits, a literal `-`, two
- *  digits. A gate BEFORE the calendar check below, for the same reason
- *  `parseNonNegativeDecimal` gates with a regexp before calling `Number()` — it rules
- *  out `2026-2-3`, `26-02-03` and anything else `new Date()` might parse leniently but
- *  Postgres's own `date` input function would not accept as `YYYY-MM-DD`. */
+/** The only shape this module will accept for `acquired_on`: four digits, a literal
+ *  `-`, two digits, a literal `-`, two digits. A gate BEFORE the calendar check below,
+ *  for the same reason `parseNonNegativeDecimal` gates with a regexp before calling
+ *  `Number()` — it rules out `2026-2-3`, `26-02-03`, `13/08/2026` and anything else
+ *  `new Date()` might parse leniently that nobody typing into a `YYYY-MM-DD` field
+ *  would actually produce.
+ *
+ *  THIS IS THE MODULE CHOOSING TO BE STRICTER THAN POSTGRES — NOT POSTGRES FORCING IT.
+ *  It is tempting to justify this single shape as "what Postgres's own `date` input
+ *  function requires", and that claim is false: verified against the local stack,
+ *  `select '2026-2-3'::date` is ACCEPTED and yields `2026-02-03` — Postgres's date
+ *  parser tolerates a single-digit month or day under the session's `datestyle`. (
+ *  `'26-02-03'::date`, the two-digit-year case, genuinely IS rejected — that is where
+ *  Postgres's own leniency actually runs out, not at `2026-2-3`.) PostgREST does not
+ *  impose a stricter shape either: it passes the literal straight through to Postgres
+ *  unmodified, and `'2026-02-03T00:00:00'::date` is accepted there too. The real
+ *  reason this module refuses everything Postgres would tolerate except one exact
+ *  shape is that Postgres's tolerance depends on `datestyle`, a SESSION SETTING this
+ *  module has no way to see or control from here — accepting whatever Postgres
+ *  currently happens to allow would let "what a visitor typed" and "what ends up
+ *  stored" quietly diverge the moment that setting were ever different. One
+ *  unambiguous shape removes that possibility outright rather than trusting a setting
+ *  this code never touches. Being stricter than the database is the right call here;
+ *  it is just not a call Postgres is making for it. */
 const ACQUIRED_ON_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /**
@@ -324,21 +352,68 @@ function isRealCalendarDate(trimmed: string): boolean {
 }
 
 /**
- * Parses the raw `acquired_on` field. A THREE-WAY RETURN, unlike `parseQuantity`/
- * `parseNonNegativeDecimal` above which use a plain `T | null` for "invalid": those two
- * fields are either well-formed or not, with no third state, but `acquired_on` has a
- * case neither of them do — a value that is not merely optional-and-missing but ABSENT
- * ON PURPOSE, which is not an error at all (see the module comment's "REQUIRED VS
- * OPTIONAL" section). So here `null` means "the field was blank, store `null`, no
- * error" and `undefined` means "the field had something in it, and it was not a real
- * date" — the caller turns the latter, and only the latter, into `errors.acquired_on`.
- * Storing the string EXACTLY as given on success, same as `url` above: this is a
- * validator, not a normaliser.
+ * The latest `acquired_on` this module will accept, as a `YYYY-MM-DD` string: today in
+ * UTC, PLUS ONE DAY of slack. Computed fresh on every call rather than once at module
+ * load, so a long-running server process does not keep validating against the date it
+ * happened to start on.
+ *
+ * Recomputed as a string, and compared lexically rather than as a `Date`, deliberately:
+ * `ACQUIRED_ON_PATTERN` already guarantees a fixed-width, zero-padded `YYYY-MM-DD`
+ * shape for both sides of the comparison, and a fixed-width zero-padded ISO date
+ * string sorts identically whether compared as a string or as a date — so a plain `>`
+ * on the strings is exact, with no `Date` object, no time-zone footgun, and no
+ * separate parse-then-compare step to keep in sync with `isRealCalendarDate` above.
+ *
+ * EXPORTED, not module-private like the rest of this section's helpers, so
+ * `GearItemForm.astro` can read the same cutoff this validator enforces and set it as
+ * the date input's `max` attribute — a client-side hint only (see that component's own
+ * comment on why), but one that has to be computed from the exact same rule as the
+ * server-side check or the hint and the enforcement could silently disagree.
  */
-function parseAcquiredOn(raw: string): string | null | undefined {
-  const trimmed = raw.trim();
-  if (trimmed === '') return null;
-  return isRealCalendarDate(trimmed) ? trimmed : undefined;
+export function acquiredOnFutureCutoff(): string {
+  const now = new Date();
+  const tomorrow = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+  );
+  const year = String(tomorrow.getUTCFullYear()).padStart(4, '0');
+  const month = String(tomorrow.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(tomorrow.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * `acquired_on` (PK-61): whether `trimmed` (already `isRealCalendarDate`, so a genuine
+ * calendar date) names a day strictly after `acquiredOnFutureCutoff()`. Checked
+ * SEPARATELY from `isRealCalendarDate`, not folded into it, because the two failures
+ * need two different messages: `9999-12-31` is a perfectly real calendar date — the
+ * round-trip through `Date.UTC` accepts it without complaint — so telling a visitor who
+ * typed it "enter a valid date" (`ACQUIRED_ON_MESSAGE`) would be actively misleading
+ * about what is actually wrong with it.
+ *
+ * `acquired_on` MEANS "WHEN I GOT THIS", WHICH CANNOT BE IN THE FUTURE — and this is not
+ * merely implausible, it is incoherent by the schema's own vocabulary: gear that is not
+ * yet owned is already modelled as `status = 'wishlist'` (`fields.ts`), so an "owned"
+ * item with a future acquisition date is claiming two contradictory things about itself
+ * at once. Left unchecked, `9999-12-31` validates and stores today exactly as happily
+ * as any real date — and because `GEAR_SORT_COLUMNS.added` now points `acquired_on`
+ * (`fields.ts`), one fat-fingered year permanently pins that item to the top of
+ * "newest first", for as long as the row exists.
+ *
+ * THE ONE-DAY TOLERANCE IS DELIBERATE, NOT A ROUNDING CONVENIENCE THAT WOULD BE TIDIER
+ * TO DROP. This server computes "today" in UTC, but the visitor typing into the date
+ * picker is not necessarily in UTC — someone in UTC+13 or UTC+14 (New Zealand or
+ * Kiribati during their local summer) can have a local calendar date up to FOURTEEN
+ * HOURS ahead of this server's UTC date. Refuse anything after today-in-UTC with no
+ * slack at all, and the instant that visitor's own "today" ticks over, their honest,
+ * present-tense "I got this today" is rejected as a future date it was never intended
+ * to be — a validation bug wearing a "your input is invalid" message. One day of slack
+ * is the smallest margin that covers every real-world UTC offset without admitting a
+ * date that is genuinely, meaningfully in the future for anybody: two or more days
+ * ahead can no longer be explained by a time-zone difference alone, only by an actual
+ * future date.
+ */
+function isAcquiredOnInFuture(trimmed: string): boolean {
+  return trimmed > acquiredOnFutureCutoff();
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +430,20 @@ function parseOptionalText(raw: string): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+/**
+ * Reads one field off `form` as a bare string. TWO KNOWN COERCIONS, DOCUMENTED HERE
+ * RATHER THAN FIXED — see `parseGearItemForm`'s own doc comment for why fixing either
+ * is out of scope for this ticket — so the next reader does not have to rediscover them
+ * from a confusing bug report:
+ *
+ *   - A field submitted MORE THAN ONCE (`acquired_on=&acquired_on=2026-99-99`, say,
+ *     from a hand-crafted or buggy client sending the same key twice) reads back only
+ *     the FIRST value — `FormData.get()`'s own documented behaviour — so the second,
+ *     possibly-malformed value is silently discarded rather than validated or reported.
+ *   - A NON-STRING entry — a `File` part from a multipart POST landing on a field this
+ *     form expects to be plain text — folds to `''`, indistinguishable from an empty or
+ *     absent field, rather than being treated as a type error.
+ */
 function getFormString(form: FormData, key: string): string {
   const value = form.get(key);
   return typeof value === 'string' ? value : '';
@@ -404,9 +493,19 @@ export function rawGearFormValues(form: FormData): GearFormValues {
 
 /**
  * Validates a gear item create/edit submission. Never throws — a malformed or hostile
- * `FormData` (a missing field, a field submitted twice, a `javascript:` URL) always
- * produces `{ ok: false, errors, values }`, mirroring `parseGearQuery`'s totality
+ * `FormData` (a missing field, a `javascript:` URL) always produces `{ ok: false,
+ * errors, values }` for a genuinely bad value, mirroring `parseGearQuery`'s totality
  * promise on the read side of this same module family.
+ *
+ * A DOCUMENTED LIMIT ON THAT GUARANTEE, NOT A SILENT GAP: it does NOT hold for a field
+ * submitted MORE THAN ONCE, or for a non-string entry — see `getFormString`'s own
+ * comment for both. `form.get()` returns only the first value for a repeated key, so
+ * `acquired_on=&acquired_on=2026-99-99` reads back as `''`, is treated as "not
+ * provided", and comes back `ok: true` with no error at all — the second, malformed
+ * value is simply never seen. A `File` part in a multipart POST is folded to `''` the
+ * same way. Fixing either is deliberately out of scope here: `getFormString` backs all
+ * thirteen fields, and changing it is a cross-cutting change for its own ticket, not a
+ * side effect of PK-61 touching `acquired_on`.
  *
  * ALL FIELDS ARE VALIDATED, NOT JUST THE FIRST BAD ONE. A visitor who mistypes both
  * the weight and the price should see both problems on one re-render, not fix one and
@@ -489,12 +588,36 @@ export function parseGearItemForm(form: FormData): GearFormResult {
   }
   // else: both absent. price and currency stay null; not an error.
 
-  // pairs with: acquired_on date — nullable, no default. UNLIKE every other check in
-  // this file, this one mirrors a TYPE rather than a CHECK constraint: `date` itself
-  // rejects anything that is not a real calendar date, so there is no separate
-  // constraint clause to name here the way `weight >= 0` or `status in (...)` have one.
-  const acquiredOn = parseAcquiredOn(values.acquired_on);
-  if (acquiredOn === undefined) errors.acquired_on = ACQUIRED_ON_MESSAGE;
+  // pairs with: acquired_on date — nullable, no default. Mirrors a TYPE rather than a
+  // CHECK constraint: `date` itself rejects anything that is not a real calendar date,
+  // so there is no separate constraint clause to name here the way `weight >= 0` or
+  // `status in (...)` have one. Not the only exception in this file, either — `url`
+  // below mirrors no CHECK constraint at all (gear_items.url has none; see
+  // isAllowedGearUrl's own comment), so acquired_on is the file's SECOND column with no
+  // CHECK of its own to name, not its only one. The future-date rejection just below
+  // has no database-side mirror whatsoever — nothing on this column stops a future date
+  // from being written directly; only this form's own check does.
+  //
+  // Shape follows `url`'s block below, not a bespoke three-way return: presence is
+  // decided here, at the call site, with a plain boolean predicate
+  // (`isRealCalendarDate`) exactly the way `isAllowedGearUrl` is used for `url` — see
+  // the module comment's "REQUIRED VS OPTIONAL" section for why `trimmed !== ''` is
+  // "not provided", never an error, for a nullable column with no default.
+  const acquiredOnRaw = values.acquired_on.trim();
+  let acquiredOn: string | null = null;
+  if (acquiredOnRaw !== '') {
+    if (!isRealCalendarDate(acquiredOnRaw)) {
+      errors.acquired_on = ACQUIRED_ON_MESSAGE;
+    } else if (isAcquiredOnInFuture(acquiredOnRaw)) {
+      // A real calendar date, just not one that has happened yet — a DIFFERENT problem
+      // from "not a real date", so it gets its own message rather than reusing
+      // ACQUIRED_ON_MESSAGE, which would tell a visitor who typed a perfectly valid
+      // date that it was invalid.
+      errors.acquired_on = ACQUIRED_ON_FUTURE_MESSAGE;
+    } else {
+      acquiredOn = acquiredOnRaw;
+    }
+  }
 
   // gear_items.url carries no CHECK constraint — see isAllowedGearUrl's own comment for
   // why this parser is the entire defence against a javascript:/data: URL reaching an
@@ -535,14 +658,7 @@ export function parseGearItemForm(form: FormData): GearFormResult {
       weight_unit: weightUnit!,
       price,
       currency,
-      // `?? null` here, not `!`, because `undefined` (parseAcquiredOn's error sentinel)
-      // is a real member of acquiredOn's type that `!` would merely paper over. It is
-      // unreachable in this branch regardless — `errors` is confirmed empty above, and
-      // `parseAcquiredOn` only ever returns `undefined` alongside an `errors.acquired_on`
-      // entry — but folding it to `null` rather than asserting it away keeps this line
-      // correct even if that invariant were ever violated, for a field whose entire
-      // point is "absent is not an error".
-      acquired_on: acquiredOn ?? null,
+      acquired_on: acquiredOn,
       status: status!,
       url,
       brand,

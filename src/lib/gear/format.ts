@@ -1,9 +1,11 @@
 /**
  * Pure display formatting for the closet list (PK-4) that is not already covered by
- * `src/lib/money.ts` or `src/lib/units.ts` on its own — specifically, what to show for
- * a `gear_items` row's price, which is nullable and, per `src/lib/money.ts`'s own
- * `isCurrencyCode`, only shape-validated on write, never guaranteed to still be a real
- * `CurrencyCode` by the time it is read back through a bare `string | null` client.
+ * `src/lib/money.ts` or `src/lib/units.ts` on its own — what to show for a `gear_items`
+ * row's price, which is nullable and, per `src/lib/money.ts`'s own `isCurrencyCode`,
+ * only shape-validated on write and never guaranteed to still be a real `CurrencyCode`
+ * by the time it is read back through a bare `string | null` client; for its `status`;
+ * and, since PK-61, for its `acquired_on`, a nullable date whose absence is an ordinary
+ * value ("I don't know") rather than a data problem.
  *
  * WHY THIS LIVES IN src/lib/ RATHER THAN IN THE PAGE. Same reasoning as the rest of
  * this directory: `vitest.config.ts:64` excludes `src/pages/`, and "what does a
@@ -21,17 +23,20 @@
 import { formatMoney, fromDecimal, isCurrencyCode } from '../money';
 import { GEAR_STATUS_LABELS, isGearStatus } from './fields';
 
-/** Shown for a row with no price at all, or with a price this module refuses to
- *  render — see `formatGearPrice` for both cases. An em dash rather than "N/A" or a
- *  blank cell: it reads as "nothing here" in a numeric column without implying an
- *  error, the same role it plays in the rest of this product's tables. */
-const NO_PRICE_LABEL = '—';
-
-/** Shown for a `gear_items` row with no `acquired_on` — see `formatGearAcquiredOn`.
- *  Same em dash as `NO_PRICE_LABEL`, and for the same reason: it reads as "nothing
- *  here" in a column that is otherwise a plain date, without implying an error or a
- *  missing-data problem the visitor is expected to fix. */
-const NO_DATE_LABEL = '—';
+/** Shown wherever a closet-list cell has nothing to render: a row with no price at all
+ *  or with a price this module refuses to render (see `formatGearPrice` for both), and
+ *  a row with no `acquired_on` (see `formatGearAcquiredOn`). An em dash rather than
+ *  "N/A", "Unknown" or a blank cell: it reads as "nothing here" without implying an
+ *  error or a missing-data problem the visitor is expected to go and fix, and it is the
+ *  same mark this role plays in the rest of this product's tables.
+ *
+ *  ONE constant rather than one per column, deliberately. PK-61 briefly had a second
+ *  constant holding the identical em dash for the date column, with a comment
+ *  cross-referencing this one — two names for a single decision, which is how the two
+ *  quietly drift apart later when somebody changes "the empty-cell mark" and finds only
+ *  one of them. How this table renders absence is a single product decision, so it is
+ *  spelled once and named for the idea rather than for either column. */
+const NO_VALUE_LABEL = '—';
 
 /**
  * Renders a `gear_items` row's `price`/`currency` pair for the closet list, reusing
@@ -59,8 +64,8 @@ const NO_DATE_LABEL = '—';
  *     single malformed row from taking down the whole list render.
  */
 export function formatGearPrice(price: number | null, currency: string | null): string {
-  if (price === null || currency === null) return NO_PRICE_LABEL;
-  if (!isCurrencyCode(currency)) return NO_PRICE_LABEL;
+  if (price === null || currency === null) return NO_VALUE_LABEL;
+  if (!isCurrencyCode(currency)) return NO_VALUE_LABEL;
   return formatMoney(fromDecimal(price, currency));
 }
 
@@ -82,7 +87,7 @@ export function formatGearStatus(status: string): string {
 
 /**
  * Renders a `gear_items` row's `acquired_on` for the closet list: the date string as-is
- * when present, `NO_DATE_LABEL` when `null`. `acquired_on` is a nullable `date` column
+ * when present, `NO_VALUE_LABEL` when `null`. `acquired_on` is a nullable `date` column
  * with no database default (PK-61) — the visitor's own claim about when they got the
  * item, not a fact this product derives — so `null` is an ordinary, expected value here
  * ("I don't know"), not a data problem to guard against the way `formatGearPrice`'s
@@ -99,5 +104,5 @@ export function formatGearStatus(status: string): string {
  * no-value case.
  */
 export function formatGearAcquiredOn(acquiredOn: string | null): string {
-  return acquiredOn === null ? NO_DATE_LABEL : acquiredOn;
+  return acquiredOn === null ? NO_VALUE_LABEL : acquiredOn;
 }

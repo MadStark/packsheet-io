@@ -416,8 +416,12 @@ describe('parseGearItemForm: acquired_on', () => {
     if (result.ok) expect(result.values.acquired_on).toBeNull();
   });
 
-  // Stored EXACTLY as given, not reformatted — same "no rewriting" discipline as `url`
-  // above: this is a validator, not a normaliser (parseAcquiredOn's own doc comment).
+  // Stored as the TRIMMED string, not reformatted otherwise — same "no rewriting"
+  // discipline as `url` below: this is a validator, not a normaliser. ("Exactly as
+  // given" would overstate it — the accepted value is `values.acquired_on.trim()`, not
+  // the untrimmed raw string; this test's input has no surrounding whitespace to trim,
+  // so it does not distinguish the two, but the wording here should not claim more than
+  // the code does.)
   it('accepts a valid date and stores it exactly as given', () => {
     const result = parseGearItemForm(formData({ acquired_on: '2026-08-13' }));
     expect(result.ok).toBe(true);
@@ -471,10 +475,15 @@ describe('parseGearItemForm: acquired_on', () => {
 
   // Malformed shapes ACQUIRED_ON_PATTERN refuses outright, before isRealCalendarDate
   // ever runs — the same reason parseNonNegativeDecimal gates with a regexp before
-  // calling Number(): '2026-2-3' and '26-02-03' are exactly the leniency `new Date()`
-  // would otherwise accept that Postgres's own `date` input function would not, and
-  // '13/08/2026'/'today' are shapes nobody typing into a `YYYY-MM-DD` field would
-  // produce by accident.
+  // calling Number(). NOT because Postgres itself would refuse these: verified against
+  // the local stack, `select '2026-2-3'::date` is ACCEPTED (Postgres's date parser
+  // tolerates a single-digit month/day) — only '26-02-03', the two-digit-year shape, is
+  // genuinely rejected by Postgres. This module is stricter than Postgres ON PURPOSE
+  // (see ACQUIRED_ON_PATTERN's own comment in form.ts for the full reasoning: Postgres's
+  // leniency depends on a `datestyle` session setting this module cannot see), not
+  // because Postgres's own `date` input function would refuse the leniency `new Date()`
+  // shows. '13/08/2026'/'today' are shapes nobody typing into a `YYYY-MM-DD` field would
+  // produce by accident, regardless of what either parser does with them.
   it.each(['2026-2-3', '26-02-03', '13/08/2026', 'today'])(
     'rejects the malformed shape %s',
     (value) => {
@@ -496,6 +505,68 @@ describe('parseGearItemForm: acquired_on', () => {
     const result = parseGearItemForm(formData({ acquired_on: '0026-02-03' }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.acquired_on).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// acquired_on: future-date rejection (PK-61, isAcquiredOnInFuture in form.ts)
+// ---------------------------------------------------------------------------
+
+/** `YYYY-MM-DD` for `daysFromToday` days from today, computed in UTC — the exact
+ *  arithmetic `acquiredOnFutureCutoff` (form.ts) itself does, so these tests stay
+ *  correct on whatever day they happen to run rather than rotting the moment "today"
+ *  moves past a hard-coded date. */
+function isoDateOffsetUTC(daysFromToday: number): string {
+  const now = new Date();
+  const target = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysFromToday),
+  );
+  const year = String(target.getUTCFullYear()).padStart(4, '0');
+  const month = String(target.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(target.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+describe('parseGearItemForm: acquired_on cannot be in the future', () => {
+  // The case the ticket names explicitly: nothing previously bounded this field, so
+  // `9999-12-31` — a perfectly real calendar date, which is exactly why it must NOT be
+  // rejected with ACQUIRED_ON_MESSAGE's "enter a valid date" — validated and stored.
+  // Distinctly worded from the malformed-shape rejections above: this date IS well
+  // formed, so it needs its own message rather than reusing the "not a valid date" one.
+  it('rejects a date far in the future, with a message distinct from the malformed-date one', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '9999-12-31' }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.acquired_on).toBeTruthy();
+      expect(result.errors.acquired_on).toBe('An acquired date cannot be in the future.');
+    }
+  });
+
+  it("accepts today's date", () => {
+    const result = parseGearItemForm(formData({ acquired_on: isoDateOffsetUTC(0) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.acquired_on).toBe(isoDateOffsetUTC(0));
+  });
+
+  // THE ONE-DAY TOLERANCE, PINNED: a visitor whose local calendar date is a day ahead
+  // of this server's UTC date (UTC+13/UTC+14, say) must not be told their honest
+  // "today" is in the future. `isAcquiredOnInFuture`'s own comment names this exact
+  // scenario as the reason the cutoff is "today in UTC, plus one day" rather than "today
+  // in UTC" with no slack at all.
+  it('accepts a date one day ahead of UTC today — the cross-time-zone tolerance', () => {
+    const result = parseGearItemForm(formData({ acquired_on: isoDateOffsetUTC(1) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.acquired_on).toBe(isoDateOffsetUTC(1));
+  });
+
+  // One day past the tolerance: no real time-zone offset explains being two calendar
+  // days ahead of UTC, so this is where the cutoff actually bites.
+  it('rejects a date two days ahead of UTC today — just past the tolerance', () => {
+    const result = parseGearItemForm(formData({ acquired_on: isoDateOffsetUTC(2) }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.acquired_on).toBe('An acquired date cannot be in the future.');
+    }
   });
 });
 
