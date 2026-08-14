@@ -14,19 +14,18 @@
  * (PK-4 review, C3/I3). An earlier version of this comment described the page's own
  * query as `client.from('gear_items').select('category, brand')` and called the result
  * "the signed-in visitor's own closet under RLS" — THAT WAS THE EXACT BUG THIS FEATURE
- * EXISTS TO PREVENT, not a simplification. `gear_items`
- * carries TWO permissive SELECT policies (core_schema.sql): `gear_items_select_own`
- * (owner only) and `gear_items_select_via_public_pack`, granted to `anon,
- * authenticated` alike so a shared pack link can render the gear behind it. RLS
- * policies are UNIONED, not intersected, so that query — with no explicit owner filter
- * — would answer with this visitor's own rows OR any row that happens to sit on
- * ANYONE's public pack: "under RLS" alone does not mean "my own closet" for this table,
- * ever. `loadGearOptions` adds `.eq('user_id', userId)` for the same reason
- * `loadGearCloset` (`src/lib/gear/query.ts`) does on the main list query — see that
- * function's own comment for the fuller version of this same argument — which is also
- * what makes the owner scope something `tests/gear-closet.test.ts` can now assert on
- * directly, rather than trusting a comment that turned out to say the opposite of what
- * was true.
+ * EXISTS TO PREVENT, not a simplification. `gear_items` carries TWO permissive SELECT
+ * policies (core_schema.sql): `gear_items_select_own` (owner only) and
+ * `gear_items_select_via_public_pack`, granted to `anon, authenticated` alike so a
+ * shared pack link can render the gear behind it. RLS policies are UNIONED, not
+ * intersected, so that query — with no explicit owner filter — would answer with this
+ * visitor's own rows OR any row that happens to sit on ANYONE's public pack: "under RLS"
+ * alone does not mean "my own closet" for this table, ever. `loadGearOptions` adds
+ * `.eq('user_id', userId)` for the same reason `loadGearCloset`
+ * (`src/lib/gear/query.ts`) does on the main list query — see that function's own
+ * comment for the fuller version of this same argument — which is also what makes the
+ * owner scope something `tests/gear-closet.test.ts` can now assert on directly, rather
+ * than trusting a comment that turned out to say the opposite of what was true.
  *
  * POSTGREST CAPS HOW MANY ROWS ONE QUERY RETURNS (`db-max-rows`, 1000 on Supabase's
  * default configuration), so this options query — like the main list query it sits

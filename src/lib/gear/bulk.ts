@@ -2,15 +2,28 @@
  * Bulk actions for the gear closet list (PK-4) — set category, set status, and delete,
  * which really deletes: the row leaves `gear_items` and does not come back. There is no
  * trash to fish it out of and no undo to press, so the two-step confirmation
- * `BULK_FORM_FIELD.confirm` implements is the whole of what stands between a selection
- * and its removal; see that field's own comment.
+ * `confirmsGearDeletion` decides is the whole of what stands between a selection and its
+ * removal; see that function's own comment.
+ *
+ * That gate is the one thing in here that is NOT only about the closet LIST.
+ * `src/pages/gear/[id].astro` deletes a single item through the same reveal-then-confirm
+ * step, so it imports `BULK_FORM_FIELD.confirm`, `GEAR_DELETE_CONFIRMATION_VALUE` and
+ * `confirmsGearDeletion` from here rather than spelling any of the three out again —
+ * PK-60 review, F1: it did spell the field and the value out again, privately, and two
+ * copies of the only guard in front of an irreversible write are two copies nothing
+ * keeps in step.
  *
  * WHY THIS LIVES IN src/lib/ RATHER THAN IN THE PAGE. Same reasoning as
  * `src/lib/gear/form.ts` and `src/lib/gear/query.ts`: `vitest.config.ts:64` excludes
  * `src/pages/` from the test run, and a bulk action form posts ids straight from a URL
  * -adjacent, visitor-controlled `FormData` — exactly the kind of input that has to be
  * validated somewhere `tests/gear-bulk.test.ts` can reach directly, not somewhere that
- * only runs as part of rendering a route.
+ * only runs as part of rendering a route. The delete gate is the sharpest case of that
+ * rule and was, until PK-60's review, the one place it was not being followed: an inline
+ * `form.get('confirm') === '1'` in each of the two gear pages, in the one directory the
+ * test runner cannot reach. `src/lib/account-deletion.ts` had already been through
+ * exactly this (see its header, and `tests/account-deletion-gate.test.ts`); the gate
+ * below is that same move made for gear.
  *
  * WHAT THIS MODULE DOES NOT DO. It does not run a query. `parseBulkAction` decides
  * WHICH ids and WHAT action; `src/lib/gear/mutations.ts` is what issues the actual
@@ -58,19 +71,91 @@ export const BULK_FORM_FIELD = {
   id: 'id',
   category: 'category',
   status: 'status',
-  // The closet list's two-step bulk delete (mirroring the confirm-delete pattern in
-  // src/pages/account/index.astro): the first `bulk-delete` submission carries no
-  // `confirm` field and only reveals a confirmation naming the selection; the second,
-  // re-submitted with the same ids and `confirm=1`, is the one that actually issues the
-  // DELETE. That reveal-then-confirm step is the ONLY thing in front of an irreversible
-  // write — `deleteGearItems` (src/lib/gear/mutations.ts) removes the rows outright, so
-  // there is nothing downstream of this field to catch a selection the visitor did not
-  // mean, and nothing afterwards to put back. There is no BULK_INTENT for "confirm" —
-  // it is the same intent, gated by this one extra field, so the id-parsing rules above
-  // apply identically to both submissions rather than needing a second, parallel
-  // validation path.
+  // The field carrying the second, confirming step of a delete — read through
+  // `confirmsGearDeletion` below, which is where what counts as confirmation is decided
+  // and why. There is no BULK_INTENT for "confirm": it is the same intent, gated by this
+  // one extra field, so the id-parsing rules above apply identically to both
+  // submissions rather than needing a second, parallel validation path.
   confirm: 'confirm',
 } as const;
+
+// ---------------------------------------------------------------------------
+// The delete gate
+// ---------------------------------------------------------------------------
+
+/**
+ * The value `BULK_FORM_FIELD.confirm` has to carry for a delete to go ahead.
+ *
+ * Exported so that the hidden input which WRITES it and `confirmsGearDeletion` which
+ * READS it are the same string rather than two literals that agree today. Both gear
+ * pages render `value={GEAR_DELETE_CONFIRMATION_VALUE}`; with a bare `value="1"` in the
+ * markup instead, changing what the reader accepts silently turns every rendered
+ * confirmation button into a no-op — a delete that reports success and does nothing, or
+ * (changed the other way) a first submission that deletes without confirming.
+ */
+export const GEAR_DELETE_CONFIRMATION_VALUE = '1';
+
+/**
+ * Whether a submission is the confirming half of a two-step gear delete: the first
+ * submission carries no `confirm` field and only reveals a confirmation naming what is
+ * about to go, and the second — re-posted with the same ids plus this field — is the one
+ * that reaches `deleteGearItems` (`src/lib/gear/mutations.ts`) and removes the rows.
+ * Both gear pages call this: the closet list for a bulk delete
+ * (`src/pages/gear/index.astro`) and the item page for a single item
+ * (`src/pages/gear/[id].astro`).
+ *
+ * WHY THIS IS A FUNCTION IN src/lib/ AND NOT `form.get('confirm') === '1'` IN THE PAGE,
+ * where it was until PK-60's review. It is the whole safety net: `deleteGearItems`
+ * removes the rows outright, so nothing downstream catches a selection the visitor did
+ * not mean and nothing afterwards puts it back — and `vitest.config.ts:64` excludes
+ * `src/pages/`, so as page frontmatter it was the only guard in front of the gear
+ * closet's one irreversible write, with no test able to execute it. Exactly the
+ * argument `src/lib/account-deletion.ts` records for `confirmsAccountDeletion`, which
+ * moved out of `.astro` frontmatter for the same reason and is tested in
+ * `tests/account-deletion-gate.test.ts`.
+ *
+ * THE PARAMETER IS WHAT `form.get()` REALLY RETURNS, not `string | null`. A multipart
+ * POST can send a `File` under any name it likes, including this one, so the honest type
+ * is `FormDataEntryValue | null` — and a strict `===` against a string constant answers
+ * `false` for a `File` without a `typeof` dance and, more to the point, without throwing.
+ * The natural-looking `value?.toString().trim() === '1'` spelling would turn a crafted
+ * multipart body into a 500 rather than a refusal.
+ *
+ * NOTHING IS TRIMMED, LOWER-CASED OR COERCED, and that is the OPPOSITE decision from
+ * `confirmsAccountDeletion`, deliberately. That value is typed by a person into a box,
+ * so a trailing space from a paste or a capital from a phone keyboard is a keyboard
+ * artefact and refusing it would only teach someone that the refusals mean nothing.
+ * Nobody types this one: it is written by a hidden input this application renders
+ * itself, from the constant above. `' 1 '`, `'true'`, `'on'` and `'0'` are therefore not
+ * a person being imprecise — they are a submission assembled somewhere other than the
+ * confirmation we rendered, and there is no visitor to frustrate by refusing them,
+ * because the real confirmation is one click away. The bug this shape rules out is the
+ * obvious one: a truthiness check (`if (form.get(BULK_FORM_FIELD.confirm))`) confirms on
+ * `'0'`, on `'false'`, and on a `File`.
+ */
+export function confirmsGearDeletion(value: FormDataEntryValue | null): boolean {
+  return value === GEAR_DELETE_CONFIRMATION_VALUE;
+}
+
+/**
+ * What both gear pages say when `deleteGearItems` comes back with an error. It lives
+ * beside the gate because the two are halves of one decision the pages make about a
+ * delete — what lets it through, and what to say when it does not come back — and
+ * because, like the gate, a message about a permanent delete is not something the two
+ * pages should each be wording separately.
+ *
+ * IT DOES NOT SAY "UPDATING" and it does not say "please try again", which is what the
+ * generic write error each page keeps for its other write paths says. Neither is true
+ * here. "Updating" describes the wrong operation. And "try again" quietly asserts the
+ * delete did not happen — but a DELETE that commits and then loses its response (a
+ * worker timeout, a reset connection, a 502 between Postgres and here) arrives in this
+ * same branch with the rows already gone. This wording claims neither outcome and sends
+ * the visitor to the only thing that can actually answer the question: the list, which
+ * after PK-60 is the single source of truth for what is still in the closet — there is
+ * no trash to check, and no log of what was removed.
+ */
+export const GEAR_DELETE_FAILED_MESSAGE =
+  'We could not confirm whether that delete went through. Check your gear closet to see what is still there.';
 
 // ---------------------------------------------------------------------------
 // Ids
@@ -199,7 +284,7 @@ export function parseBulkAction(form: FormData): BulkActionResult {
   }
 
   // delete: ids only, nothing further to validate here. Whether the visitor has
-  // confirmed is `BULK_FORM_FIELD.confirm`'s business, read by the page on the way to
+  // confirmed is `confirmsGearDeletion`'s business, called by the page on the way to
   // deciding whether to re-render the confirmation or issue the write — this function
   // answers only WHICH rows and WHAT action, exactly as it does for the other two.
   if (Object.keys(errors).length > 0) return { ok: false, errors };

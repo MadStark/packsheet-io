@@ -1,11 +1,13 @@
--- Deleting gear deletes it (PK-60): drop public.gear_items.deleted_at.
+-- Deleting gear deletes it (PK-60): empty the trash into `status`, then drop
+-- public.gear_items.deleted_at.
 --
--- One column removed, and nothing else. No index to drop — 20260813000000_gear_closet.sql
--- closes with a "Deliberately no new indexes" section, so nothing indexes this column. No
--- policy, grant or constraint change either: the table-level grants and owner-scoped
--- policies in 20260810120000_core_schema.sql are column-agnostic and never named it. And
--- no trigger change — gear_items_snapshot_before_delete is left exactly as it is, for
--- reasons the second section below is entirely about.
+-- Two statements, and nothing else. No index to drop — 20260813000000_gear_closet.sql's
+-- "Deliberately no new indexes" section (:123-146) lists deleted_at by name among the
+-- columns it declines to index (:136), so nothing points at it. No policy, grant or
+-- constraint change either: the table-level grants and owner-scoped policies in
+-- 20260810120000_core_schema.sql are column-agnostic and never named it. And no trigger
+-- change — gear_items_snapshot_before_delete is left exactly as it is, for reasons the
+-- second section below is entirely about.
 
 -- ---------------------------------------------------------------------------
 -- Retired is the trash
@@ -35,11 +37,17 @@
 --      so there is no second row whose date added could be wrong.
 --
 --   2. NOT MOOT — this is the price, and it should be read as one. The freeze that
---      gear_items_snapshot_before_delete (core_schema.sql:437-439) performs into every
---      referencing pack_item, nulling their gear_item_id, is irreversible by design and
---      remains so. What soft delete really bought was keeping that trigger OUT of ordinary
---      use, reachable only by emptying the trash; this migration puts it back into
---      ordinary use, because deleting is now the ordinary gesture. Once Ref 37 (pack
+--      gear_items_snapshot_before_delete (core_schema.sql:437-439) performs is irreversible
+--      by design and remains so. Precisely: it fires BEFORE DELETE, once per row, and
+--      writes the row into every referencing pack_item THAT HAS NO SNAPSHOT YET — a locked
+--      pack froze its own copy at lock time and is left alone, which is what the trigger
+--      function's `and snapshot is null` is for. It does not touch gear_item_id at all;
+--      nulling that is the composite foreign key's `on delete set null (gear_item_id)`
+--      (core_schema.sql:310-311), a separate mechanism that fires after. (deleteGearItems
+--      in src/lib/gear/mutations.ts states the same two facts, and is the version to keep
+--      this one in step with.) What soft delete really bought was keeping that trigger OUT
+--      of ordinary use, reachable only by emptying the trash; this migration puts it back
+--      into ordinary use, because deleting is now the ordinary gesture. Once Ref 37 (pack
 --      composition) lands and packs genuinely reference closet gear, deleting an item will
 --      rewrite every pack carrying it to a frozen snapshot with no gear_item_id, and
 --      nothing anywhere can walk that back. That is a decision, not an oversight: the
@@ -50,17 +58,44 @@
 --      it could be found by id. There is no trash to find it from.
 
 -- ---------------------------------------------------------------------------
--- Forward-only, and what that does to rows that are soft-deleted right now
+-- Forward-only, and what that does to rows that are in the trash right now
 -- ---------------------------------------------------------------------------
 --
 -- Dropping a column destroys its data and this project ships no down-migrations; recovery
--- from a bad migration is another migration (.github/workflows/deploy-staging.yml). So the
--- consequence worth naming is that any row currently holding a non-null deleted_at becomes
--- an ordinary, visible item in its owner's closet again. It is NOT hard-deleted on the way
--- through — the record that someone once trashed it is simply gone, and the item itself
--- stays. That is the right outcome for the only place it can happen: hosted staging, where
--- the column has existed for less than a day. Production has never had it. Written down so
--- a later reader of this history can see this was considered rather than missed.
+-- from a bad migration is another migration (.github/workflows/deploy-staging.yml). Which
+-- makes the order of the two statements below the whole of this section. A bare `drop
+-- column` would hand every row currently holding a non-null deleted_at back to its owner
+-- as an ordinary item marked `owned` — a silent un-delete of everything they deliberately
+-- put in the trash, and the exact "two kinds of gone" confusion this ticket exists to
+-- remove, arriving from the migration meant to remove it. So the UPDATE runs first and
+-- moves those rows to where the section above argues the trash now is: `status =
+-- 'retired'`, already one of the three values that column's own check constraint allows
+-- (core_schema.sql:104), so this needs no constraint change and can never fail on one.
+-- What the owner finds afterwards is a retired item — visible, correctly marked, and
+-- reversible with the same status control as everything else in the closet.
+--
+-- THE MAPPING IS LOSSY, AND DELIBERATELY SO. "Trashed" and "retired" were genuinely
+-- different states — one invisible and time-stamped, reached by a gesture that meant "get
+-- this out of my sight", the other on screen and meaning "I no longer own this" — and the
+-- row keeps no record of ever having been in the first. deleted_at's timestamp goes with
+-- the column, and a row that was already retired before being trashed is afterwards
+-- indistinguishable from one that was only ever retired. There is no state left to encode
+-- the difference into, and inventing one would be re-adding this column under another
+-- name. Nothing is hard-deleted on the way through: the ITEM survives every time, only the
+-- record of the trash gesture does not.
+--
+-- WRITTEN FOR ANY DATABASE, NOT FOR TODAY'S. As it happens this UPDATE will match nothing
+-- worth naming right now — hosted staging has had the column for less than a day and
+-- production has never had it. That is a fact about one afternoon's deployment, not a
+-- property of this file, and this file is permanent: it will run against any database that
+-- ever acquires the column, including a restored snapshot, a stale local stack, or a
+-- branch database rebuilt from this directory. Relying on "there are no such rows" would
+-- be leaving the un-delete above in place and betting nobody ever replays this migration
+-- somewhere it matters.
+update public.gear_items
+   set status = 'retired'
+ where deleted_at is not null;
+
 alter table public.gear_items
   drop column deleted_at;
 

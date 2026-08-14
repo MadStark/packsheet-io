@@ -20,6 +20,12 @@ import {
   type GearItemRow,
 } from '../../lib/gear/form';
 import { deleteGearItems, updateGearItem } from '../../lib/gear/mutations';
+import {
+  BULK_FORM_FIELD,
+  GEAR_DELETE_CONFIRMATION_VALUE,
+  GEAR_DELETE_FAILED_MESSAGE,
+  confirmsGearDeletion,
+} from '../../lib/gear/bulk';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -44,6 +50,10 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 
 // Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts
 // and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
+// This one covers the edit path and the unrecognised-intent path only. A failed DELETE
+// reports GEAR_DELETE_FAILED_MESSAGE (src/lib/gear/bulk.ts) instead: this sentence says
+// "updating", which a delete is not, and "please try again", which promises the write
+// did not happen — see that constant's own comment for the case where that is false.
 const GENERIC_WRITE_ERROR = 'Something went wrong updating this item. Please try again.';
 
 // This page answers two different POSTs from two different forms — save the edit, or
@@ -52,8 +62,15 @@ const GENERIC_WRITE_ERROR = 'Something went wrong updating this item. Please try
 // forms apart. Not exported from src/lib/gear/ because there is no decision buried in
 // naming two strings — see GearItemForm's own "NO DECISION-MAKING LIVES HERE" for the
 // line this page stays on the right side of.
+//
+// The delete CONFIRMATION field is a different matter and is no longer named here
+// (PK-60 review, F1). This page used to declare its own private `DELETE_CONFIRM_FIELD =
+// 'confirm'` and compare it inline — a second, independent copy of the guard in front
+// of the only irreversible write in this product, kept in step with the closet list's
+// copy by nothing, in the directory vitest.config.ts:64 excludes from the test run.
+// Both pages now read BULK_FORM_FIELD.confirm through confirmsGearDeletion, which has
+// a test.
 const GEAR_ITEM_INTENT = { edit: 'edit-item', delete: 'delete-item' } as const;
-const DELETE_CONFIRM_FIELD = 'confirm';
 
 let formErrors: Readonly<Record<string, string>> = {};
 let formValuesOverride: GearFormValues | null = null;
@@ -71,7 +88,7 @@ if (Astro.request.method === 'POST') {
   const intent = form.get('intent');
 
   if (intent === GEAR_ITEM_INTENT.delete) {
-    const confirmed = form.get(DELETE_CONFIRM_FIELD) === '1';
+    const confirmed = confirmsGearDeletion(form.get(BULK_FORM_FIELD.confirm));
     if (!confirmed) {
       pendingDelete = true;
     } else {
@@ -88,7 +105,12 @@ if (Astro.request.method === 'POST') {
       const { error } = await deleteGearItems(client, user.id, [id]);
 
       if (error) {
-        writeError = GENERIC_WRITE_ERROR;
+        // Not GENERIC_WRITE_ERROR: this branch is also where a delete that COMMITTED and
+        // then lost its response lands, so the message must not promise the item is
+        // still here — see GEAR_DELETE_FAILED_MESSAGE's own comment. It points at the
+        // closet rather than at this page on purpose: if the row did go, this URL is
+        // about to start answering 404, and the list is what can actually say.
+        writeError = GEAR_DELETE_FAILED_MESSAGE;
       } else {
         // Straight back to the closet, with nothing appended. The item's absence from
         // that list is the confirmation — a banner announcing a deletion the visitor
@@ -205,10 +227,11 @@ const updated = Astro.url.searchParams.get('updated') === '1';
         pendingDelete ? (
           <div>
             <h2 class="text-rust text-lg">Confirm delete</h2>
-            {/* The same two sentences the closet list's bulk confirmation uses
-                (src/pages/gear/index.astro), narrowed to one named item: the
-                irreversibility first, then the one thing a visitor might reasonably
-                fear losing alongside it. gear_items_snapshot_before_delete
+            {/* The same two ideas the closet list's bulk confirmation carries after the
+                question itself (src/pages/gear/index.astro), in the same order and
+                narrowed to one named item: the irreversibility first, then the one thing
+                a visitor might reasonably fear losing alongside it.
+                gear_items_snapshot_before_delete
                 (core_schema.sql) freezes this row's name, weight and price into every
                 pack_items row still pointing at it, so a pack that lists this item
                 keeps its line rather than losing it. No typed-word confirmation, for
@@ -219,7 +242,14 @@ const updated = Astro.url.searchParams.get('updated') === '1';
             </p>
             <form method="POST" class="mt-4 flex gap-3">
               <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
-              <input type="hidden" name={DELETE_CONFIRM_FIELD} value="1" />
+              {/* Field name and value both from src/lib/gear/bulk.ts, never spelled out
+                  here: this hidden input is the WRITER of the same gate
+                  confirmsGearDeletion READS, and the two must not be able to drift. */}
+              <input
+                type="hidden"
+                name={BULK_FORM_FIELD.confirm}
+                value={GEAR_DELETE_CONFIRMATION_VALUE}
+              />
               <button
                 type="submit"
                 class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"

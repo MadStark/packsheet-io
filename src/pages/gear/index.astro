@@ -19,7 +19,15 @@ import {
   type GearQuery,
 } from '../../lib/gear/query';
 import { GEAR_PAGE_SIZE, GEAR_STATUSES, type GearSortKey } from '../../lib/gear/fields';
-import { BULK_FORM_FIELD, BULK_INTENT, parseBulkAction } from '../../lib/gear/bulk';
+import {
+  BULK_FORM_FIELD,
+  BULK_INTENT,
+  GEAR_DELETE_CONFIRMATION_VALUE,
+  GEAR_DELETE_FAILED_MESSAGE,
+  confirmsGearDeletion,
+  parseBulkAction,
+  type BulkAction,
+} from '../../lib/gear/bulk';
 import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
 import { bulkSetCategory, bulkSetStatus, deleteGearItems } from '../../lib/gear/mutations';
 import { formatGearAcquiredOn, formatGearPrice, formatGearStatus } from '../../lib/gear/format';
@@ -45,6 +53,10 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 // Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts
 // and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
 const GENERIC_LOAD_ERROR = 'Something went wrong loading your gear. Please try again.';
+// The two bulk UPDATES only. A failed bulk DELETE reports GEAR_DELETE_FAILED_MESSAGE
+// (src/lib/gear/bulk.ts) instead: this sentence says "updating", which a delete is not,
+// and "please try again", which promises the write did not happen — see that constant's
+// own comment for the committed-then-lost-response case where that promise is false.
 const GENERIC_WRITE_ERROR = 'Something went wrong updating your gear. Please try again.';
 
 let bulkError: string | null = null;
@@ -80,7 +92,14 @@ if (Astro.request.method === 'POST') {
       // never writes anything. It only reveals a confirmation naming the count, built
       // from the SAME validated `ids` the second submission will re-post as hidden
       // fields. No client-side confirm() dialog anywhere in this.
-      const confirmed = form.get(BULK_FORM_FIELD.confirm) === '1';
+      //
+      // What counts as confirmation is confirmsGearDeletion's decision, not this page's
+      // (PK-60 review, F1): it used to be an inline `=== '1'` here and a second,
+      // separate one in src/pages/gear/[id].astro, in the directory
+      // vitest.config.ts:64 excludes — the only guard in front of the gear closet's one
+      // irreversible write, duplicated, and untestable in both copies. See that
+      // function's own comment for why it refuses ' 1 ', 'true' and a File.
+      const confirmed = confirmsGearDeletion(form.get(BULK_FORM_FIELD.confirm));
       if (!confirmed) {
         pendingDelete = { ids };
       } else {
@@ -93,7 +112,11 @@ if (Astro.request.method === 'POST') {
         // write is whether it failed.
         const { error } = await deleteGearItems(client, user.id, ids);
         if (error) {
-          bulkError = GENERIC_WRITE_ERROR;
+          // Not GENERIC_WRITE_ERROR: this branch is also where a delete that COMMITTED
+          // and then lost its response lands, so the message must not promise the rows
+          // are still there — see GEAR_DELETE_FAILED_MESSAGE's own comment. Still not a
+          // raw PostgREST string, exactly like every other error on this page.
+          bulkError = GEAR_DELETE_FAILED_MESSAGE;
         } else {
           // The same filtered/sorted/paged view the visitor was on, exactly like the
           // other two actions below — a delete is not a reason to throw away the
@@ -116,15 +139,7 @@ if (Astro.request.method === 'POST') {
         // that is done through GearQuery rather than by deleting params by name.
         return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
-    } else {
-      // bulk-set-status, and — because BulkAction is a three-member union
-      // (src/lib/gear/bulk.ts) — the only intent left once the two above are handled.
-      // Deliberately a plain `else` rather than a fourth branch reporting "no such
-      // action": parseBulkAction has already refused every intent that is not one of
-      // the three, so a fallback here would be code no request could reach. A future
-      // fourth BULK_INTENT does not slip through silently either — it would land in
-      // this branch typed without a `status` field, which is a compile error on the
-      // line below rather than a wrong write at runtime.
+    } else if (action.intent === BULK_INTENT.setStatus) {
       const { error } = await bulkSetStatus(client, user.id, ids, action.status);
       if (error) {
         bulkError = GENERIC_WRITE_ERROR;
@@ -132,6 +147,27 @@ if (Astro.request.method === 'POST') {
         // Same reasoning as bulk-set-category immediately above.
         return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
+    } else {
+      // Unreachable, and typed so that it stays unreachable (PK-60 review, F2).
+      // `parseBulkAction` has already refused every intent that is not one of the three
+      // BULK_INTENT values, so no request can arrive here; the assignment to `never` is
+      // what makes that a guarantee the COMPILER keeps rather than a fact somebody has
+      // to re-verify by reading bulk.ts.
+      //
+      // What this replaced was a plain `else` holding the bulk-set-status write, with a
+      // comment claiming a future fourth BULK_INTENT could not slip through because it
+      // would land here "typed without a `status` field, which is a compile error". That
+      // was only two-thirds true, and it was tested: a fourth member without a `status`
+      // field does fail to compile, but one that HAPPENS TO CARRY a `status` field (a
+      // plausible future `bulk-retire`, say) compiles cleanly and silently performs a
+      // status write under a different action's name — a wrong write, in the branch
+      // meant to be the safe one. Narrowing the write to its own explicit `=== setStatus`
+      // test and leaving `never` here makes the guarantee structural instead: ANY new
+      // member of the union fails to compile on the line below, whatever fields it
+      // carries, because reaching this branch with a member left unhandled is exactly
+      // what stops `action` narrowing to `never` — and `never` accepts nothing.
+      const unhandled: never = action;
+      throw new Error(`Unhandled bulk intent: ${(unhandled as BulkAction).intent}`);
     }
   }
 }
@@ -277,16 +313,33 @@ function pageHref(target: number): string {
               NOT a typed-word confirmation like account/index.astro's: that gate is
               reserved for the one action that takes everything, and asking someone to
               type a word before deleting a tent would spend the gesture's whole force
-              on the wrong thing. */}
+              on the wrong thing.
+
+              THE PACK CLAUSE IS PLURALISED AS A WHOLE, not just its opening words
+              (PK-60 review, B4). Switching only "If it appears"/"If any appear" left the
+              rest of the sentence singular — "…on a saved pack, that pack keeps a frozen
+              copy" — which both reads wrong after a plural subject and describes the
+              wrong mechanic: three deleted items can sit on three DIFFERENT packs, and
+              the trigger freezes each one separately, so there is no single "that pack"
+              to point at. */}
           <p class="text-ink-2 mt-2 text-sm">
             Delete {pendingDelete.ids.length} item{pendingDelete.ids.length === 1 ? '' : 's'}{' '}
             permanently? This cannot be undone.{' '}
-            {pendingDelete.ids.length === 1 ? 'If it appears' : 'If any appear'} on a saved pack,
-            that pack keeps a frozen copy.
+            {pendingDelete.ids.length === 1
+              ? 'If it appears on a saved pack, that pack keeps a frozen copy.'
+              : 'If any appear on saved packs, those packs keep a frozen copy.'}
           </p>
           <form method="POST" class="mt-4 flex gap-3">
             <input type="hidden" name={BULK_FORM_FIELD.intent} value={BULK_INTENT.delete} />
-            <input type="hidden" name={BULK_FORM_FIELD.confirm} value="1" />
+            {/* The value comes from the same constant confirmsGearDeletion compares
+                against, never a bare "1": the writer and the reader of this gate must
+                not be able to drift apart — see GEAR_DELETE_CONFIRMATION_VALUE in
+                src/lib/gear/bulk.ts. */}
+            <input
+              type="hidden"
+              name={BULK_FORM_FIELD.confirm}
+              value={GEAR_DELETE_CONFIRMATION_VALUE}
+            />
             {pendingDelete.ids.map((id) => (
               <input type="hidden" name={BULK_FORM_FIELD.id} value={id} />
             ))}

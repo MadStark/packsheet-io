@@ -592,27 +592,45 @@ describe('gearListPath', () => {
     expect(reparsed).toEqual(query);
   });
 
-  // THE EXACT CASE PK-4's DEFECT 2 NAMES: deleting from a filtered list redirects
-  // with the filter preserved (`/gear?q=Bear+Can&undo=…&count=3`); clicking Undo used
-  // to redirect to a bare `/gear`, dropping `q=Bear+Can` right when the visitor is
-  // correcting a mistake. Parsing the undo POST's own URL — which still carries
-  // `undo`/`count` alongside the real filter — through parseGearQuery and then
-  // gearListPath must reproduce the SAME filtered view, with `undo`/`count` gone
-  // (so a refresh of the redirect target cannot re-trigger the undo) but every real
-  // filter intact.
-  it('parsing a URL that also carries undo/count and feeding it through gearListPath drops undo/count but keeps the active filter', () => {
+  // ANY PARAM parseGearQuery DOES NOT OWN IS DROPPED FROM A REDIRECT TARGET, and every
+  // real filter survives it. That is the property the two tests below pin, and it comes
+  // from gearListPath building its target by round-tripping a parsed GearQuery through
+  // gearQueryToSearchParams rather than carrying `Astro.url.searchParams` through by hand
+  // — see its own "BUILT ON gearQueryToSearchParams, NOT A HAND-COPIED URLSearchParams"
+  // section in src/lib/gear/query.ts. Nothing has to remember to delete a stray param by
+  // name, which is exactly what makes this worth a test rather than a comment: the
+  // mechanism is an absence.
+  //
+  // WHY THE FIRST CASE USES `utm_source` AND THE SECOND STILL USES `undo`/`count`. Both
+  // were originally written against PK-4's defect 2, when deleting from a filtered list
+  // redirected with `undo`/`count` appended and clicking Undo had to land back on the same
+  // filtered view without re-triggering itself. That mechanism no longer exists: PK-60
+  // removed soft delete, and with it the trash, the undo link and both params (see
+  // supabase/migrations/20260813120000_gear_hard_delete.sql). So the first case now uses
+  // `utm_source` — the foreign param gearListPath's own comment reaches for — because the
+  // property under test is about a param being foreign, not about those two names, and a
+  // test naming only dead params would keep proving it with an input the application can
+  // no longer produce.
+  //
+  // The second case DELIBERATELY KEEPS `undo`/`count`, read as HISTORICAL DEAD PARAMS
+  // rather than as anything this application emits today. A bookmark, a browser-history
+  // entry or a shared link made while PK-4's trash was live still carries them, and "a URL
+  // whose every param this module has never heard of" is precisely the shape of such a
+  // stale link arriving at a bulk action today. Neither param is special to gearListPath;
+  // they are here as a real example of the input, and they are only ever asserted to
+  // vanish.
+  it('a foreign param (utm_source) is dropped from the redirect target while the active filter survives', () => {
     const params = PARAMS([
       ['q', 'Bear Can'],
-      ['undo', '2026-01-15T10:30:00.000Z'],
-      ['count', '3'],
+      ['utm_source', 'newsletter'],
     ]);
     const path = gearListPath(parseGearQuery(params));
     expect(path).toBe(`${GEAR_PATH}?q=Bear+Can`);
-    expect(path).not.toContain('undo');
-    expect(path).not.toContain('count');
+    expect(path).not.toContain('utm_source');
+    expect(path).not.toContain('newsletter');
   });
 
-  it('an undo/count pair with NO other active filter drops back to bare GEAR_PATH, not GEAR_PATH?', () => {
+  it('a URL carrying nothing but params parseGearQuery does not own drops back to bare GEAR_PATH, not GEAR_PATH?', () => {
     const params = PARAMS([
       ['undo', '2026-01-15T10:30:00.000Z'],
       ['count', '3'],

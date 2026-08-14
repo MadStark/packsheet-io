@@ -16,7 +16,7 @@
  *
  * EVERY FUNCTION HERE TAKES `client` AND `userId` AND SCOPES ITS OWN WRITE WITH
  * `.eq('user_id', userId)`. The write policies (`gear_items_update_own` /
- * `gear_items_delete_own`, core_schema.sql:904-910) do already confine every statement
+ * `gear_items_delete_own`, core_schema.sql:904-911) do already confine every statement
  * below to the caller's own rows, with no "via public pack" counterpart the way the
  * SELECT policies have (see `query.ts`'s `loadGearCloset` comment for that half of the
  * story) — but that is a fact about the policy set as it stands today, not a property
@@ -39,6 +39,7 @@
 
 import type { PostgrestError } from '@supabase/supabase-js';
 import type { PacksheetClient } from '../supabase';
+import { MAX_BULK_IDS } from './bulk';
 import type { GearStatus } from './fields';
 import type { GearItemInput } from './form';
 
@@ -107,15 +108,45 @@ export async function bulkSetStatus(
  * changed and the code does not show it: that trigger used to be reachable only by
  * emptying the trash — the far end of a two-stage journey, behind a typed-out
  * confirmation word. It is now what ordinary deleting does. The only thing standing in
- * front of it is the UI's reveal-then-confirm step (`BULK_FORM_FIELD.confirm` in
+ * front of it is the UI's reveal-then-confirm step (`confirmsGearDeletion` in
  * `src/lib/gear/bulk.ts`); nothing in this function, in `bulk.ts`, or in the database
  * will stop or reverse a confirmed delete.
+ *
+ * THE TWO GUARDS BELOW, AND WHY THIS FUNCTION EARNS THEM WHEN THE OTHERS DO NOT (PK-60
+ * review, F3). `MAX_BULK_IDS` was enforced in exactly one place, `parseBulkAction` — a
+ * validator this function neither calls nor can check was called. That is the same
+ * mistake the module comment above complains about with `.eq('user_id', …)`: a bound
+ * that holds because one particular caller happens to apply it is a property of that
+ * caller, not of this contract, and the next caller (an importer, an admin tool, a
+ * background job) inherits none of it. `bulkSetCategory` and `bulkSetStatus` are left
+ * unguarded on purpose rather than by omission — an over-large or empty UPDATE is a slow
+ * or pointless statement, and every row it touches can be set back by issuing the
+ * opposite one. Neither is true here. An unbounded `DELETE … IN (…)` built from a
+ * `?id=` repeated ten thousand times is irreversible at the scale of whatever it
+ * matched, so the cap belongs where the DELETE is issued, not only where a form is read.
+ *
+ * The two guards fail differently on purpose. An empty `ids` is a NO-OP, not an error:
+ * it is what a caller filtering a list down to nothing legitimately produces, the
+ * truthful answer is "nothing was deleted", and returning it without a round trip means
+ * this function can never issue the degenerate `DELETE … WHERE id IN ()`. Over the cap
+ * THROWS rather than truncating or returning an error, because there is no correct
+ * partial answer: silently deleting the first 500 of 900 rows would be a wrong,
+ * irreversible write reported as a success, and it is not reachable from either gear
+ * page — `parseBulkAction` refuses an over-cap selection long before this — so a call
+ * that gets here is a programming error in a new caller and should read as one.
  */
 export async function deleteGearItems(
   client: PacksheetClient,
   userId: string,
   ids: readonly string[],
 ): Promise<GearMutationResult> {
+  if (ids.length === 0) return { error: null, count: 0 };
+  if (ids.length > MAX_BULK_IDS) {
+    throw new RangeError(
+      `deleteGearItems refuses ${ids.length} ids: at most ${MAX_BULK_IDS} may be deleted at once.`,
+    );
+  }
+
   const { data, error } = await client
     .from('gear_items')
     .delete()
