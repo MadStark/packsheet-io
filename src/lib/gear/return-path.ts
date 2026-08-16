@@ -61,8 +61,11 @@
  * asks "did `safeNextPath` hand back what I gave it".
  */
 
+// No GEAR_PATH import: this module no longer substitutes a fallback anywhere. Both
+// exported readers hand back `null` and the two pages spell `?? GEAR_PATH` at the point
+// of use — see the note on `gearReturnPathFromFormOrNull` for why the defaulted wrappers
+// that used to live here were deleted rather than kept.
 import { safeNextPath, NEXT_PARAM } from '../auth-routes';
-import { GEAR_PATH } from './routes';
 
 /**
  * `raw`, validated by `safeNextPath`, with no fallback substituted — `null` when `raw`
@@ -78,16 +81,6 @@ export function gearReturnPathOrNull(raw: string | null | undefined): string | n
 }
 
 /**
- * `gearReturnPathOrNull(raw) ?? GEAR_PATH` — the gear closet's own equivalent of
- * `safeNextPath`, for every caller that just wants a URL to send the visitor to and has
- * no use for telling "absent" apart from "refused". Both new.astro and [id].astro use
- * this for their GET-render `cancelHref`/`next`.
- */
-export function gearReturnPath(raw: string | null | undefined): string {
-  return gearReturnPathOrNull(raw) ?? GEAR_PATH;
-}
-
-/**
  * Mirrors `nextFromForm`'s (`src/lib/auth-routes.ts`) field-then-query precedence —
  * read the hidden `NEXT_PARAM` field off the POSTed form first, falling back to the
  * URL's own query string — but, like `gearReturnPathOrNull` above, hands back `null`
@@ -95,30 +88,27 @@ export function gearReturnPath(raw: string | null | undefined): string {
  * by any caller that has to tell "a valid return target was carried on this submission"
  * apart from "nothing usable was carried" — `src/pages/gear/[id].astro`'s successful-
  * edit fork is exactly that caller: see its own comment for why the two cases redirect
- * differently. `gearReturnPathFromForm` below is this function plus `?? GEAR_PATH`, for
- * the common case that just wants a destination.
+ * differently.
+ *
+ * WHY NOT CALL `nextFromForm` DIRECTLY. Only the fallback destination differs between
+ * the two — `nextFromForm` (`src/lib/auth-routes.ts`) bakes `HOME_PATH` into its own
+ * return value with no way for a caller to ask for a different one. Duplicating the
+ * two-line field-then-query read here keeps the one security decision in `safeNextPath`
+ * (which both this module and `nextFromForm` delegate to) while still letting the gear
+ * pages land on `GEAR_PATH`.
+ *
+ * NO `?? GEAR_PATH` SIBLING. This module used to export defaulted wrappers alongside
+ * both `*OrNull` functions, on the argument that call sites would otherwise repeat the
+ * fallback. Neither wrapper ever acquired a caller: both pages need the `null` — for the
+ * hidden `next` field, and for `[id].astro`'s successful-edit fork — so they hold the
+ * `*OrNull` result and spell `?? GEAR_PATH` at the one point of use. The wrappers were
+ * deleted rather than left exported with doc comments naming call sites that did not
+ * exist. If a caller that genuinely only wants a destination ever appears, add one back.
  */
 export function gearReturnPathFromFormOrNull(form: FormData, url: URL): string | null {
   const field = form.get(NEXT_PARAM);
   const raw = typeof field === 'string' ? field : url.searchParams.get(NEXT_PARAM);
   return gearReturnPathOrNull(raw);
-}
-
-/**
- * `gearReturnPathFromFormOrNull(form, url) ?? GEAR_PATH` — for every caller that just
- * wants a destination and has no use for telling "absent" apart from "refused". Kept as
- * a separate export, rather than making every call site spell out the `?? GEAR_PATH`
- * itself, because `src/pages/gear/new.astro` and the GET-render defaults on both pages
- * want exactly this and nothing more.
- *
- * WHY NOT CALL `nextFromForm` DIRECTLY. Only the fallback destination differs between
- * the two — `nextFromForm` bakes `HOME_PATH` into its own return value with no way for a
- * caller to ask for a different one. Duplicating the two-line field-then-query read here
- * keeps the one security decision in `safeNextPath` (which both this module and
- * `nextFromForm` delegate to) while still landing on `GEAR_PATH` for this form.
- */
-export function gearReturnPathFromForm(form: FormData, url: URL): string {
-  return gearReturnPathFromFormOrNull(form, url) ?? GEAR_PATH;
 }
 
 /**

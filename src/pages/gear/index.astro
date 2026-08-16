@@ -42,9 +42,11 @@ import {
 // removed the Category and Brand filter checkboxes this page built from it, but the
 // QUERY still runs, because `closetIsEmpty` below is derived from its row count and
 // nothing else on this page can tell "your closet is empty" from "these filters matched
-// nothing". `extractGearOptions` itself stays in src/lib/gear/options.ts, tested and
-// unused for now, for the item form's category autocomplete (PK-63) — deleting it here
-// would only mean writing it again there.
+// nothing". `extractGearOptions` itself lives in src/lib/gear/options.ts and IS called —
+// by new.astro and [id].astro, for the item form's category autocomplete (PK-63). It was
+// briefly caller-less between PK-62 and PK-63 landing, which is why PK-62 kept it rather
+// than deleting it; that bet has now paid off and this comment no longer describes an
+// open question.
 import { loadGearOptions } from '../../lib/gear/options';
 // `deleteGearItems` rather than the bulkSoftDelete/undoBulkDelete pair: PK-60 dropped the
 // soft delete, the trash page and the undo banner, so a delete is now final.
@@ -630,7 +632,7 @@ const currentView = `${Astro.url.pathname}${Astro.url.search}`;
                                 file's own comment. */}
                             <span class="flex items-center gap-1.5">
                               {gearStatusMarker(item.status) && (
-                                <GearStatusIcon status={item.status} class="h-4 w-4 shrink-0" />
+                                <GearStatusIcon status={item.status} />
                               )}
                               {/* THE ONLY PLACE A MALFORMED STATUS SURFACES ANYWHERE.
                                   Removing the Status column took away the one cell that

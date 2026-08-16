@@ -65,8 +65,14 @@ interface Props {
    *  and carries no accessible name of its own. Omitted renders `role="img"` with a
    *  `<title>`, for the icon-only case. */
   readonly decorative?: boolean;
-  /** Merged onto the `<svg>` so a caller can size and position it without this component
-   *  needing to know every context it is used in. */
+  /** Merged onto the `<svg>` AFTER a default size, so a caller can size and position the
+   *  glyph without this component needing to know every context it is used in — and,
+   *  because Tailwind emits both classes and the later utility wins, a caller's own
+   *  `size-*` / `h-*`/`w-*` still overrides. The default matters: an `<svg>` with a
+   *  viewBox and no dimensions lays out at 300x150, so a caller who forgets renders an
+   *  enormous glyph rather than a slightly wrong one. An earlier version of this
+   *  component carried the size internally and lost it in a merge; this keeps the
+   *  override without reintroducing that cliff. */
   readonly class?: string;
 }
 
@@ -120,7 +126,8 @@ const ICONS: Record<
 
 const icon = isGearStatus(status) ? ICONS[status] : null;
 const label = isGearStatus(status) ? GEAR_STATUS_LABELS[status] : null;
-const svgClass = [icon?.colorClass, className].filter(Boolean).join(' ');
+/** `size-4` first so a caller's own sizing utility, appended after it, wins. */
+const svgClass = [icon?.colorClass, 'size-4 shrink-0', className].filter(Boolean).join(' ');
 ---
 
 {

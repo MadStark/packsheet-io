@@ -38,4 +38,20 @@ describe('GEAR_STATUS_MEANINGS', () => {
       expect(GEAR_STATUS_MEANINGS[status]).toContain(' ');
     }
   });
+
+  // THE ASSERTION THAT MAKES THE THREE ABOVE MEAN SOMETHING. Every check in this file so
+  // far is satisfied by setting all three meanings to the SAME sentence — each is
+  // individually non-empty, individually unlike its own label, individually punctuated.
+  // Three identical tooltips is also the most likely way this record actually breaks:
+  // `Record<GearStatus, string>` forces whoever adds a fourth status to supply a value,
+  // and the cheapest way to make the build go green is to paste a neighbour's. A tooltip
+  // that describes the wrong status is worse than no tooltip, so distinctness is the
+  // property worth pinning — the same argument applies to the labels, hence both.
+  it('gives every status its own distinct meaning, not one sentence pasted three times', () => {
+    const meanings = GEAR_STATUSES.map((status) => GEAR_STATUS_MEANINGS[status]);
+    expect(new Set(meanings).size).toBe(GEAR_STATUSES.length);
+
+    const labels = GEAR_STATUSES.map((status) => GEAR_STATUS_LABELS[status]);
+    expect(new Set(labels).size).toBe(GEAR_STATUSES.length);
+  });
 });

@@ -32,7 +32,11 @@ import {
   GEAR_DELETE_FAILED_MESSAGE,
   confirmsGearDeletion,
 } from '../../lib/gear/bulk';
-import { gearReturnPathFromFormOrNull, gearReturnPathOrNull } from '../../lib/gear/return-path';
+import {
+  gearFormHrefReturningTo,
+  gearReturnPathFromFormOrNull,
+  gearReturnPathOrNull,
+} from '../../lib/gear/return-path';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -301,8 +305,20 @@ const updated = Astro.url.searchParams.get('updated') === '1';
               >
                 Delete permanently
               </button>
+              {/* CARRIES `next` BACK TO ITSELF. Backing out of a delete must not cost
+                  the visitor their return target: this link re-enters the same page, and
+                  a bare `gearItemPath(id)` would drop the `?next=` the rest of the page
+                  is careful to preserve. The failure that caused was silent and
+                  outlived the interaction — filter the closet, open an item, click
+                  Delete, change your mind, and from then on Save landed on `?updated=1`
+                  and Cancel on a bare `/gear`, because the return target had been
+                  dropped by a link that has nothing to do with either. */}
               <a
-                href={gearItemPath(id)}
+                href={
+                  returnPath === null
+                    ? gearItemPath(id)
+                    : gearFormHrefReturningTo(gearItemPath(id), returnPath)
+                }
                 class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
               >
                 Cancel

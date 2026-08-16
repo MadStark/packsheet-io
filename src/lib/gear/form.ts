@@ -43,8 +43,12 @@
  * but PK-63 deliberately relaxes them: both carry a real column default (`1` and `0`
  * respectively) that direct-SQL and other write paths already rely on, so a blank
  * submission for either is no longer an error — it resolves to that same default
- * instead, making `name` the only field left that can block a save. See the comments
- * at the `parseQuantity`/`parseNonNegativeDecimal` call sites inside
+ * instead. `name`, `weight_unit` and `status` remain the three fields whose ABSENCE
+ * blocks a save; `quantity` and `weight` now block only on a non-blank value that fails
+ * to parse. "Name is the only field that can block a save" is the ticket's own shorthand
+ * and it is not literally true — it describes the form as a visitor meets it, where the
+ * unit and status controls always post something, not the parser's actual contract. See
+ * the comments at the `parseQuantity`/`parseNonNegativeDecimal` call sites inside
  * `parseGearItemForm` for exactly where that default is applied. `price`, `currency`,
  * `acquired_on`, `url`, `brand`, `category`, `description` and `notes` are all nullable
  * columns, so an empty submission is treated as "not provided" and becomes `null` rather
@@ -545,11 +549,11 @@ export function parseGearItemForm(form: FormData): GearFormResult {
   // pairs with: quantity integer not null default 1 check (quantity > 0)
   // (20260813000000_gear_closet.sql)
   //
-  // PK-63: NAME IS THE ONLY FIELD THAT CAN BLOCK A SAVE. Unlike name, quantity has a
+  // PK-63: A BLANK QUANTITY NO LONGER BLOCKS A SAVE. Unlike name, quantity has a
   // real column default a direct-SQL insert already relies on, so a blank field is not
   // "a stale or tampered request" the way a blank name is — it is simply "the visitor
-  // did not say, use the default", the same presence check volume_litres runs below
-  // (trim, then test for '' before ever calling the parser). A NON-BLANK value that
+  // did not say, use the default", the same presence check `acquired_on` and `url` run
+  // below (trim, then test for '' before ever calling the parser). A NON-BLANK value that
   // fails to parse is still rejected exactly as it was before this ticket —
   // parseQuantity itself is untouched, so 'abc', '-1', '1.5' and '1e3' all still
   // produce QUANTITY_MESSAGE; blank means "no answer, use the default", malformed means

@@ -16,7 +16,7 @@ import {
   rawGearFormValues,
   type GearFormValues,
 } from '../../lib/gear/form';
-import { GEAR_PATH } from '../../lib/gear/routes';
+import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
 import { gearReturnPathFromFormOrNull, gearReturnPathOrNull } from '../../lib/gear/return-path';
 
@@ -104,14 +104,32 @@ if (Astro.request.method === 'POST') {
       // a value reconstructed from the already-reformatted GearItemInput.
       values = rawGearFormValues(form);
     } else {
-      // PK-63: "saving returns you where you were" — redirect to the carried return
-      // path (the closet view the visitor came from, or GEAR_PATH if none was carried)
-      // rather than the fresh item's own detail page. This replaces the previous
-      // behaviour of always redirecting to gearItemPath(data.id), so `gearItemPath` is
-      // no longer imported here. The `.select('id').single()` above stays as the thing
-      // that makes `data === null` a meaningful check that the insert produced a row —
-      // the id itself is not read by anything any more.
-      return Astro.redirect(returnPath ?? GEAR_PATH, 303);
+      // PK-63: "saving returns you where you were" — but only when there IS a "where
+      // you were", exactly the same fork [id].astro makes on its own successful edit,
+      // and for the same reason. Read that page's comment too; the hazard is shared.
+      //
+      // WHEN A RETURN TARGET WAS CARRIED, honour it: that is the ticket's requirement,
+      // and the visitor asked to go back to their filtered view.
+      //
+      // WHEN NONE WAS — this page was reached directly, with no `?next=` anywhere —
+      // land on the new item's own page, which is what this page did before PK-63 and
+      // is the ONLY confirmation a create has ever given. Redirecting to a bare
+      // GEAR_PATH here would swallow it: the closet list renders no success banner, so
+      // an unconditional redirect leaves a visitor who has just saved staring at a list
+      // with no evidence anything happened. `.select('id').single()` is what makes that
+      // possible, and is also what makes `data === null` a meaningful check that the
+      // insert produced a row.
+      //
+      // WHAT THIS STILL DOES NOT FIX, stated rather than papered over: when a return
+      // target IS carried, the visitor lands back on a view the new item may not appear
+      // in — saved as `owned` while the view filters `wishlist`, or on page 3, or under
+      // a search the new name does not match. The honest fix is a success banner on the
+      // closet list, which is new UI this ticket did not ask for; the fork below is the
+      // half that costs nothing and restores the confirmation that used to exist.
+      if (returnPath !== null) {
+        return Astro.redirect(returnPath, 303);
+      }
+      return Astro.redirect(gearItemPath(data.id), 303);
     }
   }
 }

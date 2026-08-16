@@ -372,7 +372,18 @@ const acquiredOnMax = acquiredOnFutureCutoff();
            `parseGearItemForm` is exactly as able to make sense of either outcome as it
            was reading a `<select>`'s single value. */
       }
-      <fieldset aria-describedby={describedBy('status')} aria-invalid={invalid('status')}>
+      {
+        /* aria-describedby AND aria-invalid GO ON THE RADIOS, NOT THE FIELDSET. A
+           `<fieldset>` maps to role `group`, which does not support `aria-invalid` — put
+           it there and assistive technology ignores it, so the field reads as valid while
+           an error is showing. `aria-describedby` on the fieldset is likewise unreliable
+           here: a screen-reader user arrowing between radios is inside the group, not on
+           it, so the description is not necessarily re-announced. Both attributes are
+           therefore repeated on every `<input type="radio">`, which is where a visitor's
+           focus actually lands. The fieldset keeps the `<legend>`, which is what it is
+           genuinely for. */
+      }
+      <fieldset>
         <legend class={LABEL_CLASS}>Status</legend>
         <div class="mt-1 grid gap-2">
           {
@@ -383,8 +394,10 @@ const acquiredOnMax = acquiredOnFutureCutoff();
                   name={GEAR_FORM_FIELD.status}
                   value={status}
                   checked={status === values.status}
+                  aria-describedby={describedBy('status')}
+                  aria-invalid={invalid('status')}
                 />
-                <GearStatusIcon status={status} decorative class="size-4 shrink-0" />
+                <GearStatusIcon status={status} decorative />
                 {formatGearStatus(status)}
               </label>
             ))
