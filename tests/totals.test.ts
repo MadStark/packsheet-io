@@ -145,7 +145,6 @@ function snapshot(overrides: { [key: string]: Json } = {}): Json {
     weight_unit: 'g',
     price: null,
     currency: null,
-    volume_litres: null,
     photo_path: null,
     gear_item_id: '00000000-0000-0000-0000-000000000001',
     captured_at: '2026-08-10T12:00:00+00:00',

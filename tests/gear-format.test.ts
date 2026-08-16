@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatGearPrice, formatGearStatus } from '../src/lib/gear/format';
+import { formatGearAcquiredOn, formatGearPrice, formatGearStatus } from '../src/lib/gear/format';
 import { GEAR_STATUSES } from '../src/lib/gear/fields';
 
 /**
@@ -47,5 +47,23 @@ describe('formatGearStatus', () => {
   it('falls back to the raw string for a value isGearStatus rejects, rather than throwing', () => {
     expect(formatGearStatus('in-use')).toBe('in-use');
     expect(formatGearStatus('')).toBe('');
+  });
+});
+
+/**
+ * `formatGearAcquiredOn` (PK-61). Unlike `formatGearPrice`'s three no-price cases —
+ * each one guarding against a value that is well-formed-but-suspect — `acquired_on`
+ * has exactly one no-value case, and it is not suspect at all: the column is nullable
+ * with no database default, so `null` is the ordinary "I don't know when I got this"
+ * answer, not a data problem to defend against. See that function's own module comment
+ * for why this still earns a named function rather than being inlined at the call site.
+ */
+describe('formatGearAcquiredOn', () => {
+  it('renders a present date as-is, with no reformatting', () => {
+    expect(formatGearAcquiredOn('2026-08-13')).toBe('2026-08-13');
+  });
+
+  it('renders null as the no-date em dash', () => {
+    expect(formatGearAcquiredOn(null)).toBe('—');
   });
 });

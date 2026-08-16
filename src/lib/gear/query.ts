@@ -464,28 +464,43 @@ export function buildSearchFilter(search: string): string {
 // applyGearQuery
 // ---------------------------------------------------------------------------
 
-/** The columns the closet list view needs — named once so the page's `.select()` and
+/** The columns the closet list view fetches — named once so the page's `.select()` and
  *  any test asserting against it cannot drift apart. Deliberately does not include
  *  `notes`, `url` or `description`: those are detail-view fields, not list-row fields,
  *  and fetching them for every row on every page load would be pure waste for a view
- *  that never renders them. */
+ *  that never renders them.
+ *
+ *  "NEEDS" IS AN OVERSTATEMENT FOR TWO OF THESE COLUMNS, HONESTLY RECORDED RATHER THAN
+ *  QUIETLY TRUE. `created_at` is fetched here but, as of PK-61 (which replaced its only
+ *  renderer, the old "Added" column, with `acquired_on`), rendered nowhere in the list
+ *  view — and `updated_at` has never had a renderer in this view at all. Neither is
+ *  removed here: `updated_at` is in the identical unused state, and trimming either is
+ *  separate cleanup this change does not attempt, not a reason to leave the comment
+ *  claiming every column here earns its place by being displayed. Take "needs" as
+ *  "roughly what the view uses", not a guarantee every field in this list has a
+ *  renderer today. */
 export const GEAR_SELECT =
-  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at';
+  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, acquired_on, photo_path, created_at, updated_at';
 
 /** The columns `src/pages/gear/[id].astro` needs: every `GEAR_FORM_FIELD` (so
  *  `gearItemToFormValues` can pre-fill the edit form) plus `id`, `photo_path` and
  *  `created_at` for the parts of the page that are not the form itself. Unlike
- *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes`, `url` and
- *  `volume_litres` — the very fields that comment says a list row has no business
- *  fetching — because a detail/edit page is exactly the view that renders them. */
+ *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes` and `url` — the
+ *  very fields that comment says a list row has no business fetching — because a
+ *  detail/edit page is exactly the view that renders them. */
 export const GEAR_DETAIL_SELECT =
-  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, volume_litres, url, notes, status, photo_path, created_at';
+  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, acquired_on, url, notes, status, photo_path, created_at';
 
-/** The columns `src/pages/gear/trash.astro` needs: the same list-row shape as
- *  `GEAR_SELECT` plus `deleted_at`, which every trash row needs and no active-closet row
- *  (`GEAR_SELECT`'s own consumers) ever renders — that column is `null` by definition
- *  wherever `GEAR_SELECT` is used, since every one of those queries is guarded with
- *  `.is('deleted_at', null)`. */
+/** The columns `src/pages/gear/trash.astro` needs. NO LONGER "the same list-row shape as
+ *  `GEAR_SELECT` plus `deleted_at`" — PK-61 added `acquired_on` to `GEAR_SELECT`, and
+ *  deliberately did NOT add it here too: the trash view orders by `deleted_at desc`, not
+ *  by "added", and renders no acquired date anywhere, so fetching a column this view
+ *  never displays would be exactly the waste `GEAR_SELECT`'s own comment already refuses
+ *  for `notes`/`url`/`description`. The two constants are otherwise the same list-row
+ *  shape, with `deleted_at` added — every trash row needs it, and no active-closet row
+ *  (`GEAR_SELECT`'s own consumers) ever renders it, since every query built on
+ *  `GEAR_SELECT` is guarded with `.is('deleted_at', null)` and so would only ever read
+ *  back `null` for it. */
 export const GEAR_TRASH_SELECT =
   'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at, deleted_at';
 
@@ -609,7 +624,49 @@ export function applyGearQuery(
   // refuses to invent an exchange rate, and canonicalising a price needs one.
   const column = GEAR_SORT_COLUMNS[query.sort];
   const ascending = query.direction === 'asc';
-  next = next.order(column, { ascending }).order('id', { ascending });
+
+  // nullsFirst: false, ALWAYS, REGARDLESS OF DIRECTION (PK-61). `acquired_on` is
+  // nullable with no database default, so an "added" sort has to decide where an
+  // undated row goes — Postgres will not decide it neutrally on its own. Postgres's
+  // own default null ordering is NOT symmetric: NULLS LAST for ascending, but NULLS
+  // FIRST for descending. Left unpinned, "newest first" (`added` desc) would put every
+  // item with no date at all at the very TOP of the closet — the least informative rows
+  // crowding out the most relevant ones, on exactly the sort a visitor reaches for to
+  // see what they logged most recently. Pinning nulls last in BOTH directions means
+  // "undated" always reads as "at the end", whichever way the visitor sorted, rather
+  // than flipping to the front the moment they click the column header a second time.
+  //
+  // THIS OPTION APPLIES TO EVERY SORT KEY, NOT ONLY `added`. `column` above is
+  // `GEAR_SORT_COLUMNS[query.sort]`, so `nullsFirst: false` is passed on this `.order()`
+  // call regardless of which key the visitor actually chose — and `price` and
+  // `weight_grams` (the columns behind the `price` and `weight` sort keys) are ALSO
+  // nullable. So this same PK-61 change quietly changed where an unpriced row lands on
+  // `price desc` too: previously Postgres's own unpinned default (NULLS FIRST for
+  // descending) put every unpriced item at the top of "most expensive first"; now it is
+  // pinned to the bottom, same as every other direction and column. That is a
+  // deliberate, and arguably overdue, consistency fix — an unpriced item reads no more
+  // usefully at the top of "most expensive" than an undated item did at the top of
+  // "newest" — but it is real behaviour this migration changed beyond the `acquired_on`
+  // column its own name promises, worth knowing for anyone auditing "what did PK-61
+  // actually touch".
+  next = next
+    .order(column, { ascending, nullsFirst: false })
+    // The `id` tiebreaker matters MORE now, not less. Ties on `created_at` were already
+    // GUARANTEED, not merely possible, for any multi-row insert: `set_row_timestamps()`
+    // stamps `created_at = now()`, and `now()` is `transaction_timestamp()` — constant
+    // for an entire transaction, not re-evaluated per row (verified: three rows
+    // inserted in one statement come back sharing exactly one distinct timestamp). This
+    // function's own comment above already names that exact case ("two added in the
+    // same transaction and so sharing `created_at` to the microsecond"), and the
+    // baseline migration's comment on `set_row_timestamps()` says the same thing again
+    // — a tie-free `created_at` sort was never something this codebase could assume.
+    // `acquired_on` is a `date`, not a timestamp, so switching `added` to it does not
+    // introduce ties where there were none before; it WIDENS how easily they happen —
+    // from "rows inserted in the same transaction" to "anything acquired on the same
+    // calendar day", which needs no shared transaction at all. A sort with no stable
+    // tiebreaker was always a latent pagination bug (see this function's own comment
+    // above); this column swap makes the tie case even more common, not newly possible.
+    .order('id', { ascending });
 
   const offset = (query.page - 1) * GEAR_PAGE_SIZE;
   next = next.range(offset, offset + GEAR_PAGE_SIZE - 1);

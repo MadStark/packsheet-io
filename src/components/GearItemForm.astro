@@ -16,7 +16,7 @@
 // in src/lib/gear/form.ts, both covered by tests/gear-form.test.ts. This component only
 // arranges markup around them; see that module's own "WHY THIS LIVES IN src/lib/ RATHER
 // THAN IN THE PAGE" for why the validation itself could not live here instead.
-import { GEAR_FORM_FIELD, type GearFormValues } from '../lib/gear/form';
+import { GEAR_FORM_FIELD, acquiredOnFutureCutoff, type GearFormValues } from '../lib/gear/form';
 import { GEAR_STATUSES } from '../lib/gear/fields';
 import { formatGearStatus } from '../lib/gear/format';
 import { WEIGHT_UNITS } from '../lib/units';
@@ -51,6 +51,17 @@ function describedBy(field: string): string | undefined {
 function invalid(field: string): 'true' | undefined {
   return errors[field] ? 'true' : undefined;
 }
+
+// The date input's `max`, computed from the SAME rule `src/lib/gear/form.ts`'s
+// `isAcquiredOnInFuture` enforces server-side (today in UTC, plus one day of
+// cross-time-zone slack — see that function's own comment for why the slack exists).
+// This is a CONVENIENCE ONLY, not a second source of truth for the rule: a native date
+// picker that discourages picking a future day in the first place is a nicer
+// experience than always round-tripping to the server to find out, but a crafted POST
+// ignores `max` entirely, so `parseGearItemForm` remains the one place this is actually
+// enforced. Reading `acquiredOnFutureCutoff()` rather than recomputing the bound here
+// is what keeps the hint from silently drifting out of step with the real check.
+const acquiredOnMax = acquiredOnFutureCutoff();
 ---
 
 <form method="POST" class="space-y-5">
@@ -235,21 +246,49 @@ function invalid(field: string): 'true' | undefined {
 
   <div class="grid gap-5 sm:grid-cols-2">
     <div>
-      <label for="volume_litres" class={LABEL_CLASS}> Volume (litres) </label>
+      <label for="acquired_on" class={LABEL_CLASS}> Added </label>
+      {
+        /* A native <input type="date">, not a JS date-picker component (PK-61) — the
+           calendar popup a visitor sees here is the BROWSER'S OWN, which is the entire
+           reason this is a native date input rather than anything fancier: it needs no
+           script to render or to submit, exactly like every other field in this
+           component (see the module comment's "KEEP THIS A PLAIN .astro COMPONENT"
+           rule), and it keeps working with JavaScript disabled the same way. */
+      }
       <input
-        id="volume_litres"
-        name={GEAR_FORM_FIELD.volumeLitres}
-        type="text"
-        inputmode="decimal"
-        value={values.volume_litres}
-        aria-describedby={describedBy('volume_litres')}
-        aria-invalid={invalid('volume_litres')}
+        id="acquired_on"
+        name={GEAR_FORM_FIELD.acquiredOn}
+        type="date"
+        value={values.acquired_on}
+        max={acquiredOnMax}
+        aria-describedby={describedBy('acquired_on')}
+        aria-invalid={invalid('acquired_on')}
         class={INPUT_CLASS}
       />
       {
-        errors.volume_litres && (
-          <p id="volume_litres-error" class={ERROR_CLASS}>
-            {errors.volume_litres}
+        /* Echoes the REJECTED value back inside the error message rather than trusting
+           the box above to still show it. HTML's value-sanitization algorithm for
+           `type="date"` blanks the input's value to "" whenever it is not a syntactically
+           valid date string — so a rejected `2026-02-30` (or `2026-2-3`, or any other
+           malformed shape ACQUIRED_ON_PATTERN refuses) makes the browser clear the box
+           on THIS re-render, even though `values.acquired_on` still faithfully carries
+           what was typed. Without this echo, the visitor would see "Enter a valid date
+           (...)" above a box the browser had already emptied for them — the rejected
+           date silently downgraded to "I don't know", and simply resubmitting from there
+           stores `null` instead of the correction they meant to make. Quoting the value
+           back inside the message keeps that state legible even when the box itself goes
+           blank, and keeps faith with parseGearItemForm's own promise that `values`
+           carries back exactly what the visitor typed. (A genuinely future date like
+           `9999-12-31` IS a syntactically valid date, so the browser does not blank that
+           one — but echoing it here too costs nothing and keeps the message's wording
+           uniform across both rejection reasons.) */
+      }
+      {
+        errors.acquired_on && (
+          <p id="acquired_on-error" class={ERROR_CLASS}>
+            {values.acquired_on.trim() === ''
+              ? errors.acquired_on
+              : `“${values.acquired_on}” is not a date this form can store. ${errors.acquired_on}`}
           </p>
         )
       }

@@ -11,6 +11,7 @@ import {
 } from '../src/lib/gear/query';
 import {
   GEAR_PAGE_SIZE,
+  GEAR_SORT_COLUMNS,
   GEAR_STATUSES,
   type GearSortKey,
   type GearStatus,
@@ -439,33 +440,50 @@ describe('sorting', () => {
   beforeAll(async () => {
     sortUser = await createUser('gear-closet-sort');
 
-    // Inserted ONE AT A TIME, in this exact order, so created_at is strictly
-    // increasing — a single bulk insert can leave several rows sharing the same
-    // microsecond, which would make the "added" sort's expected order ambiguous.
-    const insertOne = (fields: GearInsert) =>
-      sortUser.client.from('gear_items').insert(fields).select('id').single();
-
-    await insertOne({
-      name: 'Featherweight Quilt',
-      weight: 300,
-      weight_unit: 'g',
-      price: 200,
-      currency: 'USD',
-    });
-    await insertOne({
-      name: 'Basecamp Grill',
-      weight: 500,
-      weight_unit: 'g',
-      price: 50,
-      currency: 'USD',
-    });
-    await insertOne({
-      name: 'Overnight Pack',
-      weight: 2,
-      weight_unit: 'lb', // ≈ 907 g — heavier than either of the two above in grams
-      price: 120,
-      currency: 'USD',
-    });
+    // `added` sorts by `acquired_on` (PK-61), not `created_at` — see GEAR_SORT_COLUMNS
+    // in src/lib/gear/fields.ts. Each row below is given an explicit, distinct
+    // `acquired_on` for the same reason the old version of this fixture inserted rows
+    // one at a time to force `created_at` apart: without a real spread on the column
+    // this sort actually orders by, the expected order would be ambiguous. The
+    // difference that matters is WHY a client can supply this at all — `created_at` is
+    // stamped unconditionally by the `set_row_timestamps()` BEFORE INSERT trigger
+    // (core_schema.sql) and no client write to it is ever honoured (see
+    // tests/core-schema.test.ts, "ignores created_at and updated_at sent by the client
+    // on INSERT" — the same trigger function is attached to gear_items too), but
+    // `acquired_on` carries no such trigger, so what is entered here is exactly what
+    // gets stored and exactly what the sort reads back. That is the entire point of
+    // PK-61: "when I got this" is the visitor's own claim, not a fact the database
+    // derives, so unlike `created_at` a client CAN and does set it directly.
+    const rows: GearInsert[] = [
+      {
+        name: 'Featherweight Quilt',
+        weight: 300,
+        weight_unit: 'g',
+        price: 200,
+        currency: 'USD',
+        acquired_on: '2026-01-01',
+      },
+      {
+        name: 'Basecamp Grill',
+        weight: 500,
+        weight_unit: 'g',
+        price: 50,
+        currency: 'USD',
+        acquired_on: '2026-02-01',
+      },
+      {
+        name: 'Overnight Pack',
+        weight: 2,
+        weight_unit: 'lb', // ≈ 907 g — heavier than either of the two above in grams
+        price: 120,
+        currency: 'USD',
+        acquired_on: '2026-03-01',
+      },
+    ];
+    const { error } = await sortUser.client.from('gear_items').insert(rows);
+    if (error) {
+      throw new Error(`Fixture failed to insert sort items: ${error.message}`, { cause: error });
+    }
   });
 
   async function sortedNames(sort: GearSortKey, direction: 'asc' | 'desc'): Promise<string[]> {
@@ -517,7 +535,60 @@ describe('sorting', () => {
     ]);
   });
 
+  // C1 (PK-61 review): `nullsFirst: false` in applyGearQuery is passed for
+  // GEAR_SORT_COLUMNS[query.sort] regardless of which key that is — so this same
+  // PK-61 change also moved where an unpriced row lands on `price desc`, not only
+  // where an undated row lands on `added`. The fixture above never covers this: every
+  // one of its three rows carries a real price, so nothing in "sorts by price, both
+  // directions" exercises a null at all. A separate user (rather than a fourth row on
+  // sortUser) keeps this independent of that fixture's own three prices, the same
+  // isolation the "no acquired_on" test below uses for the identical reason.
+  it('an item with no price sorts LAST in both directions, not merely last in one', async () => {
+    const unpricedUser = await createUser('gear-closet-sort-unpriced');
+    const rows: GearInsert[] = [
+      { name: 'Cheap Item', price: 10, currency: 'USD' },
+      { name: 'Pricey Item', price: 500, currency: 'USD' },
+      { name: 'No-Price Item' }, // price/currency omitted entirely — stay null
+    ];
+    const { error } = await unpricedUser.client.from('gear_items').insert(rows);
+    expect(error).toBeNull();
+
+    const { items: asc, error: ascError } = await closetQuery(unpricedUser, {
+      sort: 'price',
+      dir: 'asc',
+    });
+    expect(ascError).toBeNull();
+    expect(names(asc)).toEqual(['Cheap Item', 'Pricey Item', 'No-Price Item']);
+
+    // Postgres's own unpinned default for DESC is NULLS FIRST, which would put
+    // 'No-Price Item' at index 0 here if applyGearQuery's nullsFirst: false did not
+    // apply to every sort column, price included.
+    const { items: desc, error: descError } = await closetQuery(unpricedUser, {
+      sort: 'price',
+      dir: 'desc',
+    });
+    expect(descError).toBeNull();
+    expect(names(desc)).toEqual(['Pricey Item', 'Cheap Item', 'No-Price Item']);
+  });
+
+  // Asserted DIRECTLY, not merely implied by the ordering test below, and this is not
+  // belt-and-braces. The three fixture rows go in as a single bulk insert, so they share
+  // one `created_at` exactly — `now()` is `transaction_timestamp()`, constant for the
+  // whole transaction. If somebody reverted GEAR_SORT_COLUMNS.added to `'created_at'`,
+  // every row would tie on the sort column and the ordering would fall through to the
+  // `id` tiebreaker, i.e. to random UUIDs — so the test below would fail only by luck,
+  // and pass outright often enough to look flaky rather than broken. Mutation-testing
+  // confirmed exactly that: reverting the mapping failed 2 or 3 of the ordering
+  // assertions depending on the run. This line turns a probabilistic detector into a
+  // deterministic one, and is the only direct test of the mapping in src/lib/gear/fields.ts.
+  it('maps the "added" sort key to acquired_on, not to created_at', () => {
+    expect(GEAR_SORT_COLUMNS.added).toBe('acquired_on');
+  });
+
   it('sorts by date added, both directions', async () => {
+    // Featherweight Quilt 2026-01-01, Basecamp Grill 2026-02-01, Overnight Pack
+    // 2026-03-01 — the explicit acquired_on values the fixture above sets, exactly the
+    // dates a visitor typed rather than an insertion-order proxy for them.
     expect(await sortedNames('added', 'asc')).toEqual([
       'Featherweight Quilt',
       'Basecamp Grill',
@@ -528,6 +599,40 @@ describe('sorting', () => {
       'Basecamp Grill',
       'Featherweight Quilt',
     ]);
+  });
+
+  // nullsFirst: false (applyGearQuery, query.ts) is what this test exists to pin.
+  // Postgres's own default null ordering is NOT symmetric: NULLS LAST for ascending,
+  // but NULLS FIRST for descending — so an unpinned "added desc" would put every
+  // undated item at the very TOP of the closet, the least informative rows crowding out
+  // the most relevant ones on exactly the sort a visitor reaches for to see what they
+  // logged most recently. A separate user (rather than a fourth row on sortUser above)
+  // keeps this test's expectations independent of the three-row fixture's own dates.
+  it('an item with no acquired_on sorts LAST in both directions, not merely last in one', async () => {
+    const undatedUser = await createUser('gear-closet-sort-undated');
+    const rows: GearInsert[] = [
+      { name: 'Dated Early', acquired_on: '2026-01-01' },
+      { name: 'Dated Late', acquired_on: '2026-06-01' },
+      { name: 'Undated Item' }, // acquired_on omitted entirely — stays null
+    ];
+    const { error } = await undatedUser.client.from('gear_items').insert(rows);
+    expect(error).toBeNull();
+
+    const { items: asc, error: ascError } = await closetQuery(undatedUser, {
+      sort: 'added',
+      dir: 'asc',
+    });
+    expect(ascError).toBeNull();
+    expect(names(asc)).toEqual(['Dated Early', 'Dated Late', 'Undated Item']);
+
+    // The case Postgres's own default would get backwards: DESC with no explicit
+    // nullsFirst puts NULLs first, which would put 'Undated Item' at index 0 here.
+    const { items: desc, error: descError } = await closetQuery(undatedUser, {
+      sort: 'added',
+      dir: 'desc',
+    });
+    expect(descError).toBeNull();
+    expect(names(desc)).toEqual(['Dated Late', 'Dated Early', 'Undated Item']);
   });
 });
 
@@ -565,33 +670,48 @@ describe('pagination walks every item exactly once, including when many rows tie
     expectedNames = (data ?? []).map((row) => row.name).sort();
   });
 
-  it(`the union of every page equals the full set exactly, for ${TIE_COUNT} items all tied on weight`, async () => {
-    const pageCount = Math.ceil(TIE_COUNT / GEAR_PAGE_SIZE);
-    const seen = new Map<string, number>();
+  // Run over BOTH sort keys, not just weight. The 120 fixture rows above tie on weight
+  // (all 100 g) AND on acquired_on (none of them set it, so every one is NULL), which
+  // makes them a total tie on either column — the worst case for a sort with no stable
+  // tiebreaker, twice over.
+  //
+  // `added` is the case PK-61 made newly urgent, and it exercises something `weight`
+  // cannot: 120 rows whose sort value is NULL, ordered under `nullsFirst: false`, sliced
+  // across three `.range()` calls. Postgres has no obligation to return a consistent
+  // relative order within a block of nulls any more than within a block of equal
+  // weights, so the null pinning and the `id` tiebreaker have to hold TOGETHER across
+  // page boundaries or a row silently duplicates onto two pages or falls between them.
+  // Nothing covered that combination before.
+  it.each<GearSortKey>(['weight', 'added'])(
+    `the union of every page equals the full set exactly, for ${TIE_COUNT} items all tied on %s`,
+    async (sort) => {
+      const pageCount = Math.ceil(TIE_COUNT / GEAR_PAGE_SIZE);
+      const seen = new Map<string, number>();
 
-    for (let page = 1; page <= pageCount; page++) {
-      const { items, error } = await closetQuery(paginationUser, {
-        sort: 'weight',
-        page: String(page),
-      });
-      expect(error).toBeNull();
-      for (const row of items) {
-        seen.set(row.name, (seen.get(row.name) ?? 0) + 1);
+      for (let page = 1; page <= pageCount; page++) {
+        const { items, error } = await closetQuery(paginationUser, {
+          sort,
+          page: String(page),
+        });
+        expect(error).toBeNull();
+        for (const row of items) {
+          seen.set(row.name, (seen.get(row.name) ?? 0) + 1);
+        }
       }
-    }
 
-    // No row appeared on more than one page — the "duplicated across a page
-    // boundary" half of the classic pagination-tiebreaker bug.
-    const duplicated = [...seen.entries()].filter(([, count]) => count > 1).map(([name]) => name);
-    expect(duplicated).toEqual([]);
+      // No row appeared on more than one page — the "duplicated across a page
+      // boundary" half of the classic pagination-tiebreaker bug.
+      const duplicated = [...seen.entries()].filter(([, count]) => count > 1).map(([name]) => name);
+      expect(duplicated).toEqual([]);
 
-    // No row was dropped between page boundaries — the "silently missing" half.
-    const missing = expectedNames.filter((name) => !seen.has(name));
-    expect(missing).toEqual([]);
+      // No row was dropped between page boundaries — the "silently missing" half.
+      const missing = expectedNames.filter((name) => !seen.has(name));
+      expect(missing).toEqual([]);
 
-    // And nothing extra came back either: the set is exact.
-    expect([...seen.keys()].sort()).toEqual(expectedNames);
-  });
+      // And nothing extra came back either: the set is exact.
+      expect([...seen.keys()].sort()).toEqual(expectedNames);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
