@@ -46,6 +46,20 @@ export const BULK_INTENT = {
   setCategory: 'bulk-set-category',
   setStatus: 'bulk-set-status',
   delete: 'bulk-delete',
+  // PK-65. Export is a bulk action rather than a page of its own because it acts on a
+  // SELECTION, and the closet list is the only place a selection exists — the checkboxes,
+  // the select-all, the id validation and the cap are all already here, and a separate
+  // export page would have to grow its own copy of every one of them. Import is the
+  // opposite case and is deliberately NOT here: it takes a file, not a selection, so it
+  // has its own page (src/pages/gear/import.astro) modelled on new.astro instead.
+  //
+  // IT IS THE ONE INTENT THAT WRITES NOTHING. Everything in this module is about deciding
+  // which rows an action may touch, and that question is identical for a read; what
+  // differs is on the page, where this is the only branch that answers with a Response
+  // rather than a redirect or a re-render. See src/pages/gear/index.astro's own comment
+  // at that branch for why it does not — and must not — follow the 303 rule the other
+  // three do.
+  export: 'bulk-export',
 } as const;
 
 export type BulkIntent = (typeof BULK_INTENT)[keyof typeof BULK_INTENT];
@@ -226,7 +240,8 @@ export type BulkAction =
       readonly ids: readonly string[];
       readonly status: GearStatus;
     }
-  | { readonly intent: typeof BULK_INTENT.delete; readonly ids: readonly string[] };
+  | { readonly intent: typeof BULK_INTENT.delete; readonly ids: readonly string[] }
+  | { readonly intent: typeof BULK_INTENT.export; readonly ids: readonly string[] };
 
 export type BulkActionResult =
   | { readonly ok: true; readonly action: BulkAction }
@@ -283,10 +298,17 @@ export function parseBulkAction(form: FormData): BulkActionResult {
     return { ok: true, action: { intent, ids, status: statusRaw } };
   }
 
-  // delete: ids only, nothing further to validate here. Whether the visitor has
-  // confirmed is `confirmsGearDeletion`'s business, called by the page on the way to
-  // deciding whether to re-render the confirmation or issue the write — this function
-  // answers only WHICH rows and WHAT action, exactly as it does for the other two.
+  // delete and export: ids only, nothing further to validate here. Whether the visitor
+  // has confirmed a delete is `confirmsGearDeletion`'s business, called by the page on
+  // the way to deciding whether to re-render the confirmation or issue the write — this
+  // function answers only WHICH rows and WHAT action, exactly as it does for the others.
+  //
+  // Export shares this branch rather than getting one of its own because it needs exactly
+  // what delete needs and nothing else: a validated, de-duplicated, capped list of ids.
+  // The two could hardly be less alike in consequence — one removes rows for good, one
+  // reads them — and that difference is entirely on the page. `TOO_MANY_IDS_MESSAGE`
+  // therefore also bounds an export, which is the intended reading of it: 500 is the most
+  // rows any one bulk submission acts on, whatever it then does with them.
   if (Object.keys(errors).length > 0) return { ok: false, errors };
   return { ok: true, action: { intent, ids } };
 }

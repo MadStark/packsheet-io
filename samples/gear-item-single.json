@@ -1,0 +1,14 @@
+{
+  "name": "Garmin inReach Mini 2",
+  "brand": "Garmin",
+  "category": "Electronics",
+  "description": "Satellite messenger",
+  "quantity": 1,
+  "weight_grams": 100,
+  "price": 349.99,
+  "currency": "GBP",
+  "acquired_on": "2025-04-12",
+  "status": "owned",
+  "url": "https://www.garmin.com/en-GB/p/781140",
+  "notes": "Annual subscription renews in April"
+}

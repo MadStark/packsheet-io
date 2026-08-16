@@ -554,6 +554,16 @@ const AUTH_CONSUMERS: readonly string[] = [
   // delete() for a confirmed delete, guarded by RLS exactly like every other write in
   // this product. A page, never an island.
   'src/pages/gear/[id].astro',
+  // The JSON import page (PK-65): reads Astro.locals.user to redirect a signed-out
+  // visitor to sign-in with `next` set; builds a request-scoped client via
+  // createAuthClient and, on a confirmed submission, issues ONE multi-row insert() into
+  // gear_items through importGearItems — guarded by gear_items_insert_own exactly like
+  // every other write in this product. No RPC and no privileged key, deliberately: see
+  // importGearItems' own comment for why the SECURITY DEFINER function PK-65 describes is
+  // the right answer for pack import and the wrong one for a single-table insert. The
+  // preview step reaches no database at all. A page, never an island — the file is read
+  // and parsed on the server, and no `client:*` directive appears anywhere in it.
+  'src/pages/gear/import.astro',
 ];
 
 /** The allowlist as absolute ids, to be compared against graph keys. Entries are written

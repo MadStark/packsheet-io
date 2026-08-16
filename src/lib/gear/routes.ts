@@ -21,6 +21,18 @@ export const GEAR_PATH = '/gear';
 export const GEAR_NEW_PATH = '/gear/new';
 
 /**
+ * The JSON import page (PK-65): upload a file, read the preview, then confirm.
+ *
+ * IMPORT HAS A PATH AND EXPORT DOES NOT, and that asymmetry is worth a line here because
+ * it looks like an omission. Export is a bulk action on the closet list — it POSTs to
+ * `GEAR_PATH` with a selection, exactly as the other three do, and answers with a file
+ * rather than a page. There is no URL a visitor can navigate to that produces an export,
+ * deliberately: the thing being exported IS the selection, and a selection does not
+ * survive a GET.
+ */
+export const GEAR_IMPORT_PATH = '/gear/import';
+
+/**
  * The detail/edit page for a single gear item. A function rather than a constant
  * because it needs an id; kept here rather than assembled ad hoc at each call site so
  * a future change to the URL shape (nesting, a slug instead of an id) is one edit.
