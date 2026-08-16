@@ -12,21 +12,20 @@
  *
  * THE QUERY ITSELF LIVES HERE TOO, as `loadGearOptions` below — moved out of the page
  * (PK-4 review, C3/I3). An earlier version of this comment described the page's own
- * query as `client.from('gear_items').select('category, brand').is('deleted_at',
- * null)` and called the result "the signed-in visitor's own closet under RLS" — THAT
- * WAS THE EXACT BUG THIS FEATURE EXISTS TO PREVENT, not a simplification. `gear_items`
- * carries TWO permissive SELECT policies (core_schema.sql): `gear_items_select_own`
- * (owner only) and `gear_items_select_via_public_pack`, granted to `anon,
- * authenticated` alike so a shared pack link can render the gear behind it. RLS
- * policies are UNIONED, not intersected, so that query — with no explicit owner filter
- * — would answer with this visitor's own rows OR any row that happens to sit on
- * ANYONE's public pack: "under RLS" alone does not mean "my own closet" for this table,
- * ever. `loadGearOptions` adds `.eq('user_id', userId)` for the same reason
- * `loadGearCloset` (`src/lib/gear/query.ts`) does on the main list query — see that
- * function's own comment for the fuller version of this same argument — which is also
- * what makes the owner scope something `tests/gear-closet.test.ts` can now assert on
- * directly, rather than trusting a comment that turned out to say the opposite of what
- * was true.
+ * query as `client.from('gear_items').select('category, brand')` and called the result
+ * "the signed-in visitor's own closet under RLS" — THAT WAS THE EXACT BUG THIS FEATURE
+ * EXISTS TO PREVENT, not a simplification. `gear_items` carries TWO permissive SELECT
+ * policies (core_schema.sql): `gear_items_select_own` (owner only) and
+ * `gear_items_select_via_public_pack`, granted to `anon, authenticated` alike so a
+ * shared pack link can render the gear behind it. RLS policies are UNIONED, not
+ * intersected, so that query — with no explicit owner filter — would answer with this
+ * visitor's own rows OR any row that happens to sit on ANYONE's public pack: "under RLS"
+ * alone does not mean "my own closet" for this table, ever. `loadGearOptions` adds
+ * `.eq('user_id', userId)` for the same reason `loadGearCloset`
+ * (`src/lib/gear/query.ts`) does on the main list query — see that function's own
+ * comment for the fuller version of this same argument — which is also what makes the
+ * owner scope something `tests/gear-closet.test.ts` can now assert on directly, rather
+ * than trusting a comment that turned out to say the opposite of what was true.
  *
  * POSTGREST CAPS HOW MANY ROWS ONE QUERY RETURNS (`db-max-rows`, 1000 on Supabase's
  * default configuration), so this options query — like the main list query it sits
@@ -77,12 +76,12 @@ function distinctSortedValues(values: readonly (string | null)[]): string[] {
   return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
-/** Shapes a `GearOptionRow[]` — one row per active gear item, category and brand
- *  columns only — into the two option lists the filter form's category and brand
- *  checkboxes are built from. An empty `rows` (a closet with no active items at all)
- *  returns two empty lists, which is also how `src/pages/gear/index.astro` tells "the
- *  closet is genuinely empty" apart from "these filters matched nothing" — see that
- *  page for the rest of that distinction. */
+/** Shapes a `GearOptionRow[]` — one row per gear item in this visitor's closet,
+ *  category and brand columns only — into the two option lists the filter form's
+ *  category and brand checkboxes are built from. An empty `rows` (a closet with no
+ *  items at all) returns two empty lists, which is also how
+ *  `src/pages/gear/index.astro` tells "the closet is genuinely empty" apart from "these
+ *  filters matched nothing" — see that page for the rest of that distinction. */
 export function extractGearOptions(rows: readonly GearOptionRow[]): GearOptions {
   return {
     categories: distinctSortedValues(rows.map((row) => row.category)),
@@ -93,14 +92,10 @@ export function extractGearOptions(rows: readonly GearOptionRow[]): GearOptions 
 /**
  * The owner-scoped options query itself — see the module comment's "THE QUERY ITSELF
  * LIVES HERE TOO" section for why this moved out of `src/pages/gear/index.astro` and
- * what the un-scoped version of it used to get wrong. `.is('deleted_at', null)`
- * matters independently of the owner filter: a trashed item's category/brand should
- * not populate a filter checkbox for a closet it no longer appears in.
+ * what the un-scoped version of it used to get wrong. `.eq('user_id', userId)` is the
+ * whole of the scoping here, and it is the load-bearing half: every row this visitor
+ * owns is an option worth offering, and no row anybody else owns is.
  */
 export async function loadGearOptions(client: PacksheetClient, userId: string) {
-  return client
-    .from('gear_items')
-    .select('category, brand')
-    .eq('user_id', userId)
-    .is('deleted_at', null);
+  return client.from('gear_items').select('category, brand').eq('user_id', userId);
 }
