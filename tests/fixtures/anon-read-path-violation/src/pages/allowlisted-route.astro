@@ -1,0 +1,38 @@
+---
+// NOT a violation, and the only file in this fixture whose job is to be allowed. It
+// imports the choke point exactly as src/pages/direct.astro next to it does — same one-hop
+// edge, same target — and differs in one respect: it is named in FIXTURE_AUTH_CONSUMERS in
+// tests/anonymous-read-path.test.ts. The pair is what proves the allowlist is doing the
+// work. If the exemption stopped being consulted, this page would be reported and the
+// "reports exactly those eight importers" assertion would find nine; if the exemption
+// leaked to everything, direct.astro would stop being reported and it would find seven.
+//
+// It also stands in for what a real entry will look like: a page that renders something
+// for a signed-in person, rendered on the server, never hydrated. That last part is not
+// decoration — it is the condition Invariant D checks, and this file passing it is what
+// case (c) means. Its sibling src/components/AllowlistedIsland.vue is the same exemption
+// granted to a module that does NOT satisfy it.
+import '../lib/auth/index';
+---
+
+<p>allowlisted route</p>
+
+<!--
+  The benign `<script>`, which used to turn this whole suite red.
+
+  Astro lifts a page `<script>` into a module of its own, whose id is this file's path
+  plus `?astro&type=script&index=0&lang.ts` — and it IS browser code, so the client pass
+  transforms it. The graph walker stripped every query suffix, which collapsed that
+  module onto this page's own id and put an AUTH_CONSUMERS entry into `clientIds`.
+  Invariant D then reported an allowlisted server-only page as having shipped the auth SDK
+  to every visitor, over a console.log. See `stripQuery` for the mirror-image hole the
+  same collapse opened on Invariant A.
+
+  This page rather than a new one on purpose: it is the fixture's allowlisted entry, so it
+  is the file where the false positive was worst — and where a regression would be caught
+  by an assertion that already exists ("does NOT flag an allowlisted server-only page")
+  rather than only by the one written for it.
+-->
+<script>
+  console.log('a page script that has nothing to do with auth');
+</script>

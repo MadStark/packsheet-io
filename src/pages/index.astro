@@ -1,55 +1,43 @@
 ---
-import Layout from '../layouts/Layout.astro';
-import ThemeToggle from '../components/ThemeToggle.vue';
+// On-demand: this route answers differently depending on who is asking, which is the
+// one thing a prerendered file cannot do. That is a deliberate downgrade from what `/`
+// used to be — a static, edge-cached landing page — and src/lib/routes.ts's header sets
+// out what it costs and what holds the bill down. The landing page itself did not lose
+// that property; it moved to WELCOME_PATH and is prerendered exactly as this file was.
+export const prerender = false;
 
-const title = 'Packsheet — a free, open gear tracker for hikers';
-// Feeds og:description, twitter:description and the search snippet as well as the
-// meta tag, so it carries the "a packsheet" noun too. Link previews and search
-// results are where a stranger meets the name first — the one surface where the
-// naming bet has to hold even if they never reach the page.
-const description =
-  'A free, open-source gear tracker for hikers. Build a gear closet once, compose it into a packsheet for every trip, and share a page reviewers actually want to read.';
+// Path constants only — no auth SDK, so this route needs no AUTH_CONSUMERS entry in
+// tests/anonymous-read-path.test.ts. It is the busiest route on the site and the one it
+// would be most expensive to get wrong.
+import { homeDestination, HOME_PATH } from '../lib/routes';
 
-const repoUrl = 'https://github.com/MadStark/packsheet-io';
+// src/middleware.ts has already resolved this for the request — with a verified
+// getUser() call when the request carried a Supabase cookie, and with a plain `null` when
+// it did not (see src/lib/session-cookie.ts, which is what keeps an anonymous visit to
+// the front door off the auth server entirely). Reading `Astro.locals.user` here rather
+// than asking again is the same rule every other route in this codebase follows.
+//
+// Coerced to a boolean at the boundary: `homeDestination` is pure over two states and
+// deliberately knows nothing about Supabase's `User` type.
+const destination = homeDestination(Astro.locals.user !== null);
+
+// Belt to the braces around `homeDestination`'s "must never return HOME_PATH" contract.
+// That contract is asserted directly for both arms in tests/home-routing.test.ts, but the
+// failure it prevents is a redirect loop on the site's front door — a browser bouncing
+// `/` → `/` until it refuses to continue, which presents as the site being down rather
+// than as a routing bug. A thrown error here is a 500 on one route with a message naming
+// the cause, which is strictly better than that, and it costs one comparison.
+if (destination === HOME_PATH) {
+  throw new Error(
+    'homeDestination returned HOME_PATH, which would redirect `/` to itself — see src/lib/routes.ts.',
+  );
+}
+
+// 302 and not 301. Where `/` sends somebody is a function of their session, so it is by
+// definition not permanent, and a 301 is the one redirect browsers cache indefinitely and
+// ignore the server on afterwards — a visitor who arrived signed out once would keep
+// being sent to the landing page after signing in, with nothing server-side able to
+// correct it. `Astro.redirect` defaults to 302; it is passed explicitly because the
+// default being right is not the same as the choice having been made.
+return Astro.redirect(destination, 302);
 ---
-
-<Layout title={title} description={description}>
-  <main class="mx-auto flex min-h-svh max-w-2xl flex-col justify-center px-6 py-16">
-    <header class="flex items-baseline justify-between gap-4">
-      <p class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Coming soon</p>
-      <ThemeToggle client:load />
-    </header>
-
-    <h1 class="mt-8 text-4xl leading-[1.1] sm:text-5xl">Packsheet</h1>
-
-    <p class="text-ink-2 mt-4 max-w-prose text-lg">
-      A free, open gear tracker for hikers. Build a gear closet once, then compose it into a
-      packsheet for each trip — the list you plan with, and the page you share.
-    </p>
-
-    <ul class="text-ink-2 mt-8 space-y-2 text-sm">
-      <li>Free forever. No paywall, no ads.</li>
-      <li>Open source from the first commit.</li>
-      <li>Your data is always exportable.</li>
-    </ul>
-
-    {
-      /*
-      text-blue-deep rather than the default link --blue: on the --paper page ground,
-      plain --blue is 4.48:1, under the 4.5 AA floor. --blue-deep clears it (6.27:1)
-      and still reads as the same blue, so "blue marks interactive" still holds.
-
-      The hover colour is stated explicitly rather than inherited from the `a:hover`
-      rule in global.css: that rule lives in @layer base, which a utility class
-      outranks, so without this the only link on the page would have no hover
-      feedback at all. --blue-ink is 9.99:1 light and 13.03:1 dark.
-
-      Underlined because Tailwind's preflight strips text-decoration, and colour
-      alone is not a sufficient cue that something is a link.
-    */
-    }
-    <p class="mt-10 text-sm">
-      <a href={repoUrl} class="text-blue-deep hover:text-blue-ink underline">Source on GitHub</a>
-    </p>
-  </main>
-</Layout>

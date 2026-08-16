@@ -1,0 +1,174 @@
+---
+// On-demand: this page requires a session and reads Astro.locals.user, which only
+// exists for a request the Worker actually handled. See src/middleware.ts for why
+// that never touches the anonymous read path.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import { deleteOwnAccount, signOut } from '../../lib/auth';
+import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { GEAR_PATH } from '../../lib/gear/routes';
+// This page redirects a visitor with no session, so the wordmark below is only ever
+// clicked by somebody signed in — and `/` now takes them to their closet rather than to
+// the anonymous landing page. See src/lib/routes.ts.
+import { HOME_PATH } from '../../lib/routes';
+import {
+  confirmsAccountDeletion,
+  CONFIRMATION_MISMATCH_MESSAGE,
+  DELETE_ACCOUNT_CONFIRMATION_FIELD,
+  DELETE_ACCOUNT_INTENT,
+} from '../../lib/account-deletion';
+
+// src/middleware.ts has already resolved this with a verified getUser() call; reading
+// it here rather than calling getUser() again is the whole point of doing it once in
+// middleware. A null user redirects to sign-in with `next` set back to this page, so
+// signing in returns here rather than dropping the visitor on the account page's own
+// default.
+const user = Astro.locals.user;
+// `astro check` reports SIGN_IN_PATH as an unused import here — a false positive of
+// its diagnostic engine specifically for a symbol used only inside a top-level
+// early-return guard in frontmatter (confirmed by moving the same expression into an
+// intermediate variable: the warning just moves to the variable instead). tsc itself
+// has no complaint; `eslint`'s no-unused-vars — the rule that actually matters for a
+// genuinely dead import — is silent on this file too.
+if (!user) {
+  return Astro.redirect(`${SIGN_IN_PATH}?next=${encodeURIComponent(Astro.url.pathname)}`);
+}
+
+// The two-step confirmation the ticket requires: `?confirm-delete=1` is a plain GET
+// navigation (nothing is deleted by loading this state) that reveals a form asking the
+// visitor to type their own email address back, checked against `user.email` below
+// before deleteOwnAccount() is ever called. Neither step alone is "a single unguarded
+// button" — reaching the destructive action needs a deliberate link click AND a typed
+// match, and no client-side `confirm()` dialog is involved at any point.
+const confirmingDelete = Astro.url.searchParams.get('confirm-delete') === '1';
+
+let deleteError: string | null = null;
+
+// CSRF: same protection as sign-in.astro and sign-up.astro — Astro's on-demand origin
+// check (security.checkOrigin, set explicitly in astro.config.mjs) plus the session
+// cookie's sameSite: 'lax'. Deletion additionally requires the typed-confirmation
+// match below, so a forged cross-site POST that somehow arrived here still could not
+// delete the account without also guessing the visitor's own email address.
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  if (form.get('intent') === DELETE_ACCOUNT_INTENT) {
+    // The gate itself lives in src/lib/account-deletion.ts, and it is there rather than
+    // inline for one reason: frontmatter is code no test in this repository can reach
+    // (vitest excludes src/pages/, because every file there becomes a route), so written
+    // here it was the only piece of authorization logic in the codebase with no test at
+    // all. See that file for what the comparison does and does not tolerate, and why.
+    const typed = form.get(DELETE_ACCOUNT_CONFIRMATION_FIELD);
+    if (!confirmsAccountDeletion(typeof typed === 'string' ? typed : null, user.email)) {
+      deleteError = CONFIRMATION_MISMATCH_MESSAGE;
+    } else {
+      const result = await deleteOwnAccount({ cookies: Astro.cookies, request: Astro.request });
+      if (result.ok) {
+        // The account row and everything it owned are already gone server-side —
+        // deleted by name, five WHERE clauses all scoped to `auth.uid()`, in
+        // `public.delete_own_account()`. NOT by RLS: that function is SECURITY DEFINER,
+        // so it runs as its owner and row-level security does not apply to a single
+        // statement in it. What confines it is that it takes no arguments and can name
+        // no user but the caller. (Nor is it the foreign-key cascade from auth.users,
+        // which the migration deletes by hand around for a referential-integrity race —
+        // see the comment above the function.)
+        //
+        // The session cookies themselves are still sitting in this browser until
+        // something clears them, so sign out explicitly rather than leaving a cookie
+        // that points at nobody.
+        await signOut({ cookies: Astro.cookies, request: Astro.request });
+        return Astro.redirect('/', 303);
+      }
+      // Never render a raw Supabase error string.
+      deleteError = 'Something went wrong deleting your account. Please try again.';
+    }
+  }
+}
+---
+
+<Layout title="Your account — Packsheet" description="Manage your Packsheet account.">
+  <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
+    <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
+      >Packsheet</a
+    >
+    <h1 class="mt-6 text-3xl">Your account</h1>
+
+    <p class="text-ink-2 mt-4 text-sm">Signed in as <span class="text-ink">{user.email}</span></p>
+
+    <p class="mt-6 text-sm">
+      <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
+        Go to your gear closet
+      </a>
+    </p>
+
+    <form method="POST" action="/auth/signout" class="mt-6">
+      <button
+        type="submit"
+        class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+      >
+        Sign out
+      </button>
+    </form>
+
+    <div class="border-hairline mt-12 border-t pt-8">
+      {
+        !confirmingDelete && (
+          <div>
+            <h2 class="text-lg">Delete account</h2>
+            <p class="text-ink-2 mt-2 text-sm">
+              This permanently deletes your account and everything in it. This cannot be undone.
+            </p>
+            <a
+              href="?confirm-delete=1"
+              class="border-rust text-rust hover:bg-rust/10 mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+            >
+              Delete account
+            </a>
+          </div>
+        )
+      }
+
+      {
+        confirmingDelete && (
+          <div>
+            <h2 class="text-rust text-lg">Confirm account deletion</h2>
+            <p class="text-ink-2 mt-2 text-sm">
+              This cannot be undone. Type <span class="text-ink font-medium">{user.email}</span>{' '}
+              below to confirm.
+            </p>
+            {deleteError && (
+              <p role="alert" class="text-rust mt-3 text-sm">
+                {deleteError}
+              </p>
+            )}
+            <form method="POST" class="mt-4 space-y-3">
+              <input type="hidden" name="intent" value={DELETE_ACCOUNT_INTENT} />
+              <input
+                type="text"
+                name={DELETE_ACCOUNT_CONFIRMATION_FIELD}
+                autocomplete="off"
+                required
+                aria-label="Type your email address to confirm"
+                class="border-hairline bg-surface text-ink w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
+              />
+              <div class="flex gap-3">
+                <button
+                  type="submit"
+                  class="bg-rust rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-95"
+                >
+                  Permanently delete my account
+                </button>
+                <a
+                  href="/account"
+                  class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm"
+                >
+                  Cancel
+                </a>
+              </div>
+            </form>
+          </div>
+        )
+      }
+    </div>
+  </main>
+</Layout>

@@ -18,8 +18,15 @@
 --
 -- Into `extensions`, not `public`. Supabase exposes `public` through PostgREST, so an
 -- extension installed there puts its functions on the Data API surface for `anon`.
--- `extensions` is in the search_path of every request (see [api] extra_search_path in
--- config.toml), so `citext` resolves unqualified anyway.
+-- `extensions` is in the search_path of every REQUEST (see [api] extra_search_path in
+-- config.toml), so `citext` resolves unqualified in application queries.
+--
+-- That does NOT extend to migrations, and reading it as though it did cost a broken
+-- staging deploy. `supabase db push` connects to a hosted project with its own role and
+-- its own search_path, which does not include `extensions` — so a migration using the
+-- bare type name passes `supabase db reset` locally and fails with
+-- `type "citext" does not exist` against the hosted project. Always write
+-- `extensions.citext` in a migration.
 create extension if not exists citext with schema extensions;
 
 -- ---------------------------------------------------------------------------

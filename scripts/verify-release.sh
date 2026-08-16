@@ -28,6 +28,22 @@ ATTEMPTS="${VERIFY_ATTEMPTS:-5}"
 DELAY="${VERIFY_DELAY:-5}"
 TIMEOUT="${VERIFY_TIMEOUT:-20}"
 
+# Which SHAPE of site this release is supposed to be — see `placeholderOnly` in
+# astro.config.mjs, and the note on this variable in deploy-production.yml's verify step.
+#
+# This is not a switch that relaxes the checks; it selects a different, equally specific
+# set of them. A placeholder release must prove that the landing page and every app route
+# are UNREACHABLE, which is a stronger assertion than the normal release's and would be
+# a false alarm against it — and the normal release's assertions would be false alarms
+# against a placeholder. Getting the branch wrong is therefore loud in both directions,
+# which is the only reason it is safe to have a branch here at all.
+#
+# The same literal-"true" comparison as astro.config.mjs, so a variable that says "True"
+# or " true" verifies the build it actually produced rather than the one somebody meant.
+# The two must agree: this script is what would otherwise report a healthy launch as a
+# failed release.
+PLACEHOLDER_ONLY="${PLACEHOLDER_ONLY:-}"
+
 # Checked explicitly rather than left to `set -e`.
 #
 # `set -euo pipefail` above is defence in depth here, not the mechanism: every external
@@ -52,20 +68,50 @@ fail() {
   problems=$((problems + 1))
 }
 
-# Fetch a URL into a file and echo the status code, retrying while the answer is not
-# 200. Cloudflare's managed challenge, bot-fight mode and rate limiting all answer a
-# datacenter IP running curl with a 4xx, and an edge seconds after a deploy can still
-# be catching up — believing the first bad answer produces the most dangerous false
-# alarm available here, which sends someone to "fix" a site that is healthy for every
-# real browser.
+# Report the outcome and exit. Both release shapes end here, which is the point: every
+# check runs even when an earlier one fails, and the count is reported — exiting at the
+# first problem hides the second until someone fixes the first and deploys again, on the
+# one deploy nobody re-runs casually.
 #
-# A curl that cannot run at all yields 000, which is not 200, so a broken or missing
-# curl exhausts the retries and fails. It never reports success without having looked.
+# `$1` describes what was verified. It is passed in rather than fixed because the two
+# shapes verify genuinely different things, and a success line that did not say which one
+# ran would let a release that quietly verified the wrong shape look identical to one that
+# verified the right one.
+finish() {
+  if [ "$problems" -gt 0 ]; then
+    echo "Release verification FAILED: $problems problem(s) at $SITE"
+    exit 1
+  fi
+  echo "Verified: $1"
+  exit 0
+}
+
+# Fetch a URL into a file and echo the status code, retrying while the answer is not one
+# the caller is willing to believe. Cloudflare's managed challenge, bot-fight mode and
+# rate limiting all answer a datacenter IP running curl with a 4xx, and an edge seconds
+# after a deploy can still be catching up — believing the first bad answer produces the
+# most dangerous false alarm available here, which sends someone to "fix" a site that is
+# healthy for every real browser.
+#
+# `want` is an extended regex over the status code and defaults to exactly 200, which is
+# what every check had until an on-demand route was added below: that one's correct answer
+# is a REDIRECT, so "retry until 200" would have retried five times and then reported the
+# right answer as the wrong one. Redirects are deliberately not followed — where a
+# signed-out visitor is sent is the thing being checked, not an obstacle on the way to a
+# page.
+#
+# Response headers go to `$4` when the caller wants them, which is how that check reads
+# `Location` without a second request. Default /dev/null: nothing else needs them, and a
+# file written per call that nobody reads is a temp file to get wrong.
+#
+# A curl that cannot run at all yields 000, which matches no caller's `want`, so a broken
+# or missing curl exhausts the retries and fails. It never reports success without having
+# looked.
 fetch() {
-  local url="$1" out="$2" attempt=1 status
+  local url="$1" out="$2" want="${3:-^200$}" head="${4:-/dev/null}" attempt=1 status
   while :; do
-    status="$(curl -sS -o "$out" -w '%{http_code}' --max-time "$TIMEOUT" "$url" 2>/dev/null || echo '000')"
-    if [ "$status" = "200" ] || [ "$attempt" -ge "$ATTEMPTS" ]; then
+    status="$(curl -sS -o "$out" -D "$head" -w '%{http_code}' --max-time "$TIMEOUT" "$url" 2>/dev/null || echo '000')"
+    if printf '%s' "$status" | grep -Eq "$want" || [ "$attempt" -ge "$ATTEMPTS" ]; then
       printf '%s' "$status"
       return 0
     fi
@@ -74,17 +120,32 @@ fetch() {
   done
 }
 
-# ---------------------------------------------------------------------------
-# The home page is served, and is a page
-# ---------------------------------------------------------------------------
-home_status="$(fetch "$SITE/" "$work/home.html")"
-if [ "$home_status" != "200" ]; then
-  fail "$SITE/ answered $home_status, expected 200."
-elif ! grep -qi '<html' "$work/home.html"; then
-  # 200 with a non-HTML body is what an assets binding pointed at the wrong directory
-  # looks like: the deploy succeeds and the site serves something that is not the site.
-  fail "$SITE/ answered 200 but the body is not HTML."
-fi
+# Assert that a path answers a redirect whose destination is this site's own root.
+#
+# Only used by the PlaceholderOnly branch, where it is the single check applied to every
+# route that must have stopped existing — the landing page, the app, the auth routes. It
+# is a function rather than three copies because the interesting property is that they
+# all answer IDENTICALLY: a difference between them would mean something survived the
+# build that should not have.
+#
+# Same-origin only, and for the same reason the two checks in the normal branch below
+# spell their destinations out rather than pattern-matching the path: a site that
+# redirects every URL to wherever a Location header says is an open redirect on every URL
+# it has. Under this flag that is the entire site.
+expect_redirect_to_root() {
+  local path="$1" headers="$work/redirect.headers" status location
+  status="$(fetch "$SITE$path" "$work/redirect.body" '^30[12378]$' "$headers")"
+  if ! printf '%s' "$status" | grep -Eq '^30[12378]$'; then
+    fail "$SITE$path answered $status, expected a redirect to / — a PlaceholderOnly release must serve nothing but the placeholder page."
+    return
+  fi
+  # Last Location wins and `\r` is stripped, for the reasons the /account check documents.
+  location="$(grep -i '^location:' "$headers" | tail -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//' || true)"
+  case "$location" in
+    / | "$SITE"/) ;;
+    *) fail "$SITE$path redirected to '$location', expected this site's root." ;;
+  esac
+}
 
 # ---------------------------------------------------------------------------
 # The build that landed is the PRODUCTION build
@@ -98,6 +159,13 @@ fi
 #     body, or an error page.
 #   - Disallow: / is the specific catastrophe — a staging or preview build on
 #     packsheet.io, invisible from the outside, costing the site its search presence.
+#
+# CHECKED BEFORE THE ROUTE BRANCH BELOW, AND OUTSIDE IT, because it is the one assertion
+# both shapes of release share: PlaceholderOnly changes which pages exist, not which
+# environment's build is allowed to be live on packsheet.io. A placeholder release is
+# still a production release, and a staging artifact reaching this hostname is still the
+# catastrophe — arguably more so, since the placeholder period is when nobody is looking
+# closely at the site.
 robots_status="$(fetch "$SITE/robots.txt" "$work/robots.txt")"
 if [ "$robots_status" != "200" ]; then
   fail "$SITE/robots.txt answered $robots_status, expected 200."
@@ -110,12 +178,149 @@ else
   fi
 fi
 
-# Every check runs even when an earlier one fails, and the count is reported. The
-# alternative — exiting at the first problem — hides the second one until someone
-# fixes the first and deploys again.
-if [ "$problems" -gt 0 ]; then
-  echo "Release verification FAILED: $problems problem(s) at $SITE"
-  exit 1
+if [ "$PLACEHOLDER_ONLY" = 'true' ]; then
+  # -------------------------------------------------------------------------
+  # PlaceholderOnly: the placeholder answers, and nothing else does
+  # -------------------------------------------------------------------------
+  # Three assertions, and each one fails for a different reason worth telling apart.
+  #
+  #   - `/` must be the page. In a normal build it is a router that answers a 302, so a
+  #     redirect here means the flag did not reach the build and the app is live on a
+  #     release that was meant to be a placeholder — the failure this whole check exists
+  #     to catch, and the one nobody would notice from the outside for hours.
+  #   - `/welcome/` must NOT be reachable. It is the landing page in a normal build and a
+  #     prerendered file served straight off the assets binding, so a 200 here is the
+  #     precise signature of a stale `dist/client/welcome/index.html` left behind by an
+  #     earlier deploy — content the placeholder was supposed to replace, still being
+  #     served, at a URL search engines and old links already hold.
+  #   - `/account` must not be reachable either, and it is checked SECOND to the Worker
+  #     rather than to the page: `/` is a static asset in this mode, so a release whose
+  #     Worker is broken would still serve a perfect placeholder and fail nothing above.
+  #     The redirect that answers here is produced by the catch-all route, which only the
+  #     Worker can run. Same argument as the normal branch's own "the Worker runs" section
+  #     below, applied to the one route this mode has.
+  home_status="$(fetch "$SITE/" "$work/home.html")"
+  if [ "$home_status" != "200" ]; then
+    fail "$SITE/ answered $home_status, expected 200 — under PlaceholderOnly the root IS the page, not a router."
+  elif ! grep -qi '<html' "$work/home.html"; then
+    fail "$SITE/ answered 200 but the body is not HTML."
+  fi
+
+  expect_redirect_to_root /welcome/
+  expect_redirect_to_root /account
+
+  finish "$SITE serves the PlaceholderOnly page at /, redirects /welcome/ and /account to it, and serves an indexable robots.txt."
 fi
 
-echo "Verified: $SITE serves 200 HTML and an indexable robots.txt."
+# Everything below verifies a NORMAL release, and runs only because the branch above did
+# not exit. It is unchanged by PlaceholderOnly and deliberately left that way: the shape
+# of release that happens every day should not have to be read through a conditional
+# belonging to the shape that happens twice.
+
+# ---------------------------------------------------------------------------
+# The front door routes, and the landing page it routes an anonymous visitor to
+# ---------------------------------------------------------------------------
+# `/` used to BE the landing page — a prerendered file — and this check was simply "200,
+# and the body is HTML". It is a router now (src/pages/index.astro, src/lib/routes.ts):
+# signed-in visitors go to their gear closet, everybody else to /welcome. This script is
+# credential-free by design and sends no cookies, so the answer it must get is the
+# redirect, and the page it used to assert on now lives one hop away.
+#
+# BOTH HALVES ARE CHECKED, because they fail separately and mean different things:
+#
+#   - `/` answering 200 means the router did not run. On a site where the assets binding
+#     serves anything it has and the Worker handles the rest, that is what a stale
+#     `dist/client/index.html` left behind by an older build looks like — the front door
+#     silently serving the wrong era of the site to everybody, signed in or not.
+#   - /welcome answering anything but HTML means the assets binding is pointed somewhere
+#     wrong: the deploy succeeded and the site is serving something that is not the site.
+#     That was this check's original purpose and it has not gone away, only moved.
+#
+# The path is duplicated from src/lib/routes.ts for the same reason the two auth paths
+# below are duplicated from src/lib/auth-routes.ts — a shell script cannot import a
+# TypeScript constant — and tests/deploy-workers.test.ts asserts the copies agree.
+home_headers="$work/home.headers"
+home_status="$(fetch "$SITE/" "$work/home.html" '^30[12378]$' "$home_headers")"
+if ! printf '%s' "$home_status" | grep -Eq '^30[12378]$'; then
+  fail "$SITE/ answered $home_status, expected a redirect to /welcome for a request with no session."
+else
+  # Same extraction as the /account check below — see its comment for why the LAST
+  # Location wins and why `|| true` is needed.
+  home_location="$(grep -i '^location:' "$home_headers" | tail -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//' || true)"
+  # Same-origin only, for the same reason as /account's: a front door that redirects
+  # anywhere a header says is an open redirect on the most-visited URL on the site.
+  case "$home_location" in
+    /welcome/ | "$SITE"/welcome/) ;;
+    *)
+      fail "$SITE/ redirected to '$home_location', expected the landing page on this site."
+      ;;
+  esac
+fi
+
+# THE TRAILING SLASH IS REQUIRED HERE. Astro prerenders the landing page to
+# dist/client/welcome/index.html, and Cloudflare's assets binding defaults to
+# `html_handling: "auto-trailing-slash"` — so `$SITE/welcome` answers 307, not 200, and
+# this check written without the slash burned every retry and failed the release. It is
+# not a shape to "tidy up": `npm run dev` serves both spellings, so the mistake is
+# invisible until it reaches workerd. See WELCOME_PATH in src/lib/routes.ts, which carries
+# the slash for the same reason, and which tests/deploy-workers.test.ts pins against this
+# line.
+welcome_status="$(fetch "$SITE/welcome/" "$work/welcome.html")"
+if [ "$welcome_status" != "200" ]; then
+  fail "$SITE/welcome/ answered $welcome_status, expected 200."
+elif ! grep -qi '<html' "$work/welcome.html"; then
+  fail "$SITE/welcome/ answered 200 but the body is not HTML."
+fi
+
+# ---------------------------------------------------------------------------
+# The WORKER runs, not just the assets binding
+# ---------------------------------------------------------------------------
+# Neither check above touches the Worker at all. `/` and `/robots.txt` are both
+# prerendered: Cloudflare's assets binding serves them straight off the uploaded files,
+# and the script that PK-19 gave real runtime secrets to never executes. So every check
+# in this file was green for a release in which every on-demand route 500s.
+#
+# That stopped being hypothetical with PK-19. `/sign-in`, `/sign-up`, `/account`,
+# `/auth/callback` and `/auth/signout` are all on-demand now, they all reach
+# `src/lib/auth/index.ts`, and that module throws at request time when
+# PUBLIC_SUPABASE_URL or PUBLIC_SUPABASE_ANON_KEY is missing or unparseable. A deploy that
+# built without those secrets — a renamed GitHub secret, an environment that lost one —
+# produces exactly that: a perfect landing page, an indexable robots.txt, and a 500 on
+# every route a person can sign in through.
+#
+# `/account` is the route chosen, and its correct signed-out answer is a redirect to
+# sign-in. That makes this a check with a specific expectation rather than "did not 500":
+#
+#   - It proves middleware ran (it is what resolves the user), that `getUser()` completed
+#     against a real Supabase URL rather than throwing, and that the page's own guard
+#     branched. A 500 fails it, and so does a 200 — a signed-out visitor being served the
+#     account page is the more serious of the two and would pass any "is it up" check.
+#   - It stays CREDENTIAL-FREE. No cookie is sent, nothing is signed in to, and no account
+#     exists for this to touch. The verifier runs against production after every release
+#     and must never hold a session.
+#
+# The two paths are duplicated from src/lib/auth-routes.ts because a shell script cannot
+# import a TypeScript constant. tests/deploy-workers.test.ts asserts the copies agree, so
+# renaming a route breaks the build here rather than silently checking a 404.
+account_headers="$work/account.headers"
+account_status="$(fetch "$SITE/account" "$work/account.html" '^30[12378]$' "$account_headers")"
+if ! printf '%s' "$account_status" | grep -Eq '^30[12378]$'; then
+  fail "$SITE/account answered $account_status, expected a redirect to /sign-in — the on-demand routes are not working, which is what a missing or wrong PUBLIC_SUPABASE_* secret looks like."
+else
+  # Last Location wins, `\r` stripped: a header dump is CRLF and, on a redirect chain,
+  # carries one set of headers per hop. `|| true` because a redirect with no Location at
+  # all must be reported by the check below rather than killing the script under `set -e`.
+  location="$(grep -i '^location:' "$account_headers" | tail -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//' || true)"
+  # Relative is what Astro emits; the absolute form is accepted only on THIS site's own
+  # origin. Accepting any host that happens to end in /sign-in would pass an open redirect
+  # — which is precisely the defect safeNextPath exists to prevent, so it is not a shape to
+  # wave through in the check that verifies the release.
+  case "$location" in
+    /sign-in | /sign-in\?* | "$SITE"/sign-in | "$SITE"/sign-in\?*) ;;
+    *)
+      fail "$SITE/account redirected to '$location', expected the sign-in page on this site."
+      ;;
+  esac
+fi
+
+finish "$SITE routes / to a 200 HTML landing page for a signed-out visitor, serves an indexable robots.txt, and redirects an on-demand route to sign-in."

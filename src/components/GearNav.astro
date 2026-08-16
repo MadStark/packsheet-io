@@ -1,0 +1,74 @@
+---
+// A plain, non-hydrated header for the gear closet's pages (PK-4) — the wordmark and
+// links to Closet, Trash and Account, shared by src/pages/gear/index.astro and the
+// closet pages that follow it.
+//
+// KEEP THIS A PLAIN .astro COMPONENT. It imports nothing from src/lib/auth/ (only the
+// dependency-free path constants below, which is exactly what those modules exist
+// for — see their own module comments), takes no `client:*` directive anywhere it is
+// used, and must never gain one: a hydrated nav bar is a component the browser
+// downloads, and the whole point of src/lib/gear/routes.ts and src/lib/auth-routes.ts
+// being importable from anywhere is that a component like this one can render a link
+// without ever becoming a reason for an auth SDK to reach the client.
+import { GEAR_NEW_PATH, GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
+import { ACCOUNT_PATH } from '../lib/auth-routes';
+// The wordmark's destination, which used to be a hard-coded "/" and is the single click
+// this whole change is about. Every page this nav renders on belongs to a signed-in
+// visitor, and `/` now takes that visitor to their own closet instead of to a marketing
+// page with a "Sign in" link on it. Named rather than inlined so the one place that
+// decides what `/` means (src/lib/routes.ts) is reachable from here by reading.
+import { HOME_PATH } from '../lib/routes';
+
+// aria-current="page" on whichever link matches the current path — a small,
+// server-computed affordance (no JS needed) that tells a screen reader, and a sighted
+// visitor via :focus/underline styling, which section they are already in.
+const path = Astro.url.pathname;
+const links: readonly [href: string, label: string][] = [
+  [GEAR_PATH, 'Closet'],
+  [GEAR_TRASH_PATH, 'Trash'],
+  [ACCOUNT_PATH, 'Account'],
+];
+---
+
+<header class="border-hairline border-b">
+  <nav
+    aria-label="Gear closet"
+    class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4"
+  >
+    <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
+      >Packsheet</a
+    >
+    <ul class="flex items-center gap-6 text-sm">
+      {
+        links.map(([href, label]) => (
+          <li>
+            <a
+              href={href}
+              aria-current={path === href ? 'page' : undefined}
+              class="text-ink-2 hover:text-ink aria-[current=page]:text-ink font-medium aria-[current=page]:underline"
+            >
+              {label}
+            </a>
+          </li>
+        ))
+      }
+      {
+        /* C1 (PK-4 review): GEAR_NEW_PATH used to be linked ONLY from the closet's
+           empty state, so once the closet held one item there was no route to it but
+           typing the URL. Present everywhere this nav renders, not only on the closet
+           list, so "add another item" stays reachable from the trash and detail pages
+           too. Blue marks it interactive per tokens.css's own rule, same vocabulary as
+           every other link in this header rather than a new button style. */
+      }
+      <li>
+        <a
+          href={GEAR_NEW_PATH}
+          aria-current={path === GEAR_NEW_PATH ? 'page' : undefined}
+          class="text-blue-deep hover:text-blue-ink aria-[current=page]:text-blue-ink font-medium aria-[current=page]:underline"
+        >
+          Add item
+        </a>
+      </li>
+    </ul>
+  </nav>
+</header>

@@ -1,0 +1,176 @@
+-- The default privileges on `public`, which are not the same locally and on a hosted project.
+--
+-- PK-57. `public.delete_own_account()` shipped to `packsheet-staging` EXECUTE-able by
+-- `anon`, and the test that forbids exactly that passed the whole way. Measured on the
+-- hosted project minutes after the Ref 19 deploy:
+--
+--     acl: {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}
+--     has_function_privilege('anon', 'public.delete_own_account()', 'EXECUTE') = true
+--
+-- and `POST /rest/v1/rpc/delete_own_account` with the publishable key answered `204`
+-- rather than `42501`.
+--
+-- ---------------------------------------------------------------------------
+-- WHY THE REVOKE IN 20260811000000_account_deletion.sql DID NOT DO IT
+-- ---------------------------------------------------------------------------
+--
+-- That migration ends with what looks like the complete pair:
+--
+--     revoke all on function public.delete_own_account() from public;
+--     grant execute on function public.delete_own_account() to authenticated;
+--
+-- `revoke ... from public` removes the grant held by the `PUBLIC` pseudo-role — the one
+-- CREATE FUNCTION attaches to every new function. It does NOT remove a grant held by
+-- `anon` as a NAMED role, and on a hosted Supabase project one is attached at creation
+-- time, by this:
+--
+--     alter default privileges in schema public
+--       grant execute on functions to anon, authenticated, service_role;
+--
+-- which both of this project's Supabase projects carry, for grantor `postgres` — the role
+-- migrations are applied as — and again for grantor `supabase_admin`. So the function was
+-- born with `anon=X` already in its ACL, alongside the PUBLIC grant, and revoking PUBLIC
+-- left the named one untouched. Two grants, one revoke.
+--
+-- Not "every Supabase project": newly created cloud projects no longer ship this, which
+-- `supabase/config.toml` already notes for the related auto-exposure default. Ours were
+-- created before that change. A migration has to be correct on the projects that exist,
+-- and it is precisely the projects that predate a default change that nobody re-checks.
+--
+-- The core-schema migration was not exposed to this only because its own grants block
+-- ends with a sweep over the whole schema — `revoke execute on all functions in schema
+-- public from anon, authenticated, service_role` — which names the roles. That sweep ran
+-- before `delete_own_account()` existed, so it could not cover it. It is also why every
+-- other function in `public` reads `{postgres=X/postgres}` on staging today and only this
+-- one does not: the difference is not what the migrations intended, it is which of them
+-- happened to name `anon`.
+--
+-- Note also what the core-schema migration says about this, in its "TWO LAYERS, NOT ONE"
+-- section near the top of the file: "a table created by `postgres` in `public` is NOT
+-- auto-granted to anon/authenticated". That statement is false of both hosted projects.
+--
+-- To its credit the same passage immediately adds "Nothing below relies on that default
+-- holding — every privilege is granted or withheld by name, functions included", and that
+-- is true: core-schema grants and revokes everything explicitly, so the wrong belief cost
+-- it nothing. The charge here is narrower than "the schema depended on it". It is that an
+-- environment fact was written down wrong, sat there reading as settled, and the one
+-- migration that did lean on it — the account-deletion revoke, which withheld from PUBLIC
+-- and trusted the default for the rest — had nothing to warn it.
+--
+-- ---------------------------------------------------------------------------
+-- THE IMPACT, STATED HONESTLY
+-- ---------------------------------------------------------------------------
+--
+-- No anonymous caller can delete anything today. The function's five statements are all
+-- `where user_id = (select auth.uid())`, and `auth.uid()` is null without a JWT, so every
+-- one of them matches zero rows. The `204` is a successful no-op.
+--
+-- What is broken is that the safety rests on the BODY rather than on the GRANT. "anon
+-- cannot execute functions in `public`" is a guarantee this schema states in three places
+-- and does not have. Anything that later changes a predicate, adds an argument, or adds a
+-- second function on the same pattern converts a no-op into a live hole with nothing in
+-- between. `packsheet.io` — production — has only the baseline migration applied and is
+-- already carrying the smaller version of it: `public.set_updated_at()` reads
+-- `{=X/postgres,postgres=X/postgres,anon=X/postgres,...}`, PUBLIC and anon both, and is
+-- unreachable over PostgREST only because it returns `trigger`.
+--
+-- ---------------------------------------------------------------------------
+-- FIXING THE DEFAULT RATHER THAN EACH FUNCTION
+-- ---------------------------------------------------------------------------
+--
+-- The narrow fix is one `revoke ... from anon` on one function, and it is not enough: it
+-- leaves the trap armed for the next function, and for the next TABLE — the same default
+-- privileges hand `anon` `arwdDxtm` on a new table in `public`, TRUNCATE included, which
+-- no row level security policy can refuse. That is another reason the core-schema
+-- migration opens its grants block with four `revoke all on public.<table> from anon,
+-- authenticated, service_role` lines — it gives its own, and it is about the LOCAL
+-- default, with a reproduced `set role anon; truncate public.packs cascade;` to go with
+-- it. Either way a fifth table added tomorrow needs a fifth revoke, and the day someone
+-- forgets it there is nothing to notice.
+--
+-- So this migration removes the defaults themselves, and it moves BOTH environments
+-- rather than pulling the hosted projects towards an already-correct local baseline. The
+-- local stack was not that baseline. Measured before this migration runs:
+--
+--     local     f  {postgres=X/postgres}
+--               r  {postgres=arwdDxtm/postgres,anon=Dxtm/postgres,authenticated=Dxtm/...}
+--               S  {postgres=rwU/postgres,anon=w/postgres,authenticated=w/postgres,...}
+--
+--     hosted    f  {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,...}
+--               r  {postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,...}
+--               S  {postgres=rwU/postgres,anon=rwU/postgres,...}
+--
+-- Only the FUNCTIONS revoke below is a no-op locally — the CLI already applies that one
+-- when it starts a stack, which is the whole reason the local run of
+-- `tests/rls-enabled.test.ts` could not see PK-57. The tables and sequences revokes remove
+-- a real `anon=Dxtm` and a real `anon=w` from the local stack: TRUNCATE and MAINTAIN on
+-- anything created next, which the grants sweep in that file treats as unacceptable on an
+-- existing table and which nothing checked on a future one.
+--
+-- After this, an object created in `public` by `postgres` carries the same thing in both:
+-- the built-in PUBLIC grant on functions, and nothing named. That agreement is what makes
+-- `tests/rls-enabled.test.ts` mean what it says when it runs locally.
+--
+-- The built-in PUBLIC grant on functions is deliberately LEFT ALONE. Revoking it here
+-- would be one more line and would make the guardrail worse: a future migration that
+-- creates a function in `public` and forgets its revoke block would then produce a
+-- function no role can execute, the sweep would stay green, and the omission would
+-- surface as a broken feature rather than as a failing test. Keeping the default means a
+-- forgotten revoke is anon-executable — loudly, in CI, on the first run.
+--
+-- `alter default privileges` with no `for role` applies to the current role, so this
+-- reaches the `postgres` entry and only that one. The `supabase_admin` entry is not ours
+-- to alter and does not need to be: it governs objects CREATED BY `supabase_admin`, and
+-- nothing in this repository creates one — `supabase db push` connects as `postgres`, and
+-- every object in `public` on both projects is owned by `postgres`. If that ever stops
+-- being true, the sweep in `tests/rls-enabled.test.ts` is what says so.
+--
+-- Idempotent by nature: revoking a privilege that is not held is a no-op — and creates no
+-- `pg_default_acl` row where none existed — so this is correct against the local stack
+-- (where the functions entry is already clean and the other two are not), against staging
+-- (where none of them are), and against production (same, and where the core schema has
+-- not yet been applied at all).
+alter default privileges in schema public
+  revoke execute on functions from anon, authenticated, service_role;
+
+alter default privileges in schema public
+  revoke all on tables from anon, authenticated, service_role;
+
+alter default privileges in schema public
+  revoke all on sequences from anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- AND THE OBJECTS THAT ALREADY EXIST
+-- ---------------------------------------------------------------------------
+--
+-- `alter default privileges` only governs objects created AFTER it. `delete_own_account()`
+-- on staging, and `set_updated_at()` on production, already hold the grants it will stop
+-- handing out, so they are revoked here directly.
+--
+-- Swept over the whole schema rather than named one function at a time, for the same
+-- reason the core-schema migration sweeps: this has to be right about functions that
+-- exist on a project this migration's author cannot see. Staging has six functions in
+-- `public` and production has one, they are at different migration versions, and both are
+-- correct after this runs. `from public` is included so the sweep is complete for
+-- production's `set_updated_at()`, which holds the PUBLIC grant as well as the named ones.
+--
+-- Revoking EXECUTE on the trigger functions does not disarm the triggers. A trigger
+-- function's EXECUTE privilege is checked when the trigger is CREATED, not when it fires
+-- — the core-schema migration makes the same revoke and records having verified it by
+-- deleting a gear item as `authenticated` afterwards.
+revoke execute on all functions in schema public from public, anon, authenticated, service_role;
+
+-- Then the one function that is an API rather than an implementation detail, granted back
+-- by name. `authenticated` only:
+--
+--   * `anon` must not hold it — it is the whole point of this migration.
+--   * `service_role` must not hold it either. `auth.uid()` is null for a service-role
+--     token exactly as it is for the publishable key, so the call would be the same
+--     no-op; and this project has decided never to hold a service-role key at all (see
+--     "WHAT CHANGED WITH SUPABASE" in `src/lib/auth/index.ts`, and the head of
+--     20260811000000_account_deletion.sql). A standing grant to a key that should not
+--     exist is a grant nobody is auditing.
+--
+-- `tests/account-deletion.test.ts` asserts the positive half of this — a signed-in user
+-- really can delete their own account — so this line failing to run does not go quiet.
+grant execute on function public.delete_own_account() to authenticated;

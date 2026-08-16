@@ -1,22 +1,29 @@
 # For detailed configuration reference documentation, visit:
 # https://supabase.com/docs/guides/local-development/cli/config
-# A string used to distinguish different Supabase projects on the same host. Defaults to the
-# working directory name when running `supabase init`.
-# Names the LOCAL docker stack only — it is not either hosted project's ref, and
-# nothing here can reach a hosted project on its own. `supabase init` defaults it to
-# the working directory name, which for anyone working in a git worktree is the
-# branch slug; pinned so a local stack is not renamed by where the checkout happens
-# to sit.
+
+# Names the LOCAL docker stack — the container prefix (supabase_db_<name>) and the
+# volumes. It is not either hosted project's ref, and nothing in this file can reach a
+# hosted project on its own. The hosted refs are deliberately absent from this
+# repository, which is public; CI selects between them with --project-ref from a
+# secret.
 #
-# The hosted refs are deliberately absent from this repository, which is public.
-# Production is a different project from staging, with different keys and different
-# data, and CI selects between them with --project-ref from a secret.
-project_id = "packsheet-io"
+# Read from the environment, and DELIBERATELY derived from the checkout directory:
+# scripts/supabase.sh turns each git worktree into its own stack name and its own
+# block of ports, so two worktrees get separate containers and separate data instead
+# of silently sharing one database. Every port below is parameterised the same way and
+# for the same reason.
+#
+# The CLI cannot express a default for env(...). With these unset the whole file fails
+# to parse — "failed to read config: ProjectConfigParseError", which names nothing —
+# so NOTHING calls `supabase` directly, including the deploy workflows, which never
+# start a local stack but do parse this file to run `link` and `db push`. Use
+# `npm run db:*` locally; scripts/supabase.sh everywhere else.
+project_id = "env(PACKSHEET_STACK)"
 
 [api]
 enabled = true
 # Port to use for the API URL.
-port = 54321
+port = "env(PACKSHEET_PORT_API)"
 # Schemas to expose in your API. Tables, views and stored procedures in this schema will get API
 # endpoints. `public` and `graphql_public` schemas are included by default.
 schemas = ["public", "graphql_public"]
@@ -41,9 +48,9 @@ enabled = false
 
 [db]
 # Port to use for the local database URL.
-port = 54322
+port = "env(PACKSHEET_PORT_DB)"
 # Port used by db diff command to initialize the shadow database.
-shadow_port = 54320
+shadow_port = "env(PACKSHEET_PORT_SHADOW)"
 # Maximum amount of time to wait for health check when starting the local database.
 health_timeout = "2m"
 # The database major version to use. This has to be the same as your remote database's. Run `SHOW
@@ -53,7 +60,7 @@ major_version = 17
 [db.pooler]
 enabled = false
 # Port to use for the local connection pooler.
-port = 54329
+port = "env(PACKSHEET_PORT_POOLER)"
 # Specifies when a server connection can be reused by other clients.
 # Configure one of the supported pooler modes: `transaction`, `session`.
 pool_mode = "transaction"
@@ -103,7 +110,7 @@ enabled = true
 [studio]
 enabled = true
 # Port to use for Supabase Studio.
-port = 54323
+port = "env(PACKSHEET_PORT_STUDIO)"
 # External URL of the API server that frontend connects to.
 api_url = "http://127.0.0.1"
 # OpenAI API Key to use for Supabase AI in the Supabase Studio.
@@ -114,7 +121,7 @@ openai_api_key = "env(OPENAI_API_KEY)"
 [local_smtp]
 enabled = true
 # Port to use for the email testing server web interface.
-port = 54324
+port = "env(PACKSHEET_PORT_SMTP)"
 # Uncomment to expose additional ports for testing user applications that send emails.
 # smtp_port = 54325
 # pop3_port = 54326
@@ -165,11 +172,27 @@ max_indexes = 5
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
-site_url = "http://127.0.0.1:3000"
+#
+# PK-19: was "http://127.0.0.1:3000", which is not this project's dev server — `astro
+# dev` serves on 4321 (see README), and 3000 is a different tool's default that never
+# matched anything here. Left uncorrected, the local OAuth/callback flow and any
+# confirmation-email link built from site_url would point at a port nothing is
+# listening on.
+site_url = "http://localhost:4321"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+#
+# Both loopback spellings for the same reason cookies in src/lib/auth/index.ts are not
+# scoped to one: which hostname the browser used to reach the dev server decides which
+# of these two is on the request, and either is a legitimate way to open
+# http://localhost:4321. Each entry is the exact path AUTH_CALLBACK_PATH
+# (src/lib/auth-routes.ts) names — "exact URLs" above is not a suggestion, a
+# same-origin-but-different-path redirect target is rejected same as a different host.
+additional_redirect_urls = [
+  "http://localhost:4321/auth/callback",
+  "http://127.0.0.1:4321/auth/callback",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -396,7 +419,7 @@ deno_version = 2
 
 [analytics]
 enabled = true
-port = 54327
+port = "env(PACKSHEET_PORT_ANALYTICS)"
 # Configure one of the supported backends: `postgres`, `bigquery`.
 backend = "postgres"
 
@@ -421,3 +444,233 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# =============================================================================
+# PK-56: hosted SMTP, via `[remotes.*]`
+# =============================================================================
+#
+# Neither hosted project (staging tvcafyzatparwckhyyww, production hrslxngdfocxderslkws)
+# has ever had an SMTP sender configured, so no confirmation email — signup, password
+# reset, email change — has ever reached anyone outside the Supabase org. `supabase
+# config push` (wired up in scripts/supabase.sh via the deploy workflows' "Apply
+# database migrations" step, now doing double duty) reads a `[remotes.<name>]` block
+# and pushes it, resolved against this file's top-level values, to the project named by
+# `project_id`.
+#
+# READ THIS BEFORE ADDING A THIRD REMOTE, OR EDITING EITHER OF THE TWO BELOW:
+#
+# `config push` does not push a diff of what changed — it resolves the WHOLE `auth`
+# block (this file's top-level values, with anything set here layered on top) and
+# pushes that. A key this block does not mention is not "left alone" on the hosted
+# project; it is silently SET to whatever the top-level value happens to be, because
+# the top-level values in this file are deliberately LOCAL DEV settings. There are SIX
+# of those, and each has its own outage shape:
+#
+#   1. Mailpit on `local_smtp` rather than a configured `[auth.email.smtp]` — hosted
+#      mail stops being sent to anyone at all.
+#   2. `site_url = "http://localhost:4321"` — every link inside every confirmation and
+#      reset email points at a laptop nobody else can reach.
+#   3. `enable_confirmations = false` — anyone can sign in as anyone else's unverified
+#      address.
+#   4. `max_frequency = "1s"` — the per-address floor between sends effectively goes.
+#   5. `[auth.rate_limit] email_sent = 2` — hosted auth mail is capped at TWO AN HOUR,
+#      which is the exact fault PK-56 exists to fix, reinstated in silence.
+#   6. `additional_redirect_urls` — a hosted project's allow-list is replaced by the two
+#      LOOPBACK callback URLs above, so its own origin is no longer on its own
+#      allow-list and GoTrue quietly falls back to `site_url` for every redirect.
+#
+# Every one of those six is therefore re-stated explicitly below for both remotes — not
+# because TOML requires it, but because omitting even one of them is a silent,
+# unannounced reset of a live project to a localhost value, indistinguishable in the
+# diff from "no change to that key". tests/supabase-remote-config.test.ts pins all six
+# for every `[remotes.*]` block this file defines, specifically so a third remote added
+# later inherits the guardrail without anyone having to remember to extend a
+# hand-written list.
+#
+# IT DID NOT ALWAYS PIN ALL SIX, and this comment claimed it did. Until the PK-56 review
+# the per-remote checks covered four of them and said "five"; numbers 5 and 6 above — the
+# two whose leak is quietest — were pinned by nothing, so deleting
+# `[remotes.production.auth.rate_limit]` would have capped production auth mail at two an
+# hour with a green build. If you are adding a seventh local-only value, add the
+# assertion in the same commit and correct the count here; a list in prose that nothing
+# executes is how this drifted the first time.
+#
+# The nesting below is ordinary TOML table nesting with `remotes.<name>.` prepended to
+# the path the top-level key already uses — `[auth.email.smtp]` above becomes
+# `[remotes.staging.auth.email.smtp]` here. Confirmed against the Supabase CLI's own
+# docs for `2.113.0`; there is no separate schema for what is legal inside `[remotes]`.
+#
+# AND ONE THING THESE BLOCKS DO NOT COVER. `config push` pushes more than `auth`: it
+# also pushes `[api]`, `[storage]` and `[db.settings]`, and the blocks below override
+# auth keys ONLY. Everything in those three sections therefore reaches both hosted
+# projects from this file's top-level LOCAL values on every deploy. Every one of them
+# was read off both hosted projects on 12 August 2026 and already matches — including
+# `[storage.vector]`, which is enabled there with these same 10/5 limits — so this is a
+# no-op outside `auth` today. It is a no-op by alignment, not by enforcement: both
+# sides happen to sit on Supabase's defaults, and nothing structural holds them there.
+# `tests/supabase-remote-config.test.ts` pins those values too, for that reason, and
+# says what to do if it fails. Note that two of them (`[storage.vector]` and
+# `[storage.analytics]`) gate PAID Pro-plan features, that the toggles are asymmetric —
+# a push can switch one on, never back off — and that the CLI's confirmation prompt is
+# no protection in CI, where there is no TTY and it auto-answers yes.
+
+[remotes.staging]
+project_id = "tvcafyzatparwckhyyww"
+
+[remotes.staging.auth]
+# Overrides the top-level `http://localhost:4321` above. Used to build links inside
+# confirmation/reset emails; a hosted project left on the local value would mail out
+# links to a laptop nobody else can reach.
+site_url = "https://staging.packsheet.io"
+# Staging's live allow-list, carried over as-is rather than narrowed: developers point
+# local builds (`astro dev` on 4321, `wrangler dev` on 8787) at the staging project, so
+# both loopback spellings and both local ports stay on the list. Production's
+# equivalent block below is deliberately narrower — see the comment there for why that
+# narrowness must not be copied here, or the other way round.
+additional_redirect_urls = [
+  "https://staging.packsheet.io/**",
+  "http://localhost:*/**",
+  "http://127.0.0.1:*/**",
+  "http://localhost:4321/auth/callback",
+  "http://localhost:4321/auth/callback?*",
+  "http://localhost:8787/auth/callback",
+  "http://localhost:8787/auth/callback?*",
+  "http://127.0.0.1:4321/auth/callback",
+  "http://127.0.0.1:8787/auth/callback",
+]
+
+[remotes.staging.auth.email]
+# Overrides the top-level `false`. Local dev leaves this off so `npm test` and manual
+# signup flows never wait on Mailpit; a hosted project left on that value lets anyone
+# sign in as anyone else's unverified email address.
+enable_confirmations = true
+# Overrides the top-level `"1s"`, which is a local-only value meant to make manual
+# testing fast against Mailpit. GoTrue's own default is 60 seconds; with the hourly cap
+# below deliberately opened up, this per-address floor is the ONLY limit left on how
+# fast RESET email can be sent, and one of two on confirmation email. See the
+# `[remotes.staging.auth.rate_limit]` comment below for why those two differ and for
+# what the remaining exposure on reset mail actually is.
+max_frequency = "60s"
+# Overrides the top-level `6`, which is the CLI template's default and NOT what either
+# hosted project had. Both were on `8`. Found the hard way: the first real
+# `config push` against staging quietly shortened its email OTP from eight digits to
+# six, because a key this block did not mention is not left alone. Nothing in this
+# project's flows uses an email OTP today — confirmation and recovery both travel as
+# PKCE links — but shortening a one-time code is a security reduction nobody asked
+# for, arriving in a diff that says nothing about OTPs.
+otp_length = 8
+
+# NOT A FEATURE THIS PROJECT USES, AND PINNED PRECISELY BECAUSE OF THAT. Both hosted
+# projects have TOTP enrolment and verification ON — the platform default for a hosted
+# project — while this file's top-level `[auth.mfa.totp]` has them off, which is the
+# CLI template's local default. The first `config push` against staging therefore
+# turned MFA off there without being asked to, and would have done the same to
+# production on the next deploy. Restated here so the hosted state survives a push.
+#
+# Read that as the general lesson rather than two more keys: the danger is not the keys
+# somebody thought about, it is the ones nobody did. When pushing to a project for the
+# first time, READ THE DIFF `config push` PRINTS before letting it run unattended — it
+# is the only place the full set of differences is ever shown.
+[remotes.staging.auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[remotes.staging.auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 587
+# Resend's SMTP username is always the literal string "resend" — it is not a secret and
+# does not vary per account; what identifies the account is the password below.
+user = "resend"
+# Never a literal. This is the Resend API key; env(...) means `config push` reads it
+# from this job's own environment at push time rather than it living in this
+# repository, which is public.
+pass = "env(RESEND_SMTP_PASSWORD)"
+admin_email = "noreply@mail.packsheet.io"
+sender_name = "Packsheet"
+
+[remotes.staging.auth.rate_limit]
+# Overrides the top-level `2`. Deliberately far above anything this project would ever
+# legitimately send in an hour — the product owner's decision is that Supabase must NOT
+# be the thing that limits how much confirmation/reset email goes out. Resend's own
+# quota is the ceiling instead, and Resend alerts automatically at 80% and 100% of it,
+# which this repository cannot see or enforce from here.
+#
+# WHICH GUARDS ACTUALLY REMAIN, corrected in the PK-56 review because the earlier
+# version of this comment named a guard that does not cover half of what it was cited
+# for. The three limits in play, and the endpoints each one really reaches:
+#
+#   - `email_sent` (this key): project-wide, per hour, and the ONLY one of the three
+#     that reaches `/recover`. It also reaches `/signup` and `/user`. Set to 100000
+#     here, i.e. deliberately not a limit.
+#   - `sign_in_sign_ups` (top-level, 30 per 5 minutes per IP): `/signup` and `/token`
+#     ONLY. It never sees `/recover` — tests/auth-flow.test.ts's RATE LIMITS section
+#     says the same thing from the other direction, which is how the discrepancy was
+#     found.
+#   - `max_frequency` on `[remotes.staging.auth.email]` above: 60 seconds between sends
+#     TO THE SAME ADDRESS, on both `/signup` and `/recover`.
+#
+# So the two kinds of mail are NOT equally defended, and saying "the two guards" glossed
+# exactly that. CONFIRMATION mail has two: a stranger has to get through
+# `sign_in_sign_ups` per IP, and then the per-address floor. RESET mail has ONE — the
+# per-address floor — and that is all.
+#
+# THE RESIDUAL EXPOSURE, PLAINLY: `max_frequency` is per address, so it does not compose
+# across addresses. One machine, one IP, working through a list of N addresses draws N
+# reset emails a minute out of this project, for as long as it likes, and nothing in
+# this file stops it or even slows it down. That is accepted rather than overlooked —
+# the product owner's decision above is what puts the ceiling at Resend's quota, and
+# Resend's 80%/100% alerts are where it gets noticed. Do not "fix" it by lowering this
+# number; if it ever needs fixing, the thing to add is a captcha (`[auth.captcha]`,
+# commented out above) or a limiter in front of src/pages/forgot-password.astro, both of
+# which bound the sender rather than the project's ability to send.
+email_sent = 100000
+
+[remotes.production]
+project_id = "hrslxngdfocxderslkws"
+
+[remotes.production.auth]
+site_url = "https://packsheet.io"
+# Production's live allow-list — exactly two entries, no localhost. Unlike staging,
+# nothing legitimately develops against the production project, so widening this to
+# include a loopback address would only ever help an attacker's local reproduction of
+# the auth callback flow, never a developer. Keep this list exactly as narrow as it is
+# on the hosted project; do not copy staging's localhost entries in here.
+additional_redirect_urls = ["https://packsheet.io/auth/callback", "https://packsheet.io/auth/callback?*"]
+
+[remotes.production.auth.email]
+enable_confirmations = true
+max_frequency = "60s"
+# Production is on `8`, like staging was before the first push shortened it. See the
+# staging block above for how that was found and why it matters.
+otp_length = 8
+
+# Production has TOTP enrolment and verification ON, and must keep them. Same reasoning
+# as the staging block above, which is where the full note lives.
+[remotes.production.auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[remotes.production.auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 587
+user = "resend"
+pass = "env(RESEND_SMTP_PASSWORD)"
+admin_email = "noreply@mail.packsheet.io"
+sender_name = "Packsheet"
+
+[remotes.production.auth.rate_limit]
+# Same reasoning, and the same correction, as staging's block above: Resend's quota and
+# its 80%/100% alerts are the intended ceiling, not this number.
+#
+# What remains load-bearing is asymmetric between the two kinds of mail, which is the
+# part the earlier wording got wrong here too. CONFIRMATION mail is bounded by
+# `sign_in_sign_ups` (top-level, 30 per 5 minutes per IP, covering `/signup` and
+# `/token`) and by `max_frequency` on `[remotes.production.auth.email]` above (60s per
+# address). RESET mail is bounded by `max_frequency` and by NOTHING ELSE —
+# `sign_in_sign_ups` does not cover `/recover`, and this key, which does, is switched
+# off here on purpose. Since that floor is per address rather than per IP, a list of N
+# addresses yields N reset emails a minute from a single machine. Read staging's block
+# above for the full argument and for what to add if that ever has to change.
+email_sent = 100000

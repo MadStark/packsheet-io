@@ -14,6 +14,16 @@ on:
   push:
     branches: [staging]
 
+  # Same lever as deploy-production.yml's — see the long note there for why a build-time
+  # flag needs a trigger that is not a commit.
+  #
+  # Staging gets it too, rather than production alone, because staging is where you would
+  # want to LOOK at the placeholder before pointing the public at it. `vars.PLACEHOLDER_ONLY`
+  # is scoped per environment, so setting it here shows the coming-soon page on
+  # staging.packsheet.io — behind Cloudflare Access, in front of nobody — without touching
+  # what production is serving.
+  workflow_dispatch:
+
 concurrency:
   group: deploy-staging
   cancel-in-progress: true
@@ -38,11 +48,35 @@ jobs:
 
       - run: npm ci
 
+      # Ahead of `npm test`, not just ahead of the migration push. Part of the suite
+      # queries a real database as the `anon` and `authenticated` roles, and it fails
+      # rather than skips when there is not one — so without this the deploy stops here,
+      # before it pushes migrations or builds anything.
+      #
+      # There is a second reason it belongs in a DEPLOY workflow specifically: the step
+      # below is about to `db push` these exact migrations to a hosted project. Replaying
+      # them into an empty local database and running the policy tests against the result
+      # is the closest thing to a rehearsal this pipeline can have, and it happens before
+      # anything irreversible.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      - uses: ./.github/actions/local-database
+
       # Runs here as well as in ci.yml, on purpose. This workflow and CI are both
       # triggered by the same push and neither depends on the other, so a red CI does
       # not stop a deploy — it is not a race that usually resolves safely, it is no
       # gate at all. The required status check protects the merge button; this step is
       # what protects the artifact. Costs ~25s and must stay ahead of the build.
+      #
+      # THIS STEP HAS NO `env:` AND MUST NEVER ACQUIRE ONE NAMING A HOSTED SECRET. The
+      # suite creates users and deletes accounts; the local stack the action above
+      # started is the only thing it may ever do that to. It reaches that stack because
+      # the action exported PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY into
+      # `$GITHUB_ENV`, and it stays pointed there because staging's own hosted values
+      # are set on the Build step's own `env:` below — a step-level scope, which cannot
+      # reach backwards to this one. tests/deploy-workers.test.ts asserts both halves.
       - run: npm test
 
       # Before the build and before the deploy, so the schema a release needs is in
@@ -59,11 +93,19 @@ jobs:
       # projects with no password set at all. Referencing a secret that does not exist
       # would expand to an empty string and connect, or fail to, for reasons nobody
       # could read off the log.
-      - uses: supabase/setup-cli@v3
-        with:
-          version: 2.113.0
-
-      - name: Apply database migrations
+      #
+      # PK-56: `config push` runs here too, between `link` and `db push`, rather than as
+      # a separate step. Both commands mutate the SAME hosted project and need the SAME
+      # `link` that precedes them; splitting config push into its own step would either
+      # duplicate that `link` call or silently depend on link's effect surviving across
+      # steps, which is not guaranteed and not worth relying on. It pushes
+      # supabase/config.toml's `[remotes.staging]` block — SMTP, confirmation emails,
+      # redirect URLs, rate limits — to the hosted project, resolved against this file's
+      # LOCAL top-level values (see the long warning at the top of the `[remotes.*]`
+      # section in supabase/config.toml before touching this). Before the build and the
+      # deploy for the same reason `db push` already is: so a release that depends on
+      # confirmation email working does not go live before the project can send one.
+      - name: Apply database migrations and push auth config
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           # From a secret, not this file. The two project refs are the only thing
@@ -73,10 +115,72 @@ jobs:
           # because `name: staging` on the production workflow is a one-word edit that
           # migrates the wrong database.
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          # PK-56: read by `config push` to resolve `env(RESEND_SMTP_PASSWORD)` in
+          # supabase/config.toml's `[remotes.staging.auth.email.smtp]` block before
+          # sending it to the hosted project. Never written to this file as a literal —
+          # see the same block's own comment on why.
+          RESEND_SMTP_PASSWORD: ${{ secrets.RESEND_SMTP_PASSWORD }}
+        # Through scripts/supabase.sh, not `supabase` directly. This job never starts a
+        # local stack, but `link`, `config push` and `db push` still PARSE
+        # supabase/config.toml, and that file reads its project name and ports from the
+        # environment so each git worktree gets its own Docker containers. Unset, they
+        # make the whole file fail to parse with "ProjectConfigParseError" — a release
+        # broken by a local-dev convenience, with an error naming neither.
         run: |
           set -euo pipefail
-          supabase link --project-ref "$PROJECT_REF"
-          supabase db push
+          scripts/supabase.sh link --project-ref "$PROJECT_REF"
+          scripts/supabase.sh config push
+          scripts/supabase.sh db push
+
+      # The half of PK-57 that nothing in this repository could reach.
+      #
+      # `npm test` above runs against the throwaway local stack — deliberately, and
+      # asserted from two directions in tests/rls-enabled.test.ts — which means every
+      # database guardrail this project has is blind to the project it just migrated.
+      # That gap IS PK-57: the sweep forbidding anon EXECUTE on functions in `public`
+      # reported green locally while `delete_own_account()` was anon-callable on staging,
+      # because the two databases disagreed about what a new function is granted to.
+      # 20260811120000_public_grant_hardening.sql removes the disagreement; this step is
+      # what notices if it ever returns, on the only database where it can.
+      #
+      # The publishable key and nothing else — no JWT, no service-role key — because that
+      # is precisely the request a stranger can make, which is the question being asked.
+      # Safe against production as well as staging: with no JWT `auth.uid()` is null, so
+      # the function's five statements match nothing even if the grant is wrong. A 2xx is
+      # the bug itself (staging answered 204), and a 404 means the migrations this job
+      # just reported pushing are not actually there.
+      #
+      # Anything else — 401, 403 — is the refusal we want, and is NOT enumerated as a
+      # pass list: a check that fails closed on an unfamiliar status would block releases
+      # the day PostgREST changes a code, and this step exists to catch a grant, not to
+      # police status codes.
+      - name: Verify anon cannot reach the account-deletion RPC
+        env:
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -X POST "$PUBLIC_SUPABASE_URL/rest/v1/rpc/delete_own_account" \
+            -H "apikey: $PUBLIC_SUPABASE_ANON_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{}' -o anon-rpc-body.json -w '%{http_code}')
+          echo "HTTP $status"
+          cat anon-rpc-body.json || true
+          echo
+          rm -f anon-rpc-body.json
+          case "$status" in
+            2*)
+              echo "::error::anon executed public.delete_own_account() (HTTP $status). PK-57 has regressed — the named grant is back."
+              exit 1
+              ;;
+            404)
+              echo "::error::public.delete_own_account() is not on this project (HTTP 404), but db push reported success."
+              exit 1
+              ;;
+            *)
+              echo "anon was refused with HTTP $status, as required."
+              ;;
+          esac
 
       - name: Build
         env:
@@ -86,11 +190,32 @@ jobs:
 
           # Selects which block of wrangler.jsonc applies. This is a BUILD-time
           # choice, not a deploy-time one: @astrojs/cloudflare resolves the named
-          # environment and writes the result to dist/client/wrangler.json, which is
-          # the file the deploy step consumes. Passing `--env staging` to wrangler
-          # instead does nothing — the generated config has no environments left in
-          # it — and the deploy would silently go to the PRODUCTION Worker.
+          # environment and writes the result to dist/server/wrangler.json (PK-19:
+          # dist/client/ before this route had a real Worker entry — Cloudflare's
+          # Vite plugin writes the resolved config next to entry.mjs, not next to
+          # the static assets, once one exists), which is the file the deploy step
+          # consumes. Passing `--env staging` to wrangler instead does nothing — the
+          # generated config has no environments left in it — and the deploy would
+          # silently go to the PRODUCTION Worker.
           CLOUDFLARE_ENV: staging
+
+          # PlaceholderOnly, scoped to the staging environment and independent of
+          # production's. See the identical line in deploy-production.yml for why it is a
+          # variable rather than a secret, and why unset correctly means off.
+          PLACEHOLDER_ONLY: ${{ vars.PLACEHOLDER_ONLY }}
+
+          # PK-19: build-time inputs, same as CLOUDFLARE_ENV above and for the same
+          # reason — Vite inlines every PUBLIC_-prefixed var into the client bundle at
+          # this step, not at deploy time, so there is no later point at which these
+          # could be supplied instead. Both are safe to ship in a browser bundle (see
+          # .env.example and src/lib/auth/index.ts's own comment on the key that is
+          # NOT this one) but still come from this GitHub *environment*'s own secret
+          # store rather than being hardcoded here, because staging and production are
+          # separate Supabase projects with separate URLs and keys — the same reason
+          # SUPABASE_PROJECT_REF below is a secret and not a literal. See the README's
+          # "Database" section for what backs these two secrets.
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
         run: npm run build
 
       - name: Deploy to Cloudflare Workers
@@ -107,4 +232,4 @@ jobs:
           # -c, not the action's `environment:` input. See the CLOUDFLARE_ENV comment
           # above: by this point the environment is already baked into the generated
           # config, and `--env` would look correct while doing nothing.
-          command: deploy -c dist/client/wrangler.json
+          command: deploy -c dist/server/wrangler.json

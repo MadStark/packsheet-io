@@ -22,6 +22,20 @@ on:
   push:
     branches: [main]
 
+  # The lever PlaceholderOnly needs, and the reason it is a setting rather than a commit.
+  #
+  # `vars.PLACEHOLDER_ONLY` is read at BUILD time (see the Build step below and the
+  # constant in astro.config.mjs), so changing it in Settings → Environments → production
+  # changes nothing on its own — the live Worker is whatever the last build produced.
+  # Without this trigger the only way to pick the new value up would be to push a commit
+  # to main, which is exactly the coupling between "merge" and "launch" the flag exists to
+  # break. With it, turning the site on is: change the variable, run this workflow.
+  #
+  # It re-runs the full job, migrations and release verification included, against
+  # whatever main currently is. That is the intent — a launch deserves the same gates a
+  # release gets, and a re-run that skipped them would be a second, weaker way to deploy.
+  workflow_dispatch:
+
 concurrency:
   group: deploy-production
   # NOT cancel-in-progress. You cannot cancel an upload that has already happened: a run
@@ -51,6 +65,22 @@ jobs:
 
       - run: npm ci
 
+      # Ahead of `npm test`, not just ahead of the migration push. Part of the suite
+      # queries a real database as the `anon` and `authenticated` roles, and it fails
+      # rather than skips when there is not one — so without this the deploy stops here,
+      # before it pushes migrations or builds anything.
+      #
+      # There is a second reason it belongs in a DEPLOY workflow specifically: the step
+      # below is about to `db push` these exact migrations to a hosted project. Replaying
+      # them into an empty local database and running the policy tests against the result
+      # is the closest thing to a rehearsal this pipeline can have, and it happens before
+      # anything irreversible.
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.113.0
+
+      - uses: ./.github/actions/local-database
+
       # Runs here as well as in ci.yml, on purpose. This workflow and CI are both
       # triggered by the same push and neither depends on the other, so a red CI does
       # not stop a deploy — it is not a race that usually resolves safely, it is no
@@ -58,6 +88,15 @@ jobs:
       # what protects the artifact.
       #
       # This is the last gate before production. Nothing downstream re-checks.
+      #
+      # THIS STEP HAS NO `env:` AND MUST NEVER ACQUIRE ONE NAMING A HOSTED SECRET. The
+      # suite creates users and deletes accounts; the local stack the action above
+      # started is the only thing it may ever do that to, and this is the workflow where
+      # getting that wrong deletes real people's accounts. It reaches the local stack
+      # because the action exported PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY into
+      # `$GITHUB_ENV`, and it stays pointed there because production's own hosted values
+      # are set on the Build step's own `env:` below — a step-level scope, which cannot
+      # reach backwards to this one. tests/deploy-workers.test.ts asserts both halves.
       - run: npm test
 
       # Before the build and before the deploy, so the schema a release needs is in
@@ -67,18 +106,70 @@ jobs:
       # migrations against a real Postgres before this workflow sees them.
       # No SUPABASE_DB_PASSWORD — see deploy-staging.yml. The CLI provisions its own
       # login role from the access token.
-      - uses: supabase/setup-cli@v3
-        with:
-          version: 2.113.0
-
-      - name: Apply database migrations
+      #
+      # PK-56: `config push` runs here too, between `link` and `db push` — see the
+      # identical addition and its full reasoning in deploy-staging.yml. It pushes
+      # supabase/config.toml's `[remotes.production]` block (SMTP, confirmation emails,
+      # redirect URLs, rate limits) to the hosted project this workflow is scoped to.
+      # This is the last gate before production, same as `npm test` above: nothing
+      # downstream re-checks that the auth config landed correctly either.
+      - name: Apply database migrations and push auth config
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          # PK-56: read by `config push` to resolve `env(RESEND_SMTP_PASSWORD)` in
+          # supabase/config.toml's `[remotes.production.auth.email.smtp]` block. See
+          # deploy-staging.yml for why it is never a literal in that file.
+          RESEND_SMTP_PASSWORD: ${{ secrets.RESEND_SMTP_PASSWORD }}
+        # Through scripts/supabase.sh, not `supabase` directly. This job never starts a
+        # local stack, but `link`, `config push` and `db push` still PARSE
+        # supabase/config.toml, and that file reads its project name and ports from the
+        # environment so each git worktree gets its own Docker containers. Unset, they
+        # make the whole file fail to parse with "ProjectConfigParseError" — a release
+        # broken by a local-dev convenience, with an error naming neither.
         run: |
           set -euo pipefail
-          supabase link --project-ref "$PROJECT_REF"
-          supabase db push
+          scripts/supabase.sh link --project-ref "$PROJECT_REF"
+          scripts/supabase.sh config push
+          scripts/supabase.sh db push
+
+      # See the long note on the same step in deploy-staging.yml. In short: `npm test`
+      # above only ever sees the throwaway local stack, so every database guardrail this
+      # project has is blind to the project it just migrated — which is exactly how PK-57
+      # shipped. This asks the hosted project the one question the local suite cannot.
+      #
+      # Production reaches this step carrying more risk than staging, not less: it is at
+      # the baseline migration today, so this run is the one that first creates
+      # `public.delete_own_account()` there. Anonymous, with the publishable key only —
+      # `auth.uid()` is null without a JWT, so nothing is deleted even if the grant is
+      # wrong; a 2xx IS the wrong grant, and a 404 means the push did not land.
+      - name: Verify anon cannot reach the account-deletion RPC
+        env:
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -X POST "$PUBLIC_SUPABASE_URL/rest/v1/rpc/delete_own_account" \
+            -H "apikey: $PUBLIC_SUPABASE_ANON_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{}' -o anon-rpc-body.json -w '%{http_code}')
+          echo "HTTP $status"
+          cat anon-rpc-body.json || true
+          echo
+          rm -f anon-rpc-body.json
+          case "$status" in
+            2*)
+              echo "::error::anon executed public.delete_own_account() (HTTP $status). PK-57 has regressed — the named grant is back."
+              exit 1
+              ;;
+            404)
+              echo "::error::public.delete_own_account() is not on this project (HTTP 404), but db push reported success."
+              exit 1
+              ;;
+            *)
+              echo "anon was refused with HTTP $status, as required."
+              ;;
+          esac
 
       - name: Build
         env:
@@ -92,6 +183,26 @@ jobs:
           # tests/deploy-workers.test.ts. The failure that costs something is the
           # mirror image of it, in deploy-staging.yml.
           CLOUDFLARE_ENV: production
+
+          # PlaceholderOnly. A repository VARIABLE, not a secret: its value is a boolean
+          # that is visible on the live site the moment it takes effect, so encrypting it
+          # would buy nothing and cost the ability to read the current state without
+          # deploying. Scoped to the production environment, so staging carries its own
+          # answer and neither can move the other by accident.
+          #
+          # Unset is the normal state and means off — see astro.config.mjs, which compares
+          # against the literal string "true" and treats everything else, this variable's
+          # empty string included, as a normal build. That is why nothing here supplies a
+          # default: GitHub substitutes an empty string for an undefined variable, and an
+          # empty string is already the answer we want.
+          PLACEHOLDER_ONLY: ${{ vars.PLACEHOLDER_ONLY }}
+
+          # PK-19: build-time inputs Vite inlines into the client bundle at this step —
+          # see the identical comment in deploy-staging.yml. Production's own
+          # environment-scoped secrets, distinct from staging's: separate Supabase
+          # project, separate URL, separate key. See the README's "Database" section.
+          PUBLIC_SUPABASE_URL: ${{ secrets.PUBLIC_SUPABASE_URL }}
+          PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.PUBLIC_SUPABASE_ANON_KEY }}
         run: npm run build
 
       - name: Deploy to Cloudflare Workers
@@ -101,7 +212,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # Pinned to package-lock.json's wrangler. See deploy-staging.yml.
           wranglerVersion: '4.120.0'
-          command: deploy -c dist/client/wrangler.json
+          command: deploy -c dist/server/wrangler.json
 
       # The upload reporting success is not the same as the site answering, and this is
       # the one deploy nobody gets to re-run casually. A release that builds, uploads
@@ -124,5 +235,15 @@ jobs:
       - name: Verify the release answers
         env:
           SITE: https://packsheet.io
+
+          # The SAME variable the Build step read, and it has to be here too or this step
+          # fails every correct placeholder release. The checks below are assertions about
+          # a specific site shape — `/` redirects to `/welcome/`, `/welcome/` answers 200,
+          # `/account` redirects to `/sign-in` — and all three invert under the flag: `/`
+          # becomes the page, `/welcome/` becomes a redirect to it, and `/account` does not
+          # exist. A verifier that did not know which build it was looking at would report
+          # a healthy launch as a failed release, which is the failure mode that teaches
+          # people to ignore it.
+          PLACEHOLDER_ONLY: ${{ vars.PLACEHOLDER_ONLY }}
         timeout-minutes: 5
         run: scripts/verify-release.sh "$SITE"

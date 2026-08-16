@@ -1,0 +1,147 @@
+name: Local database
+description: >
+  Start this repository's Supabase stack, wait until the database and the Data API
+  actually answer, and point PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY at it for
+  every later step in the job. Required by any job that runs `npm test`.
+
+# WHY THIS EXISTS AS AN ACTION RATHER THAN A COPIED BLOCK
+#
+# Three workflows run `npm test` — ci.yml and the two deploys — and part
+# of that suite exercises row-level security by querying the database as the `anon` and
+# `authenticated` roles. Nothing can stand in for that: a policy is a SQL expression, and
+# only Postgres can say what it does. Those tests fail rather than skip when there is no
+# database, deliberately, because a guardrail that reports green while not running is
+# worse than no guardrail.
+#
+# The consequence is that every one of those jobs needs a stack, and the first version of
+# this change wired up only ci.yml. The others went red — and the deploy workflows run
+# `npm test` BEFORE they push migrations and build, so the effect was not a broken site
+# but a frozen pipeline: no release could ship at all. Copying the block into each of
+# them would have fixed that and left copies to drift. (There were four at the time; the
+# per-PR preview workflow has since gone, which is exactly the kind of drift a count
+# written into a comment invites.)
+#
+# `supabase start` applies every migration in order against an empty database on the way
+# up, so this doubles as the from-clean replay check on every workflow that uses it.
+#
+# Every call goes through scripts/supabase.sh rather than `supabase`. That wrapper is not
+# a convenience: supabase/config.toml reads its project name and all seven ports from the
+# environment so each git worktree gets its own stack, and the CLI cannot default an
+# `env(...)` — so a bare `supabase start` does not fail with a port clash, it fails to
+# parse the config at all:
+#
+#     failed to read config: ProjectConfigParseError
+#
+# which names neither the cause nor the fix.
+#
+# WHY THIS ALSO EXPORTS PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_ANON_KEY
+#
+# Starting a stack is only half of what `npm test` needs. PK-19 added
+# tests/auth-flow.test.ts, which drives the real `src/lib/auth/index.ts` — and that
+# module reads `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY` off
+# `import.meta.env`, throwing when either is absent. Locally those come from a
+# gitignored `.env`; in CI nothing supplied them at all, so the very first `signUp` in
+# that file threw `PUBLIC_SUPABASE_URL is not set` and — because the throw happened in a
+# `beforeAll` — vitest reported the rest of the block as SKIPPED, in the one file whose
+# header promises it never skips. The run went red, but the summary line a human reads
+# said "passed | skipped", which is the reporting shape this repository keeps writing
+# tests against.
+#
+# So the values are exported HERE rather than in each workflow. Every job that runs the
+# suite already has to use this action to get a database (asserted in
+# tests/rls-enabled.test.ts), so wiring the credentials to the same step makes "the tests
+# talk to the local stack" true by construction: a new workflow cannot run `npm test`
+# without a stack, and it cannot get a stack without also getting that stack's own URL
+# and key.
+#
+# WHAT MUST NEVER HAPPEN HERE, AND WHY THE NAMES ARE THE `PUBLIC_` ONES ANYWAY
+#
+# The suite CREATES USERS AND DELETES ACCOUNTS. Pointed at a hosted project it would
+# delete real people's data. `deploy-staging.yml` and `deploy-production.yml` both run
+# `npm test`, and both hold hosted `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_ANON_KEY`
+# secrets — so the one thing that must never be true is a hosted value being visible to
+# a `npm test` step. Two things keep that from happening, and both are checked rather
+# than trusted:
+#
+#   1. In both deploy workflows the hosted secrets are set on the BUILD step's own `env:`
+#      and nowhere else — not at job level, not at workflow level. A step-level `env:`
+#      is scoped to that one step, so it cannot reach the `npm test` step that ran
+#      before it. tests/deploy-workers.test.ts asserts that scoping directly.
+#   2. This action writes the LOCAL values under those same two names, at a point that
+#      is always before `npm test` and always before the build. `$GITHUB_ENV` is
+#      outranked by a step's own `env:`, so the build still gets the hosted secrets;
+#      everything else in the job, `npm test` included, gets the local stack.
+#
+# The overlap in names is the point rather than a hazard: they are the only names the
+# application reads, and a test step that resolved them to anything other than the local
+# stack is the failure being prevented.
+#
+# Only `API_URL` and `PUBLISHABLE_KEY` are exported. `supabase status -o env` also prints
+# `SERVICE_ROLE_KEY`, `SECRET_KEY` and the S3 credentials; none of those is put into the
+# environment of a build step, because the one privileged key this project has decided
+# never to hold is not one to start handing to a bundler by accident. See Invariant C in
+# tests/anonymous-read-path.test.ts.
+
+runs:
+  using: composite
+  steps:
+    - name: Start the local database
+      shell: bash
+      run: scripts/supabase.sh start
+
+    # `supabase start` is not a readiness check and its exit code is not evidence.
+    # Verified locally: with the PostgREST and Auth containers stopped it prints the full
+    # env block, exits 0, and does NOT bring them back. The tests would then die on hook
+    # timeouts in two files while a third passed, and the summary would read "18 skipped"
+    # — the exact reporting shape this suite exists to eliminate.
+    #
+    # So readiness is asserted explicitly, and fails at the step that caused it with a
+    # name attached rather than surfacing later as an unexplained test failure.
+    # `--fail` matters: curl exits 0 on a 4xx/5xx body without it.
+    - name: Wait for the database and the Data API
+      shell: bash
+      run: |
+        set -euo pipefail
+        eval "$(scripts/supabase.sh status -o env)"
+        for attempt in $(seq 1 60); do
+          if curl -fsS -o /dev/null "$API_URL/rest/v1/" -H "apikey: $ANON_KEY"; then
+            echo "Data API ready after ${attempt}s"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "::error::The Supabase Data API never became ready; the row-level-security tests cannot run."
+        scripts/supabase.sh status
+        exit 1
+
+    # The credentials half, as its own step so a failure here says what it is rather than
+    # hiding inside a readiness loop.
+    #
+    # `PUBLISHABLE_KEY`, not `ANON_KEY`: they are the same key by two names in the CLI's
+    # output, and the publishable spelling is the one .env.example, the README and
+    # `src/lib/auth/index.ts`'s own error message all tell a contributor to copy. Using it
+    # here keeps the CI wiring and the local instructions describing the same thing.
+    #
+    # Emitted as `$GITHUB_ENV` rather than as action outputs on purpose. An output has to
+    # be plumbed into every consuming step by hand — `env: PUBLIC_SUPABASE_URL:
+    # ${{ steps.db.outputs.url }}` — which is exactly the per-workflow wiring a new
+    # workflow would forget, and forgetting it is the failure this whole block exists to
+    # remove. `$GITHUB_ENV` reaches every later step in the job with nothing to remember.
+    #
+    # Values are checked before they are written. A stack that reported no URL would
+    # otherwise export an empty string, and `requiredEnv` treats empty exactly as absent —
+    # so the suite would fail several minutes later with the message this step could have
+    # given immediately.
+    - name: Point the tests at the local stack
+      shell: bash
+      run: |
+        set -euo pipefail
+        eval "$(scripts/supabase.sh status -o env)"
+        if [ -z "${API_URL:-}" ] || [ -z "${PUBLISHABLE_KEY:-}" ]; then
+          echo "::error::The local stack reported no API_URL/PUBLISHABLE_KEY, so the auth suite has nothing to talk to."
+          scripts/supabase.sh status
+          exit 1
+        fi
+        echo "PUBLIC_SUPABASE_URL=$API_URL" >> "$GITHUB_ENV"
+        echo "PUBLIC_SUPABASE_ANON_KEY=$PUBLISHABLE_KEY" >> "$GITHUB_ENV"
+        echo "PUBLIC_SUPABASE_URL is now $API_URL (this job's own local stack)"

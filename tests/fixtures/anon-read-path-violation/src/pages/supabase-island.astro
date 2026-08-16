@@ -1,0 +1,8 @@
+---
+// Hydrates the island next door, which is what puts it — and `@supabase/ssr` behind it —
+// into the client Rollup pass. See src/components/SupabaseIsland.vue for why every other
+// invariant in this file stays green while it does.
+import SupabaseIsland from '../components/SupabaseIsland.vue';
+---
+
+<SupabaseIsland client:load />

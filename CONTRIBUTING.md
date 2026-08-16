@@ -65,9 +65,12 @@ This is also why linear history is deliberately **not** required on `main`: requ
 would leave only the two rewriting strategies and guarantee the fault comes back. To read
 `main` as a release log, use `git log main --first-parent` — one entry per release.
 
-So: branch from `staging`, and target `staging` in your pull request. Opening a PR builds
-an ephemeral preview environment and comments the URL on the PR; closing or merging the PR
-tears it down.
+So: branch from `staging`, and target `staging` in your pull request.
+
+There are **no per-pull-request preview deployments** — a PR runs CI and nothing is
+deployed. Review a change by running it locally: `npm run db:start && npm run dev` gives
+you the site against your own Postgres, and `npm test` runs the full suite against it.
+`staging.packsheet.io` deploys from the `staging` branch once your PR merges.
 
 Both branches require their CI check to pass before merging.
 
@@ -97,6 +100,31 @@ Two more that are less obvious:
   in the server module for a route-rooted walk to follow. It runs in the required CI job
   named `check`, which runs the tests as well as the `npm run check` script of the same
   name.
+- **No module that ships may name the Supabase service-role key.** The same test fails if
+  any module in the build graph outside `src/lib/auth/` so much as names it. Note that this
+  one is deliberately _not_ a reachability rule and not an import rule at all, unlike the
+  bullet above: it is a text scan over the modules the build actually produced, so a shared
+  library nothing routes to fails it exactly as a page does. It is also not about cost:
+  `service_role` bypasses row-level security entirely, so every RLS policy in the database
+  becomes decorative. Supabase itself is welcome here — the publishable `anon` key is public
+  by design and is how anonymous reads work at all. The rule is about the key, not the
+  package.
+
+  Two things follow, and the second one has caught people out:
+
+  - The check reads source text and cannot tell code from a comment, so **describe the key
+    rather than naming it** — in comments as well as in code. That applies to any file that
+    ends up in the build graph, which means everything under `src/` that something imports.
+    It does **not** apply to the test file that defines the rule, or to its fixtures under
+    `tests/`: those are not built, are not in the graph, and name the key freely on purpose.
+    If a build goes red, the fix is in the module the message names. Deleting the identifier
+    from `tests/anonymous-read-path.test.ts` deletes the check.
+  - The rule is **name-bound**: it matches a fixed list of spellings, defined as
+    `PRIVILEGED_KEY_PATTERNS` in `tests/anonymous-read-path.test.ts`. If you are the person
+    who first adds a Supabase secret to `.env.example`, `wrangler.jsonc` or a CI secret,
+    check its name against that list and add it if it is not there. A name-bound rule that
+    does not know the name in use is not a weaker guardrail, it is a permanently green one.
+
 - **No third-party CDN for fonts or assets on reader-facing pages.** Someone reading a
   shared pack list should not have their IP disclosed to a third party to do it.
 

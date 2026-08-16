@@ -1,0 +1,86 @@
+---
+// The coming-soon page, and the ONLY page a PlaceholderOnly build serves.
+//
+// WHY THIS TREE EXISTS AT ALL, rather than a flag inside src/pages/welcome.astro: see
+// `placeholderOnly` in astro.config.mjs. The short version is that srcDir points here
+// instead of at `src/`, so a placeholder build compiles these three files and nothing
+// else — which is what makes "no other page is served, at any URL" a property of the
+// artifact rather than a routing rule someone can get wrong later.
+//
+// PRERENDERED, deliberately and by omission — there is no `export const prerender =
+// false` below, so this is a static file in dist/client that Cloudflare's assets binding
+// serves without invoking the Worker. That is the same property `/welcome/` has in a
+// normal build, and it is worth keeping for the page that, in this mode, every single
+// visitor lands on: the sibling catch-all is the only route that costs an invocation.
+//
+// It imports the real Layout rather than forking it, so canonical URL, OG and Twitter
+// tags, the font preload and the no-flash theme script are the ones the rest of the site
+// uses. Only the body below is this file's own.
+import Layout from '../../src/layouts/Layout.astro';
+import ThemeToggle from '../../src/components/ThemeToggle.vue';
+
+// Identical to src/pages/welcome.astro's, on purpose. This is the page a stranger, a link
+// preview and a search result meet during the placeholder period, and the naming bet the
+// description carries — "a packsheet" as a noun — is the same bet either side of the
+// flag. Copy that differs between the two would mean the launch quietly rewrites how the
+// product describes itself, for no reason anyone chose.
+const title = 'Packsheet — a free, open gear tracker for hikers';
+const description =
+  'A free, open-source gear tracker for hikers. Build a gear closet once, compose it into a packsheet for every trip, and share a page reviewers actually want to read.';
+
+const repoUrl = 'https://github.com/MadStark/packsheet-io';
+---
+
+<Layout title={title} description={description}>
+  <main class="mx-auto flex min-h-svh max-w-2xl flex-col justify-center px-6 py-16">
+    <header class="flex items-baseline justify-between gap-4">
+      <p class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Coming soon</p>
+      {
+        /*
+        THE ONE DELIBERATE DIFFERENCE FROM src/pages/welcome.astro, which carries a "Sign
+        in" link here. There is nothing to sign in to in this mode — /sign-in is one of
+        the routes that was never compiled — so the link would 302 straight back to this
+        page, which reads as a broken button on the only page the site has. Its absence is
+        the honest signal: the product is not open yet.
+
+        The theme toggle stays. It is the one control on the page that still does
+        something, and dropping it would mean a dark-mode visitor has no way to correct a
+        page that mis-guessed.
+      */
+      }
+      <ThemeToggle client:load />
+    </header>
+
+    <h1 class="mt-8 text-4xl leading-[1.1] sm:text-5xl">Packsheet</h1>
+
+    <p class="text-ink-2 mt-4 max-w-prose text-lg">
+      A free, open gear tracker for hikers. Build a gear closet once, then compose it into a
+      packsheet for each trip — the list you plan with, and the page you share.
+    </p>
+
+    <ul class="text-ink-2 mt-8 space-y-2 text-sm">
+      <li>Free forever. No paywall, no ads.</li>
+      <li>Open source from the first commit.</li>
+      <li>Your data is always exportable.</li>
+    </ul>
+
+    {
+      /*
+      text-blue-deep rather than the default link --blue: on the --paper page ground,
+      plain --blue is 4.48:1, under the 4.5 AA floor. --blue-deep clears it (6.27:1)
+      and still reads as the same blue, so "blue marks interactive" still holds.
+
+      The hover colour is stated explicitly rather than inherited from the `a:hover`
+      rule in global.css: that rule lives in @layer base, which a utility class
+      outranks, so without this the only link on the page would have no hover
+      feedback at all. --blue-ink is 9.99:1 light and 13.03:1 dark.
+
+      Underlined because Tailwind's preflight strips text-decoration, and colour
+      alone is not a sufficient cue that something is a link.
+    */
+    }
+    <p class="mt-10 text-sm">
+      <a href={repoUrl} class="text-blue-deep hover:text-blue-ink underline">Source on GitHub</a>
+    </p>
+  </main>
+</Layout>
