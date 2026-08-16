@@ -3,9 +3,9 @@ import { createUser, type TestUser } from './support/local-database';
 import { toGrams, WEIGHT_UNITS, type WeightUnit } from '../src/lib/units';
 
 /**
- * The three gear-closet columns added by
- * supabase/migrations/20260813000000_gear_closet.sql: `quantity` (how many I own),
- * `deleted_at` (soft delete) and `weight_grams` (a generated, comparable weight).
+ * The gear-closet columns added by supabase/migrations/20260813000000_gear_closet.sql —
+ * `quantity` (how many I own) and `weight_grams` (a generated, comparable weight) — and
+ * the ownership boundary around writing to a closet row at all.
  *
  * Same style as tests/rls-owner.test.ts: real local database, fixtures inserted
  * through PostgREST as their owner under RLS, exact SQLSTATE assertions, and every
@@ -27,7 +27,7 @@ async function insertGear(overrides: Record<string, unknown> = {}) {
   return owner.client
     .from('gear_items')
     .insert({ name: 'Test gear', ...overrides })
-    .select('id, quantity, deleted_at, weight, weight_unit, weight_grams')
+    .select('id, quantity, weight, weight_unit, weight_grams')
     .single();
 }
 
@@ -52,59 +52,61 @@ describe('quantity — how many I own', () => {
   });
 });
 
-describe('deleted_at — soft delete', () => {
-  it('defaults to null', async () => {
-    const { data, error } = await insertGear();
-    expect(error).toBeNull();
-    expect(data?.deleted_at).toBeNull();
-  });
-
-  it('an owner can set it and clear it again, confirmed by re-reading their own row', async () => {
-    const { data: created } = await insertGear();
-    const id = created!.id as unknown as string;
-
-    // Set: this is what "move to trash" is. Re-read rather than trusting the update's
-    // own response — see the file header on why that response cannot be trusted alone.
-    const trashedAt = new Date().toISOString();
-    await owner.client.from('gear_items').update({ deleted_at: trashedAt }).eq('id', id);
-    const { data: trashed } = await owner.client
-      .from('gear_items')
-      .select('deleted_at')
-      .eq('id', id)
-      .single();
-    expect(trashed?.deleted_at).not.toBeNull();
-
-    // Clear: this is "undo", and the entire reason the column is a soft delete rather
-    // than a hard DELETE followed by a re-insert — see the migration comment. Re-read
-    // again, for the same reason.
-    await owner.client.from('gear_items').update({ deleted_at: null }).eq('id', id);
-    const { data: restored } = await owner.client
-      .from('gear_items')
-      .select('deleted_at')
-      .eq('id', id)
-      .single();
-    expect(restored?.deleted_at).toBeNull();
-  });
-
-  it('another user cannot set deleted_at on someone else’s row', async () => {
-    const { data: created } = await insertGear();
+/**
+ * The POLICY half of "only I can change my gear". `deleteGearItems`, `updateGearItem`
+ * and the two bulk writes (src/lib/gear/mutations.ts) each add their own
+ * `.eq('user_id', userId)`, and tests/gear-closet.test.ts asserts that filter directly;
+ * the two cases here are what holds when NOBODY goes through those functions — a bare
+ * `.eq('id', …)` write, the shape a hand-rolled request or a future caller that forgets
+ * the owner filter would take.
+ *
+ * The delete case is the one that earns its place twice over. Deleting gear now removes
+ * the row (supabase/migrations/20260813130000_gear_hard_delete.sql), firing
+ * `gear_items_snapshot_before_delete` into every pack that referenced it, and no tier
+ * behind it can put any of that back — so a hole here is not "a stranger edited my gear",
+ * it is "a stranger destroyed it".
+ *
+ * tests/rls-owner.test.ts covers this same boundary for gear sitting on a PUBLIC pack —
+ * the case where the stranger can already SELECT the row, which is what makes the write
+ * policies reachable at all. These two cover a plain, private closet row, which is what
+ * almost every gear item is.
+ */
+describe('another user cannot write to someone else’s closet row', () => {
+  it('a stranger’s update changes nothing, confirmed by re-reading as the owner', async () => {
+    const { data: created } = await insertGear({ name: 'Owner’s tarp' });
     const id = created!.id as unknown as string;
 
     // A stranger's UPDATE against a row RLS hides from them matches zero rows and
     // still comes back as { error: null, data: [] } — a successful request affecting
     // nothing, not a refusal PostgREST reports as an error. So the only way to tell
-    // "refused" from "silently trashed my gear" apart is to re-read as the owner.
-    await stranger.client
-      .from('gear_items')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('id', id);
+    // "refused" from "silently vandalised my gear" apart is to re-read as the owner.
+    await stranger.client.from('gear_items').update({ name: 'VANDALISED' }).eq('id', id);
 
     const { data: stillOwners } = await owner.client
       .from('gear_items')
-      .select('deleted_at')
+      .select('name')
       .eq('id', id)
       .single();
-    expect(stillOwners?.deleted_at).toBeNull();
+    expect(stillOwners?.name).toBe('Owner’s tarp');
+  });
+
+  it('a stranger’s delete removes nothing, confirmed by re-reading as the owner', async () => {
+    const { data: created } = await insertGear({ name: 'Owner’s stove' });
+    const id = created!.id as unknown as string;
+
+    // Same indistinguishability as the update above, and the same remedy: a DELETE
+    // matching zero rows is byte-identical to a DELETE the policy refused, so the
+    // stranger's own response says nothing. `maybeSingle` rather than `single` on the
+    // read-back, so a row that HAS been destroyed fails on the assertion below rather
+    // than on PostgREST's "expected one row" error.
+    await stranger.client.from('gear_items').delete().eq('id', id);
+
+    const { data: survivor } = await owner.client
+      .from('gear_items')
+      .select('name')
+      .eq('id', id)
+      .maybeSingle();
+    expect(survivor?.name).toBe('Owner’s stove');
   });
 });
 

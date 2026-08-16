@@ -119,10 +119,12 @@ const GEAR_STATUS_MARKERS: Record<GearStatus, GearStatusMarker | null> = {
  * a defect badge would put one on a row whose only fault is having been written straight
  * against PostgREST. That does mean the two are visually indistinguishable, so the
  * closet list pairs this with a screen-reader-only rendering of the raw value for
- * anything `isGearStatus` rejects (`src/pages/gear/index.astro`) — without it, PK-62's
- * removal of the Status column would have made a malformed status invisible everywhere
- * an ACTIVE item is shown, since the only surviving per-row `formatGearStatus` call is
- * on the trash page and that page only ever renders soft-deleted rows.
+ * anything `isGearStatus` rejects (`src/pages/gear/index.astro`) — and that pairing is
+ * now the ONLY place such a value surfaces at all. When PK-62 removed the Status column
+ * there was still one other per-row `formatGearStatus` call, on the trash page; PK-60
+ * then deleted that page along with the soft delete, so nothing else renders a stored
+ * status as text. Remove the sr-only span and a malformed status becomes invisible
+ * everywhere, not merely everywhere obvious.
  */
 export function gearStatusMarker(status: string): GearStatusMarker | null {
   return isGearStatus(status) ? GEAR_STATUS_MARKERS[status] : null;

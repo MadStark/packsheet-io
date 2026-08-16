@@ -3,8 +3,16 @@ import { extractGearOptions, type GearOptionRow } from '../src/lib/gear/options'
 
 /**
  * `src/lib/gear/options.ts` shapes the closet list's "category / brand" filter
- * options query into de-duplicated, sorted lists — see that module's own comment for
- * why the shaping and not the query itself is what lives behind a test.
+ * options query into de-duplicated, sorted lists. This file is the unit test for the
+ * SHAPING alone — `extractGearOptions`, a pure function over rows — because the
+ * de-duplication has a real decision buried in it (whether `null`, `''` and
+ * whitespace-only count as an option) that deserves pinning without a database.
+ *
+ * THE QUERY HALF IS TESTED TOO, elsewhere: `loadGearOptions`'s `.eq('user_id', userId)`
+ * needs a real database and two real users to mean anything, so it lives with the rest of
+ * the closet's integration tests — see "THE OPTIONS LEAK" in `tests/gear-closet.test.ts`,
+ * which proves a stranger's gear on a public pack contributes no option to your filter
+ * form (PK-60 review, C3).
  */
 
 const row = (category: string | null, brand: string | null): GearOptionRow => ({

@@ -6,7 +6,7 @@ import {
   GEAR_SELECT,
   applyGearQuery,
   loadGearCloset,
-  loadGearTrash,
+  loadGearItem,
   parseGearQuery,
 } from '../src/lib/gear/query';
 import {
@@ -16,43 +16,44 @@ import {
   type GearSortKey,
   type GearStatus,
 } from '../src/lib/gear/fields';
-import { makeUndoToken } from '../src/lib/gear/bulk';
 import {
   bulkSetCategory,
   bulkSetStatus,
-  bulkSoftDelete,
-  permanentlyDeleteGear,
-  restoreFromTrash,
-  undoBulkDelete,
+  deleteGearItems,
+  updateGearItem,
 } from '../src/lib/gear/mutations';
+import { extractGearOptions, loadGearOptions } from '../src/lib/gear/options';
+import type { GearItemInput } from '../src/lib/gear/form';
+import { MAX_BULK_IDS } from '../src/lib/gear/bulk';
 import type { WeightUnit } from '../src/lib/units';
 import type { Database } from '../src/lib/database.types';
 
 type GearInsert = Database['public']['Tables']['gear_items']['Insert'];
 
 /**
- * The integration tests behind PK-4's acceptance criteria: "500 items remain
- * responsive; filters compose correctly; bulk delete is undoable." Every other gear
+ * The integration tests behind the gear closet's acceptance criteria: "500 items remain
+ * responsive; filters compose correctly; deleting an item deletes it." Every other gear
  * closet test file is a unit test for one layer in isolation — `gear-query.test.ts`
  * for the pure URL <-> `GearQuery` translation, `gear-bulk.test.ts` for bulk-action
  * validation, `gear-search-escaping.test.ts` for the two-layer search escaping,
- * `gear-closet-schema.test.ts` for the three new columns. This file is the one that
- * proves those layers actually compose correctly against a REAL database, through
- * PostgREST, as a real authenticated user — the same path `src/pages/gear/index.astro`,
- * `src/pages/gear/[id].astro` and `src/pages/gear/trash.astro` take.
+ * `gear-closet-schema.test.ts` for the closet's own columns and its write boundary. This
+ * file is the one that proves those layers actually compose correctly against a REAL
+ * database, through PostgREST, as a real authenticated user — the same path
+ * `src/pages/gear/index.astro` and `src/pages/gear/[id].astro` take.
  *
  * WHAT CHANGED IN THE PK-4 INDEPENDENT REVIEW (C3). This file used to assert against
  * `closetQuery()`, a hand-written COPY of the page's query living only in this test
  * file — so `applyGearQuery` and an inline `.eq('user_id', ...)` were pinned, but the
- * page's OWN query (`vitest.config.ts` excludes `src/pages/`) and all four of its write
+ * page's OWN query (`vitest.config.ts` excludes `src/pages/`) and every one of its write
  * statements were not. Mutation testing on the page proved it: deleting the owner
- * filter, or swapping the bulk soft delete for a hard `.delete()`, left the full suite
- * green. The fix moved the owner-scoped queries and every write into `src/lib/gear/`
- * (`loadGearCloset`/`loadGearTrash` in `query.ts`, `loadGearOptions` in `options.ts`,
+ * filter, or mutating the delete statement itself, left the full suite green — not
+ * because the assertions were weak but because nothing in the suite could execute those
+ * statements at all (see `src/lib/gear/mutations.ts`'s own module comment). The fix
+ * moved the owner-scoped queries and every write into `src/lib/gear/`
+ * (`loadGearCloset`/`loadGearItem` in `query.ts`, `loadGearOptions` in `options.ts`,
  * every mutation in `mutations.ts`) so the pages and this file call the SAME functions.
- * `closetQuery`/`trashQuery` below are now thin adapters over those real functions —
- * not reimplementations of them — so a bug in the shared function is a bug this file
- * sees too.
+ * `closetQuery` below is a thin adapter over `loadGearCloset` — not a reimplementation
+ * of it — so a bug in the shared function is a bug this file sees too.
  *
  * SHARED-DATABASE DISCIPLINE. `vitest.config.ts` does not reset the database between
  * files, and this suite's own RLS tests establish that `gear_items_select_via_public_pack`
@@ -105,10 +106,41 @@ function leakyClosetQuery(user: TestUser, entries: Record<string, string | strin
   return applyGearQuery(user.client.from('gear_items').select(GEAR_SELECT), query);
 }
 
-/** THE REAL TRASH QUERY — `loadGearTrash` (`src/lib/gear/query.ts`) itself, the exact
- *  function `src/pages/gear/trash.astro` calls. Aliased rather than wrapped: there is
- *  nothing for this file to add on top of it. */
-const trashQuery = loadGearTrash;
+/**
+ * THE BROKEN OPTIONS QUERY — `loadGearOptions` (`src/lib/gear/options.ts`) MINUS its
+ * `.eq('user_id', userId)`, the same relationship `leakyClosetQuery` has to
+ * `loadGearCloset` and for the same reason: the leak test below has to demonstrate that
+ * the leak really happens without that line, not merely that the shipped function looks
+ * right. The `.eq('brand', …)` is not part of what is under test — it is this file's
+ * standing shared-database discipline, narrowing a query that would otherwise answer with
+ * every public-pack row every earlier test file left behind (and be subject to
+ * PostgREST's row cap on the way) down to the one distinctive fixture row.
+ */
+function leakyOptionsQuery(user: TestUser, brand: string) {
+  return user.client.from('gear_items').select('category, brand').eq('brand', brand);
+}
+
+/** A complete, already-validated `GearItemInput` — the shape `parseGearItemForm`
+ *  (`src/lib/gear/form.ts`) hands `updateGearItem`, so the edit tests below exercise the
+ *  same argument the page does rather than a partial object TypeScript would refuse. */
+function gearInput(overrides: Partial<GearItemInput> = {}): GearItemInput {
+  return {
+    name: 'Edited Item',
+    quantity: 1,
+    weight: 250,
+    weight_unit: 'g',
+    price: null,
+    currency: null,
+    acquired_on: null,
+    status: 'owned',
+    url: null,
+    brand: null,
+    category: null,
+    description: null,
+    notes: null,
+    ...overrides,
+  };
+}
 
 function names(rows: readonly { name: string }[] | null | undefined): string[] {
   return (rows ?? []).map((row) => row.name);
@@ -321,6 +353,38 @@ describe('filters compose correctly', () => {
     expect(error).toBeNull();
     return names(items);
   }
+
+  // RETIRED STAYS IN THE CLOSET (PK-60 review, C4) — the product substitution this
+  // ticket rests on, asserted head-on rather than incidentally. PK-60 removed soft
+  // delete on the argument that `status = 'retired'` is where "I got rid of this but I
+  // still want it in my history" lives (see the "Retired is the trash" section of
+  // supabase/migrations/20260813120000_gear_hard_delete.sql, and the same claim in
+  // `applyGearFilters`'s comment: the closet has no hidden tier a query has to filter
+  // back out). Every other assertion in this file that touches the two retired fixtures
+  // filters them AWAY — `status=owned` drops Trekking Poles, and so on — so all of them
+  // would stay green if retired items had quietly become invisible, which is exactly the
+  // regression that would turn one kind of gone back into two.
+  it('RETIRED STAYS IN THE CLOSET — an unfiltered query returns the retired items alongside the owned and wishlisted ones', async () => {
+    // All nine fixtures, retired ones included, in the default name-ascending order.
+    // Dutch Oven and Trekking Poles are the retired pair; a closet that applied any
+    // status floor of its own before the visitor's filters would be missing them.
+    expect(await filteredNames({})).toEqual([
+      'Alpine Tent',
+      'Backpack',
+      'Bivy Sack',
+      'Camp Stove',
+      'Duffel Bag',
+      'Dutch Oven',
+      'Sleeping Bag',
+      'Sleeping Pad',
+      'Trekking Poles',
+    ]);
+
+    // And they are reachable BY that status too, not merely present in an unfiltered
+    // list: `retired` is an ordinary filterable value, which is what makes the closet
+    // itself the trash the user can go and look in.
+    expect(await filteredNames({ status: 'retired' })).toEqual(['Dutch Oven', 'Trekking Poles']);
+  });
 
   it('search AND category — "Bag" alone matches two items, category=Sleep must narrow to one', async () => {
     // Both "Sleeping Bag" (Sleep) and "Duffel Bag" (Pack) contain "Bag". If search
@@ -916,186 +980,535 @@ describe('I2 — a weight-range boundary entered in a non-gram unit includes an 
 });
 
 // ---------------------------------------------------------------------------
-// 6. Soft delete, undo and the trash — now through the real mutation functions.
+// 6. Deleting — through the real mutation function.
 // ---------------------------------------------------------------------------
 
-describe('soft delete, undo and the trash', () => {
-  it('bulkSoftDelete moves an item to the trash; undoBulkDelete restores exactly its own batch, leaving an earlier batch untouched; the restored item keeps its original created_at', async () => {
-    const user = await createUser('gear-closet-trash');
-
-    // An EARLIER batch, soft-deleted first with its own token. This is the batch
-    // that must still be sitting in the trash, unaffected, after the LATER batch's
-    // undo below runs.
-    const earlier = await user.client
+describe('deleting gear removes it from the database', () => {
+  it('a deleted item is in no list, cannot be loaded by id, and is not in the table at all', async () => {
+    const user = await createUser('gear-closet-delete');
+    const created = await user.client
       .from('gear_items')
-      .insert({ name: 'Old Batch Item' })
-      .select('id')
-      .single();
-    const earlierId = earlier.data!.id as string;
-    const earlierToken = makeUndoToken();
-    const earlierDelete = await bulkSoftDelete(user.client, user.id, [earlierId], earlierToken);
-    expect(earlierDelete.error).toBeNull();
-    expect(earlierDelete.count).toBe(1);
-
-    // A short real wait between the two batches: makeUndoToken has millisecond
-    // resolution, and two batches minted back-to-back on a fast local stack could
-    // otherwise collide on the same token — which would make this test pass for the
-    // wrong reason (one token, not two distinct batches).
-    await new Promise((resolve) => setTimeout(resolve, 5));
-
-    const later = await user.client
-      .from('gear_items')
-      .insert({ name: 'New Batch Item' })
-      .select('id, created_at')
-      .single();
-    const laterId = later.data!.id as string;
-    const laterCreatedAt = later.data!.created_at as string;
-
-    const laterToken = makeUndoToken();
-    expect(laterToken).not.toBe(earlierToken);
-
-    // The soft delete itself — bulkSoftDelete (src/lib/gear/mutations.ts), the EXACT
-    // function src/pages/gear/index.astro's bulk delete calls, guard included:
-    // `.is('deleted_at', null)` is what stops this UPDATE from re-stamping the
-    // EARLIER batch (already in the trash) with THIS batch's new token too, which
-    // would silently widen what undoing laterToken restores — see bulk.ts's own "THE
-    // CALLER MUST GUARD" comment.
-    const laterDelete = await bulkSoftDelete(user.client, user.id, [laterId], laterToken);
-    expect(laterDelete.error).toBeNull();
-    // I6 (PK-4 review): the affected count is read off the write's own result, not
-    // assumed from the length of the id list passed in.
-    expect(laterDelete.count).toBe(1);
-
-    // 1a. Disappears from the closet.
-    const closetAfterDelete = await closetQuery(user);
-    expect(closetAfterDelete.items.map((row) => row.id)).not.toContain(laterId);
-
-    // 1b. Appears in the trash, alongside the earlier batch.
-    const trashAfterDelete = await trashQuery(user.client, user.id);
-    const trashIdsAfterDelete = (trashAfterDelete.data ?? []).map((row) => row.id);
-    expect(trashIdsAfterDelete).toContain(laterId);
-    expect(trashIdsAfterDelete).toContain(earlierId);
-
-    // 2. Undo the LATER batch only — undoBulkDelete, the exact function the closet
-    // list's undo POST branch calls.
-    const undo = await undoBulkDelete(user.client, user.id, laterToken);
-    expect(undo.error).toBeNull();
-    expect(undo.count).toBe(1);
-
-    // Undoing an ALREADY-undone token touches nothing — proving I6's count fix means
-    // what it says: a second, redundant undo reports 0, not a phantom 1.
-    const secondUndo = await undoBulkDelete(user.client, user.id, laterToken);
-    expect(secondUndo.error).toBeNull();
-    expect(secondUndo.count).toBe(0);
-
-    // The earlier batch is untouched: still in the trash, still carrying ITS OWN
-    // token. If the `.is('deleted_at', null)` guard on the delete above were
-    // missing, the earlier item would already have been silently re-stamped with
-    // laterToken and would incorrectly vanish from the trash here too — this is
-    // exactly what that guard protects.
-    const trashAfterUndo = await trashQuery(user.client, user.id);
-    const trashRowsAfterUndo = trashAfterUndo.data ?? [];
-    expect(trashRowsAfterUndo.map((row) => row.id)).toEqual([earlierId]);
-    // PostgREST serialises timestamptz with a "+00:00" offset rather than the "Z"
-    // suffix makeUndoToken() produces, so the two are compared as instants (via
-    // Date), not as byte-identical strings — a mismatch here would mean the row read
-    // back is not the one earlierToken was actually stamped onto.
-    expect(new Date(trashRowsAfterUndo[0]?.deleted_at as string).getTime()).toBe(
-      new Date(earlierToken).getTime(),
-    );
-
-    // 3. The restored item is back in the closet, with its ORIGINAL created_at
-    // intact. This is the entire reason soft delete (clearing one column) was
-    // chosen over delete-and-reinsert: set_row_timestamps() unconditionally stamps
-    // created_at = now() on INSERT, so a re-inserted row would silently lose its
-    // real "date added" — see the gear-closet migration's own reasoning. A wrong
-    // created_at here would mean that reasoning was not actually honoured.
-    const closetAfterUndo = await closetQuery(user);
-    const restored = closetAfterUndo.items.find((row) => row.id === laterId);
-    expect(restored).toBeDefined();
-    expect(restored?.created_at).toBe(laterCreatedAt);
-  });
-
-  it('restoreFromTrash and permanentlyDeleteGear are owner-scoped: a stranger cannot restore or purge another visitor’s trashed item', async () => {
-    const owner = await createUser('gear-closet-mutation-owner');
-    const stranger = await createUser('gear-closet-mutation-stranger');
-
-    const created = await owner.client
-      .from('gear_items')
-      .insert({ name: 'Owner-only trashed item' })
+      .insert({ name: 'Doomed Item' })
       .select('id')
       .single();
     const itemId = created.data!.id as string;
-    const token = makeUndoToken();
-    const softDelete = await bulkSoftDelete(owner.client, owner.id, [itemId], token);
-    expect(softDelete.count).toBe(1);
 
-    // A stranger's restoreFromTrash, scoped to the STRANGER's own id, touches
-    // nothing — both RLS (gear_items_update_own) and the explicit
-    // `.eq('user_id', userId)` this function adds refuse it independently.
-    const strangerRestore = await restoreFromTrash(stranger.client, stranger.id, [itemId]);
-    expect(strangerRestore.error).toBeNull();
-    expect(strangerRestore.count).toBe(0);
+    // Present first, so every assertion below is about the delete rather than about a
+    // fixture that never inserted.
+    const before = await closetQuery(user);
+    expect(before.items.map((row) => row.id)).toContain(itemId);
 
-    // Still in the owner's trash, unaffected by the stranger's attempt.
-    const ownerTrash = await trashQuery(owner.client, owner.id);
-    expect((ownerTrash.data ?? []).map((row) => row.id)).toContain(itemId);
+    // The delete itself — deleteGearItems (src/lib/gear/mutations.ts), the EXACT
+    // function both src/pages/gear/index.astro's bulk delete and
+    // src/pages/gear/[id].astro's single-item delete call.
+    const deleted = await deleteGearItems(user.client, user.id, [itemId]);
+    expect(deleted.error).toBeNull();
+    // I6 (PK-4 review): the affected count is read off the write's own result, not
+    // assumed from the length of the id list passed in.
+    expect(deleted.count).toBe(1);
 
-    // Same story for a permanent delete: a stranger's call touches nothing, and the
-    // owner's own row survives to prove it.
-    const strangerPurge = await permanentlyDeleteGear(stranger.client, stranger.id, [itemId]);
-    expect(strangerPurge.error).toBeNull();
-    expect(strangerPurge.count).toBe(0);
+    // 1. Gone from the closet list.
+    const closet = await closetQuery(user);
+    expect(closet.error).toBeNull();
+    expect(closet.items.map((row) => row.id)).not.toContain(itemId);
 
-    const ownerTrashAfter = await trashQuery(owner.client, owner.id);
-    expect((ownerTrashAfter.data ?? []).map((row) => row.id)).toContain(itemId);
+    // 2. Gone from the detail page's own load. `loadGearCloset` and `loadGearItem` are
+    // the only two reads the gear closet has — there is no second list a deleted item
+    // could still be sitting in — so between them these two assertions are the whole of
+    // "it is in no list".
+    const { data: reloaded, error: reloadError } = await loadGearItem(user.client, user.id, itemId);
+    expect(reloadError).toBeNull();
+    expect(reloaded).toBeNull();
+
+    // 3. And not merely invisible to those two queries: nothing with that id is left in
+    // the table, asked with no filter at all but the id, as the owner who would be the
+    // one person still allowed to see it. This is the assertion that separates a real
+    // DELETE from a write that only HID the row behind a column some future query could
+    // forget to filter on.
+    const { data: raw, error: rawError } = await user.client
+      .from('gear_items')
+      .select('id')
+      .eq('id', itemId);
+    expect(rawError).toBeNull();
+    expect(raw).toEqual([]);
+  });
+
+  it('deleting one selection leaves another selection’s rows exactly where they were', async () => {
+    const user = await createUser('gear-closet-delete-batches');
+
+    const inserted = await user.client
+      .from('gear_items')
+      .insert([{ name: 'Keep A' }, { name: 'Keep B' }, { name: 'Remove A' }, { name: 'Remove B' }])
+      .select('id, name');
+    expect(inserted.error).toBeNull();
+    const byName = new Map((inserted.data ?? []).map((row) => [row.name, row.id as string]));
+    const keepIds = [byName.get('Keep A')!, byName.get('Keep B')!];
+    const removeIds = [byName.get('Remove A')!, byName.get('Remove B')!];
+
+    const deleted = await deleteGearItems(user.client, user.id, removeIds);
+    expect(deleted.error).toBeNull();
+    expect(deleted.count).toBe(2);
+
+    // A delete acts on the ids it was handed and on nothing else. The bug this catches
+    // is an `.in('id', ids)` lost or widened: a statement scoped only by
+    // `.eq('user_id', …)` would take the whole closet with it, and the count would not
+    // give it away on its own — a test that checked only "the requested rows are gone"
+    // passes just as happily against a delete that removed everything.
+    const closet = await closetQuery(user);
+    expect(closet.error).toBeNull();
+    expect(names(closet.items).sort()).toEqual(['Keep A', 'Keep B']);
+    expect(closet.items.map((row) => row.id).sort()).toEqual([...keepIds].sort());
+  });
+
+  it('deleteGearItems is owner-scoped: a stranger passing another visitor’s ids deletes nothing', async () => {
+    const owner = await createUser('gear-closet-delete-owner');
+    const stranger = await createUser('gear-closet-delete-stranger');
+
+    const inserted = await owner.client
+      .from('gear_items')
+      .insert([{ name: 'Owner-only Item A' }, { name: 'Owner-only Item B' }])
+      .select('id');
+    expect(inserted.error).toBeNull();
+    const itemIds = (inserted.data ?? []).map((row) => row.id as string);
+    expect(itemIds).toHaveLength(2);
+
+    // The stranger calls the real function with the OWNER's ids and their own user id —
+    // exactly what a copied form post, or a crafted request carrying somebody else's
+    // checkbox values, looks like from the server's side. Both RLS
+    // (`gear_items_delete_own`, core_schema.sql) and the explicit `.eq('user_id', …)`
+    // deleteGearItems adds refuse it independently.
+    const strangerDelete = await deleteGearItems(stranger.client, stranger.id, itemIds);
+    expect(strangerDelete.error).toBeNull();
+    expect(strangerDelete.count).toBe(0);
+
+    // The count is necessary and nowhere near sufficient: a DELETE that matched zero
+    // rows and a DELETE the policy refused are byte-identical over PostgREST, and so
+    // would be a delete that reported 0 while removing the rows anyway. The rows
+    // themselves are the real assertion — read back as the owner, the only visitor who
+    // can see them at all.
+    const { data: survivors, error: readError } = await owner.client
+      .from('gear_items')
+      .select('name')
+      .in('id', itemIds);
+    expect(readError).toBeNull();
+    expect(names(survivors).sort()).toEqual(['Owner-only Item A', 'Owner-only Item B']);
+
+    // Proves the premise rather than assuming it: these ids ARE deletable, so the
+    // refusal above was about WHO asked and not about ids naming nothing, a mistyped
+    // fixture, or a broken client that would have reported 0 either way.
+    const ownerDelete = await deleteGearItems(owner.client, owner.id, itemIds);
+    expect(ownerDelete.error).toBeNull();
+    expect(ownerDelete.count).toBe(2);
+  });
+
+  // THE OWNER'S OWN PARTIAL AND ZERO-ROW DELETES (PK-60 review, C1). Every other delete
+  // assertion in this file is affected == requested, and the one exception — the stranger
+  // above — gets its 0 from a policy refusing the statement outright. That left the
+  // ORDINARY case unasserted: a legitimate owner issuing a legitimate delete, some of
+  // whose ids no longer name rows. It is not an exotic input — a stale list rendered
+  // before a second tab deleted the same items, a doubled submission, a bookmarked
+  // confirmation POST replayed after the fact all produce exactly it. `deleteGearItems`
+  // reading its count off `ids.length` instead of off the write's own `.select('id')` —
+  // the I6 defect the "EVERY WRITE REPORTS WHAT IT ACTUALLY DID" section of
+  // src/lib/gear/mutations.ts exists to prevent — would pass every other delete test in
+  // this file and fail only here.
+  it('deleteGearItems reports rows actually removed, not ids handed in: one live id beside one naming nothing reports 1, and a second attempt reports 0', async () => {
+    const user = await createUser('gear-closet-delete-partial');
+    const inserted = await user.client
+      .from('gear_items')
+      .insert([{ name: 'Deleted Once' }, { name: 'Bystander' }])
+      .select('id, name');
+    expect(inserted.error).toBeNull();
+    const byName = new Map((inserted.data ?? []).map((row) => [row.name, row.id as string]));
+    const realId = byName.get('Deleted Once')!;
+
+    // Two ids requested, one row affected. The second id is a freshly generated UUID this
+    // database has never held — nothing refuses it, it simply matches nothing, which is
+    // what makes this a test of the COUNT rather than a second owner-scope test.
+    const partial = await deleteGearItems(user.client, user.id, [realId, randomUUID()]);
+    expect(partial.error).toBeNull();
+    expect(partial.count).toBe(1);
+
+    // The zero-row case, and NOT an error: this is a well-formed delete, by the owner
+    // entitled to issue it, against a row that is already gone. PostgREST answers it 200
+    // with an empty array — so the honest report is "nothing was deleted", and the page
+    // saying "1 item deleted" off the request's own length would be describing a write
+    // that touched nothing at all.
+    const again = await deleteGearItems(user.client, user.id, [realId]);
+    expect(again.error).toBeNull();
+    expect(again.count).toBe(0);
+
+    // The partial delete took the row it reported and no other: 1 means "that row", not
+    // "one of the two ids I was given happened to match something".
+    const closet = await closetQuery(user);
+    expect(closet.error).toBeNull();
+    expect(names(closet.items)).toEqual(['Bystander']);
+  });
+
+  // -------------------------------------------------------------------------
+  // The batch cap, enforced inside the irreversible write itself (PK-60 review, F3).
+  // -------------------------------------------------------------------------
+  //
+  // `MAX_BULK_IDS` used to be enforced in exactly one place, `parseBulkAction` — a
+  // validator `deleteGearItems` neither calls nor can check was called. Both gear pages
+  // do route through it, so nothing was broken; what was missing is that the bound was a
+  // property of one caller rather than of the function issuing the DELETE, and the next
+  // caller (an importer, an admin tool, a background job) would inherit none of it. The
+  // three tests below are of `deleteGearItems` called DIRECTLY, which is precisely the
+  // shape of that future caller.
+  it('deleteGearItems with an empty selection is a no-op: no statement, count 0, nothing removed', async () => {
+    const user = await createUser('gear-closet-delete-empty');
+    const inserted = await user.client
+      .from('gear_items')
+      .insert([{ name: 'Untouched A' }, { name: 'Untouched B' }])
+      .select('id');
+    expect(inserted.error).toBeNull();
+
+    const result = await deleteGearItems(user.client, user.id, []);
+    expect(result.error).toBeNull();
+    expect(result.count).toBe(0);
+
+    // The bug this catches is not the count — a real `DELETE … WHERE id IN ()` reports 0
+    // too. It is the statement being issued at all on a caller's empty list, and any
+    // future rewrite of the filter chain where an empty `.in()` stops meaning "match
+    // nothing" and starts meaning "no id filter", which over a `.delete().eq('user_id',
+    // …)` is the whole closet.
+    const closet = await closetQuery(user);
+    expect(closet.error).toBeNull();
+    expect(names(closet.items).sort()).toEqual(['Untouched A', 'Untouched B']);
+  });
+
+  it(`deleteGearItems refuses more than MAX_BULK_IDS (${MAX_BULK_IDS}) ids rather than issuing an unbounded DELETE`, async () => {
+    const user = await createUser('gear-closet-delete-over-cap');
+    const created = await user.client
+      .from('gear_items')
+      .insert({ name: 'Survives The Over-cap Call' })
+      .select('id')
+      .single();
+    const realId = created.data!.id as string;
+
+    // One real id of this visitor's own, buried in a list one past the cap. If the guard
+    // truncated the list instead of refusing it, or were absent, this row would go.
+    const ids = [realId, ...Array.from({ length: MAX_BULK_IDS }, () => randomUUID())];
+    expect(ids).toHaveLength(MAX_BULK_IDS + 1);
+
+    await expect(deleteGearItems(user.client, user.id, ids)).rejects.toThrow(RangeError);
+
+    const closet = await closetQuery(user);
+    expect(closet.error).toBeNull();
+    expect(closet.items.map((row) => row.id)).toContain(realId);
+  });
+
+  it(`deleteGearItems lets exactly MAX_BULK_IDS (${MAX_BULK_IDS}) ids through — the cap is inclusive, not off by one`, async () => {
+    const user = await createUser('gear-closet-delete-at-cap');
+    const ids = Array.from({ length: MAX_BULK_IDS }, () => randomUUID());
+
+    // The opposite failure to the test above, and the one an over-eager `>=` produces:
+    // a full 500-item selection — which `parseBulkAction` accepts by name, see
+    // tests/gear-bulk.test.ts's "the cap is inclusive" case — throwing instead of being
+    // issued. So the assertion is that the call RESOLVES rather than rejecting: the
+    // guard hands the statement on. `count` is 0 because these ids name no row (they are
+    // freshly generated UUIDs belonging to nobody), which is true whether or not the
+    // request itself gets that far.
+    //
+    // WHY THIS DOES NOT ALSO DELETE A REAL ROW, which is what it was first written to
+    // do. It cannot, on this stack, and finding out why is worth recording: PostgREST
+    // puts the whole `id=in.(…)` list in the QUERY STRING, ~37 bytes per UUID, so 500
+    // ids is an ~18 KB request line. Measured against this local stack (a loop over
+    // 50, 100, 150, 200, 220, 250, 300, 400, 500 ids), everything from 220 up comes back
+    // `{"message":"URI too long\n"}` from the proxy, before Postgres is consulted at all.
+    // That ceiling sits an order of magnitude below MAX_BULK_IDS and is a property of
+    // the request layer shared by `bulkSetCategory` and `bulkSetStatus`, which build the
+    // same `.in('id', …)` filter — not of the guard under test here, which is why this
+    // test asserts only the guard's own boundary. It is worth a ticket of its own: today
+    // a 250-item bulk action fails as a generic error rather than being refused with the
+    // cap's own message.
+    await expect(deleteGearItems(user.client, user.id, ids)).resolves.toMatchObject({ count: 0 });
   });
 
   it('bulkSetCategory and bulkSetStatus report the actual affected count, not the requested one', async () => {
     const user = await createUser('gear-closet-mutation-counts');
-    const created = await user.client
+    const other = await createUser('gear-closet-mutation-counts-other');
+
+    const mine = await user.client
       .from('gear_items')
       .insert({ name: 'Recategorised Item', category: 'Old' })
       .select('id')
       .single();
-    const itemId = created.data!.id as string;
+    const myId = mine.data!.id as string;
 
-    const setCategory = await bulkSetCategory(user.client, user.id, [itemId], 'New');
+    const theirs = await other.client
+      .from('gear_items')
+      .insert({ name: 'Someone else’s item', category: 'Theirs', status: 'owned' })
+      .select('id')
+      .single();
+    const theirId = theirs.data!.id as string;
+
+    const setCategory = await bulkSetCategory(user.client, user.id, [myId], 'New');
     expect(setCategory.error).toBeNull();
     expect(setCategory.count).toBe(1);
 
-    const setStatus = await bulkSetStatus(user.client, user.id, [itemId], 'retired');
+    const setStatus = await bulkSetStatus(user.client, user.id, [myId], 'retired');
     expect(setStatus.error).toBeNull();
     expect(setStatus.count).toBe(1);
 
-    // Soft-delete it, then try to bulk-set its category again — `.is('deleted_at',
-    // null)` guards both writes, so a trashed item reports 0 affected, not 1.
-    const token = makeUndoToken();
-    await bulkSoftDelete(user.client, user.id, [itemId], token);
-    const setCategoryAfterTrash = await bulkSetCategory(user.client, user.id, [itemId], 'Ignored');
-    expect(setCategoryAfterTrash.error).toBeNull();
-    expect(setCategoryAfterTrash.count).toBe(0);
+    // THE GAP BETWEEN REQUESTED AND AFFECTED, built from ids these writes genuinely
+    // cannot touch: one row of this visitor's own, one belonging to somebody else, and
+    // one naming no row anywhere. Three requested, one affected. Reporting the length
+    // of the id list instead — the I6 defect (PK-4 review) these counts exist to
+    // prevent — would tell the visitor "3 items updated" about a write that changed
+    // one, and the confirmation banner src/pages/gear/index.astro builds from that
+    // number would be stating something untrue about their own closet.
+    const missingId = randomUUID();
+    const mixedCategory = await bulkSetCategory(
+      user.client,
+      user.id,
+      [myId, theirId, missingId],
+      'Mixed',
+    );
+    expect(mixedCategory.error).toBeNull();
+    expect(mixedCategory.count).toBe(1);
+
+    const mixedStatus = await bulkSetStatus(
+      user.client,
+      user.id,
+      [myId, theirId, missingId],
+      'wishlist',
+    );
+    expect(mixedStatus.error).toBeNull();
+    expect(mixedStatus.count).toBe(1);
+
+    // And the other visitor's row really is untouched — so each 1 above means "one row
+    // changed", not "one of three writes happened to be counted while another landed on
+    // somebody else's gear".
+    const { data: theirRow } = await other.client
+      .from('gear_items')
+      .select('category, status')
+      .eq('id', theirId)
+      .single();
+    expect(theirRow?.category).toBe('Theirs');
+    expect(theirRow?.status).toBe('owned');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 7. Permanent delete still freezes packs.
+// 6b. Editing — the fourth write, which had no test at all (PK-60 review, C2).
 // ---------------------------------------------------------------------------
+//
+// `src/lib/gear/mutations.ts`'s module comment claims "Every write below is callable, and
+// asserted, directly". Until this section it was true of three writes out of four:
+// `grep -rn "updateGearItem" --include="*.test.ts" .` matched only prose. These tests are
+// what make that sentence true rather than something to soften — and the gap mattered more
+// after PK-60 than before it, because `updateGearItem` used to carry
+// `.is('deleted_at', null)` beside its owner filter and now has `.eq('user_id', userId)` as
+// the WHOLE of its scoping on a statement whose values come straight from a form.
+describe('updateGearItem saves an owner’s edit and refuses a stranger’s', () => {
+  it('an owner’s edit reports one affected row and is read back by loadGearItem', async () => {
+    const user = await createUser('gear-closet-update-owner');
+    const created = await user.client
+      .from('gear_items')
+      .insert({ name: 'Before Edit', category: 'Old', status: 'owned' })
+      .select('id')
+      .single();
+    const itemId = created.data!.id as string;
 
-describe('a permanent delete still freezes the pack it sits on', () => {
-  it('permanentlyDeleteGear fires gear_items_snapshot_before_delete: the pack_items row survives, gear_item_id becomes null, and the snapshot captures the item', async () => {
+    const result = await updateGearItem(
+      user.client,
+      user.id,
+      itemId,
+      gearInput({
+        name: 'After Edit',
+        category: 'New',
+        brand: 'Edited Brand',
+        status: 'retired',
+        quantity: 3,
+        weight: 1.25,
+        weight_unit: 'kg',
+        notes: 'Edited notes',
+      }),
+    );
+    expect(result.error).toBeNull();
+    expect(result.count).toBe(1);
+
+    // Read back through loadGearItem — the same query src/pages/gear/[id].astro renders
+    // the edit form from — so this asserts the round trip a visitor actually sees, not
+    // just that the write returned a row.
+    const { data: reloaded, error: reloadError } = await loadGearItem(user.client, user.id, itemId);
+    expect(reloadError).toBeNull();
+    expect(reloaded?.name).toBe('After Edit');
+    expect(reloaded?.category).toBe('New');
+    expect(reloaded?.brand).toBe('Edited Brand');
+    expect(reloaded?.status).toBe('retired');
+    expect(reloaded?.quantity).toBe(3);
+    expect(reloaded?.weight_unit).toBe('kg');
+    expect(reloaded?.notes).toBe('Edited notes');
+
+    // A `status: 'retired'` edit does not remove the item from the closet — the same
+    // guarantee section 2 asserts for the list, restated on the write path because this
+    // is the control PK-60 hands the user INSTEAD of a trash.
+    const closet = await closetQuery(user);
+    expect(closet.error).toBeNull();
+    expect(names(closet.items)).toEqual(['After Edit']);
+  });
+
+  it('updateGearItem is owner-scoped: a stranger editing another visitor’s id changes nothing and reports 0', async () => {
+    const owner = await createUser('gear-closet-update-owner-victim');
+    const stranger = await createUser('gear-closet-update-stranger');
+
+    const created = await owner.client
+      .from('gear_items')
+      .insert({ name: 'Owner’s Untouchable Item', category: 'Owner', status: 'owned' })
+      .select('id')
+      .single();
+    const itemId = created.data!.id as string;
+
+    // The stranger calls the real function with the OWNER's id and their own user id —
+    // what a copied form post, or a crafted request carrying somebody else's item id,
+    // looks like from the server's side. `.eq('user_id', …)` and `gear_items_update_own`
+    // (core_schema.sql:904-907) refuse it independently of each other.
+    const hijack = await updateGearItem(
+      stranger.client,
+      stranger.id,
+      itemId,
+      gearInput({ name: 'Hijacked', category: 'Stranger', status: 'wishlist' }),
+    );
+    expect(hijack.error).toBeNull();
+    expect(hijack.count).toBe(0);
+
+    // The count is necessary and nowhere near sufficient — an UPDATE that matched zero
+    // rows and one a policy refused are byte-identical over PostgREST, and so would be a
+    // write that reported 0 while changing the row anyway. The row read back as its owner
+    // is the real assertion.
+    const { data: reloaded, error: reloadError } = await loadGearItem(
+      owner.client,
+      owner.id,
+      itemId,
+    );
+    expect(reloadError).toBeNull();
+    expect(reloaded?.name).toBe('Owner’s Untouchable Item');
+    expect(reloaded?.category).toBe('Owner');
+    expect(reloaded?.status).toBe('owned');
+
+    // Proves the premise rather than assuming it: this id IS editable, so the refusal
+    // above was about WHO asked, not about an id naming nothing, a mistyped fixture or a
+    // client that would have reported 0 either way.
+    const ownEdit = await updateGearItem(
+      owner.client,
+      owner.id,
+      itemId,
+      gearInput({ name: 'Edited By Its Owner', category: 'Owner' }),
+    );
+    expect(ownEdit.error).toBeNull();
+    expect(ownEdit.count).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6c. THE OPTIONS QUERY'S OWN CROSS-USER LEAK (PK-60 review, C3).
+// ---------------------------------------------------------------------------
+//
+// The same leak section 1 pins for the list query, on the OTHER owner-scoped read the
+// closet page issues — and the one whose module comment names an unscoped version of
+// itself as "THE EXACT BUG THIS FEATURE EXISTS TO PREVENT" (src/lib/gear/options.ts).
+// `loadGearOptions` was called by no test at all before this: tests/gear-options.test.ts
+// covers the pure `extractGearOptions` shaping and stops there, so the query half was
+// exactly the shape of untested code C3 (PK-4 review) was filed about. PK-60 removed its
+// `deleted_at` guard, leaving `.eq('user_id', userId)` as the whole of its scoping.
+//
+// The leak here is quieter than the list's and no less real: filter dropdowns are not
+// obviously "content", so a stranger's category and brand appearing in them reads as a
+// glitch rather than as a disclosure — while still telling you the names of things a
+// stranger owns, and still offering to filter your closet by them.
+describe('THE OPTIONS LEAK — filter options are built from your own closet, never from a stranger’s gear on a public pack', () => {
+  let victim: TestUser;
+  let attacker: TestUser;
+  let leakedCategory: string;
+  let leakedBrand: string;
+  let ownCategory: string;
+  let ownBrand: string;
+
+  beforeAll(async () => {
+    victim = await createUser('gear-options-leak-victim');
+    attacker = await createUser('gear-options-leak-attacker');
+
+    // The victim's gear on the victim's own PUBLIC pack — built through PostgREST under
+    // RLS by createPack (tests/support/fixtures.ts), which is how a real closet item ends
+    // up on a real public pack. Category and brand are then renamed to values nothing
+    // else in this shared, never-reset database could coincidentally carry.
+    const victimPublicPack = await createPack(victim, { visibility: 'public', itemCount: 1 });
+    leakedCategory = `LeakedCategory-${randomUUID()}`;
+    leakedBrand = `LeakedBrand-${randomUUID()}`;
+    const renamed = await victim.client
+      .from('gear_items')
+      .update({ category: leakedCategory, brand: leakedBrand })
+      .eq('id', victimPublicPack.gearItemIds[0])
+      .select('id');
+    expect(renamed.error).toBeNull();
+    expect(renamed.data).toHaveLength(1);
+
+    // The attacker has a closet of their own, so the safe half below asserts "your own
+    // options, and only those" rather than passing vacuously against an empty result.
+    ownCategory = `OwnCategory-${randomUUID()}`;
+    ownBrand = `OwnBrand-${randomUUID()}`;
+    const mine = await attacker.client
+      .from('gear_items')
+      .insert({ name: 'My Own Tarp', category: ownCategory, brand: ownBrand });
+    expect(mine.error).toBeNull();
+  });
+
+  it('loadGearOptions excludes it; the same query with the owner filter removed includes it', async () => {
+    const safe = await loadGearOptions(attacker.client, attacker.id);
+    expect(safe.error).toBeNull();
+    const options = extractGearOptions(safe.data ?? []);
+
+    // The attacker's own values are there — so the two negatives below are about the
+    // owner filter and not about a query that returned nothing for some unrelated reason.
+    expect(options.categories).toContain(ownCategory);
+    expect(options.brands).toContain(ownBrand);
+    // The bug this catches: a stranger's category and brand offered as checkboxes in
+    // "your" filter form the moment that stranger publishes a pack.
+    expect(options.categories).not.toContain(leakedCategory);
+    expect(options.brands).not.toContain(leakedBrand);
+
+    // Proves the premise: RLS alone really does hand this row to a signed-in stranger via
+    // gear_items_select_via_public_pack, so the safe half above is demonstrating a fix
+    // rather than a query that was never going to see the row anyway. Delete
+    // `.eq('user_id', userId)` from loadGearOptions and the two negatives above fail.
+    const leaky = await leakyOptionsQuery(attacker, leakedBrand);
+    expect(leaky.error).toBeNull();
+    const leakedOptions = extractGearOptions(leaky.data ?? []);
+    expect(leakedOptions.categories).toContain(leakedCategory);
+    expect(leakedOptions.brands).toContain(leakedBrand);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Deleting freezes the packs the item sat on.
+// ---------------------------------------------------------------------------
+//
+// THE ASSERTION THE WHOLE DESIGN RESTS ON. `gear_items_snapshot_before_delete`
+// (core_schema.sql:437-439) fires BEFORE DELETE, once per row, freezing the row into
+// every `pack_items` row still referencing it that has no snapshot yet; the composite
+// foreign key then nulls those items' `gear_item_id` (core_schema.sql:310-311). That
+// trigger is the entire reason a real delete is safe to offer as the ordinary gesture —
+// without it, deleting a closet item would silently take the line out of every pack
+// carrying it. Nothing stands between a confirmed delete and this trigger: the reveal
+// -then-confirm step (`confirmsGearDeletion`, src/lib/gear/bulk.ts) is in front of
+// the write, and there is nothing at all behind it — see
+// supabase/migrations/20260813130000_gear_hard_delete.sql's second numbered reason,
+// which names this as the price the ticket accepts deliberately.
+describe('deleting an item freezes the pack it sat on rather than taking the line with it', () => {
+  it('deleteGearItems fires gear_items_snapshot_before_delete: the pack_items row survives, gear_item_id becomes null, and the snapshot captures the item', async () => {
     const user = await createUser('gear-closet-freeze');
     const pack = await createPack(user, { visibility: 'private', itemCount: 1 });
     const gearItemId = pack.gearItemIds[0];
     const packItemId = pack.itemIds[0];
 
-    // A REAL delete, through the real mutations.ts function — not a soft delete —
-    // proving the soft-delete work in this ticket did not quietly change the
-    // pre-existing freeze semantics for the case where a gear item is actually
-    // removed from the database.
-    const { error: deleteError, count } = await permanentlyDeleteGear(user.client, user.id, [
-      gearItemId,
-    ]);
+    // Through the real mutations.ts function, not a hand-written `.delete()` here: the
+    // trigger fires for any DELETE, so a stand-in would prove the DATABASE freezes packs
+    // while saying nothing about whether the function the two gear pages actually call
+    // still issues a DELETE at all.
+    const { error: deleteError, count } = await deleteGearItems(user.client, user.id, [gearItemId]);
     expect(deleteError).toBeNull();
     expect(count).toBe(1);
 

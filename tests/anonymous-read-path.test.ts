@@ -535,10 +535,10 @@ const AUTH_CONSUMERS: readonly string[] = [
   // builds a request-scoped client via createAuthClient and issues plain PostgREST
   // reads/writes against gear_items — a filtered/sorted/paginated select through
   // applyGearQuery, a distinct-category/brand select for the filter form's own
-  // options, and, on POST, an update() for bulk set-category/set-status/soft-delete
-  // and for undo, guarded by RLS exactly like every other write in this product. No
-  // RPC, no privileged key, and — like every other entry here — a page, never an
-  // island: no `client:*` directive appears anywhere in it.
+  // options, and, on POST, an update() for bulk set-category/set-status and a real
+  // delete() for a confirmed bulk delete, guarded by RLS exactly like every other
+  // write in this product. No RPC, no privileged key, and — like every other entry
+  // here — a page, never an island: no `client:*` directive appears anywhere in it.
   'src/pages/gear/index.astro',
   // The "add gear" form (PK-4): reads Astro.locals.user to redirect a signed-out
   // visitor to sign-in with `next` set; builds a request-scoped client via
@@ -550,15 +550,9 @@ const AUTH_CONSUMERS: readonly string[] = [
   // a request-scoped client and issues a single-row select (explicitly scoped to
   // user_id, since gear_items_select_via_public_pack is granted to authenticated too —
   // see the page's own scoping-rule comment) plus, on POST, an update() for a save or a
-  // soft-delete, guarded by RLS exactly like every other write in this product. A page,
-  // never an island.
+  // delete() for a confirmed delete, guarded by RLS exactly like every other write in
+  // this product. A page, never an island.
   'src/pages/gear/[id].astro',
-  // The trash (PK-4): reads Astro.locals.user the same way; builds a request-scoped
-  // client and lists soft-deleted gear_items (explicitly scoped to user_id, same
-  // reasoning as [id].astro above), and, on POST, restores rows or permanently
-  // DELETEs them behind a typed confirmation — both guarded by RLS. A page, never an
-  // island.
-  'src/pages/gear/trash.astro',
 ];
 
 /** The allowlist as absolute ids, to be compared against graph keys. Entries are written

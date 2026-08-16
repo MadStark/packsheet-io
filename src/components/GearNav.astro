@@ -1,7 +1,7 @@
 ---
 // A plain, non-hydrated header for the gear closet's pages (PK-4) — the wordmark and
-// links to Closet, Trash and Account, shared by src/pages/gear/index.astro and the
-// closet pages that follow it.
+// links to Closet and Account, shared by src/pages/gear/index.astro and the closet
+// pages that follow it.
 //
 // KEEP THIS A PLAIN .astro COMPONENT. It imports nothing from src/lib/auth/ (only the
 // dependency-free path constants below, which is exactly what those modules exist
@@ -10,7 +10,10 @@
 // downloads, and the whole point of src/lib/gear/routes.ts and src/lib/auth-routes.ts
 // being importable from anywhere is that a component like this one can render a link
 // without ever becoming a reason for an auth SDK to reach the client.
-import { GEAR_PATH, GEAR_TRASH_PATH } from '../lib/gear/routes';
+// Neither GEAR_TRASH_PATH nor GEAR_NEW_PATH is imported any more, and each was dropped
+// by a different ticket: PK-60 deleted the trash page outright, and PK-62 removed the
+// "Add item" link from this nav. What is left is the two DESTINATIONS this header is for.
+import { GEAR_PATH } from '../lib/gear/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
 // The wordmark's destination, which used to be a hard-coded "/" and is the single click
 // this whole change is about. Every page this nav renders on belongs to a signed-in
@@ -25,7 +28,6 @@ import { HOME_PATH } from '../lib/routes';
 const path = Astro.url.pathname;
 const links: readonly [href: string, label: string][] = [
   [GEAR_PATH, 'Closet'],
-  [GEAR_TRASH_PATH, 'Trash'],
   [ACCOUNT_PATH, 'Account'],
 ];
 ---
@@ -54,25 +56,24 @@ const links: readonly [href: string, label: string][] = [
       }
       {
         /* PK-62 REMOVED THE "Add item" LINK FROM THIS NAV — read this before putting
-           it back, because the C1 (PK-4 review) defect it was added for is NOT fully
-           re-opened by removing it, but it is not untouched either.
+           it back, because the C1 (PK-4 review) defect it was added for is NOT
+           re-opened by removing it.
 
            C1 was that GEAR_NEW_PATH used to be linked ONLY from the closet's EMPTY
            STATE, so once the closet held a single item there was no route to it at all
-           short of typing the URL. That specific defect stays fixed without this link:
-           the same review also gave the closet list its own "Add item" button in its
-           heading row, rendered whether the closet is empty or full
-           (src/pages/gear/index.astro), and that button is the one PK-62 kept. On the
-           closet list — where adding an item is actually the thing you are there to do
-           — nothing changed but the removal of a second link to a route already linked
-           three inches away.
+           short of typing the URL. That defect stays fixed without this link: the same
+           review also gave the closet list its own "Add item" button in its heading row,
+           rendered whether the closet is empty or full (src/pages/gear/index.astro), and
+           that button is the one PK-62 kept. On the closet list — where adding an item is
+           actually the thing you are there to do — nothing changed but the removal of a
+           second link to a route already linked three inches away.
 
-           WHAT DID CHANGE, honestly: from the trash and detail pages, adding an item is
-           now two clicks (Closet, then Add item) rather than one. That is the cost PK-62
-           accepted to leave this header the three DESTINATIONS it is for — Closet,
-           Trash, Account — rather than mixing an action in among them. If "add from
-           anywhere" turns out to matter more than that, the fix is a considered one
-           (a persistent action affordance), not quietly restoring this <li>. */
+           The cost PK-62 accepted was one extra click from the OTHER gear pages. That
+           cost then shrank on its own: PK-60 deleted the trash page, so the only page
+           left that renders this nav without its own Add item button is an item's detail
+           page. If "add from anywhere" turns out to matter more than keeping this header
+           to destinations only, the fix is a considered one (a persistent action
+           affordance), not quietly restoring this <li>. */
       }
     </ul>
   </nav>

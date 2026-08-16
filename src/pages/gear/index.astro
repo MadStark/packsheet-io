@@ -32,13 +32,11 @@ import {
 import {
   BULK_FORM_FIELD,
   BULK_INTENT,
-  UNDO_COUNT_PARAM,
-  UNDO_INTENT,
-  UNDO_PARAM,
-  makeUndoToken,
+  GEAR_DELETE_CONFIRMATION_VALUE,
+  GEAR_DELETE_FAILED_MESSAGE,
+  confirmsGearDeletion,
   parseBulkAction,
-  parseUndoCount,
-  parseUndoToken,
+  type BulkAction,
 } from '../../lib/gear/bulk';
 // `loadGearOptions` only — `extractGearOptions` is NOT called here any more. PK-62
 // removed the Category and Brand filter checkboxes this page built from it, but the
@@ -48,12 +46,9 @@ import {
 // unused for now, for the item form's category autocomplete (PK-63) — deleting it here
 // would only mean writing it again there.
 import { loadGearOptions } from '../../lib/gear/options';
-import {
-  bulkSetCategory,
-  bulkSetStatus,
-  bulkSoftDelete,
-  undoBulkDelete,
-} from '../../lib/gear/mutations';
+// `deleteGearItems` rather than the bulkSoftDelete/undoBulkDelete pair: PK-60 dropped the
+// soft delete, the trash page and the undo banner, so a delete is now final.
+import { bulkSetCategory, bulkSetStatus, deleteGearItems } from '../../lib/gear/mutations';
 // `formatGearAcquiredOn` arrives with PK-61, which moved the "Added" column off
 // `created_at` and onto the visitor's own `acquired_on` date. `WEIGHT_UNITS` came in on
 // the same import block on staging and is deliberately NOT carried across: PK-62 removed
@@ -80,6 +75,10 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 // Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts
 // and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
 const GENERIC_LOAD_ERROR = 'Something went wrong loading your gear. Please try again.';
+// The two bulk UPDATES only. A failed bulk DELETE reports GEAR_DELETE_FAILED_MESSAGE
+// (src/lib/gear/bulk.ts) instead: this sentence says "updating", which a delete is not,
+// and "please try again", which promises the write did not happen — see that constant's
+// own comment for the committed-then-lost-response case where that promise is false.
 const GENERIC_WRITE_ERROR = 'Something went wrong updating your gear. Please try again.';
 
 let bulkError: string | null = null;
@@ -90,48 +89,17 @@ let bulkError: string | null = null;
 let pendingDelete: { readonly ids: readonly string[] } | null = null;
 
 // ---------------------------------------------------------------------------
-// POST: bulk actions and undo.
+// POST: the three bulk actions.
 //
 // Method discipline: this page answers GET and POST, nothing else — Astro itself
 // returns 405 for any other method, since no other handler is exported. Every
 // state-changing branch below redirects with 303, so a refresh can never resubmit a
 // mutation; the one branch that does NOT redirect (an unconfirmed bulk-delete) has not
-// changed anything yet, which is the entire point of it.
+// changed anything yet, which is the entire point of it — and for delete that point is
+// now the whole of the safety net, because deleteGearItems removes the rows for good.
 // ---------------------------------------------------------------------------
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
-  const rawIntent = form.get(BULK_FORM_FIELD.intent);
-
-  if (rawIntent === UNDO_INTENT) {
-    // Reject anything malformed rather than passing it to a query — parseUndoToken is
-    // total, so a missing, tampered or merely-plausible token all become `null` here
-    // rather than reaching undoBulkDelete.
-    const rawToken = form.get(UNDO_PARAM);
-    const token = parseUndoToken(typeof rawToken === 'string' ? rawToken : null);
-    if (token === null) {
-      // Nothing valid to act on: redirect to a clean URL the same way a successful
-      // undo does, rather than surfacing an error for input that was never trusted
-      // enough to reach a query in the first place.
-      return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
-    }
-
-    // I5 (PK-4 review): the write's result is now checked like every other write on
-    // this page, rather than discarded — an undo that fails at the database no longer
-    // looks byte-identical to one that succeeded.
-    const { error } = await undoBulkDelete(client, user.id, token);
-    if (error) {
-      bulkError = GENERIC_WRITE_ERROR;
-    } else {
-      // Redirect to the SAME filtered/sorted/paged view the undo banner was shown on,
-      // not a bare GEAR_PATH. Astro.url.searchParams here still carries `undo`/`count`
-      // alongside whatever real filter was active; parsing it with parseGearQuery and
-      // handing the result to gearListPath is what drops those two (so a refresh
-      // cannot re-trigger the undo) while keeping every other filter — see
-      // gearListPath's own comment for why this is done through GearQuery rather than
-      // deleting `undo`/`count` off a copied URLSearchParams by name.
-      return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
-    }
-  }
 
   const result = parseBulkAction(form);
   if (!result.ok) {
@@ -141,41 +109,41 @@ if (Astro.request.method === 'POST') {
     const ids = [...action.ids];
 
     if (action.intent === BULK_INTENT.delete) {
-      // Bulk delete is destructive, so — following the house precedent in
+      // Bulk delete is irreversible, so — following the house precedent in
       // account/index.astro's own two-step account deletion — the first submission
       // never writes anything. It only reveals a confirmation naming the count, built
       // from the SAME validated `ids` the second submission will re-post as hidden
       // fields. No client-side confirm() dialog anywhere in this.
-      const confirmed = form.get(BULK_FORM_FIELD.confirm) === '1';
+      //
+      // What counts as confirmation is confirmsGearDeletion's decision, not this page's
+      // (PK-60 review, F1): it used to be an inline `=== '1'` here and a second,
+      // separate one in src/pages/gear/[id].astro, in the directory
+      // vitest.config.ts:64 excludes — the only guard in front of the gear closet's one
+      // irreversible write, duplicated, and untestable in both copies. See that
+      // function's own comment for why it refuses ' 1 ', 'true' and a File.
+      const confirmed = confirmsGearDeletion(form.get(BULK_FORM_FIELD.confirm));
       if (!confirmed) {
         pendingDelete = { ids };
       } else {
-        const token = makeUndoToken();
-        // bulkSoftDelete (src/lib/gear/mutations.ts) carries the same
-        // .is('deleted_at', null) guard the inline write here used to: re-submitting
-        // an already-processed delete must not re-stamp rows an earlier batch already
-        // put in the trash with THIS batch's new token — see bulk.ts's own "THE CALLER
-        // MUST GUARD" comment.
-        const { error, count } = await bulkSoftDelete(client, user.id, ids, token);
+        // deleteGearItems (src/lib/gear/mutations.ts) removes these rows from
+        // gear_items outright — see that function's own comment for what the BEFORE
+        // DELETE trigger freezes into any pack still referencing them, which is what
+        // makes a real delete safe to offer at all. Its `count` is deliberately not
+        // read here: with no banner to report a figure into (the item's absence from
+        // the list below IS the feedback), the only thing this page needs from the
+        // write is whether it failed.
+        const { error } = await deleteGearItems(client, user.id, ids);
         if (error) {
-          bulkError = GENERIC_WRITE_ERROR;
+          // Not GENERIC_WRITE_ERROR: this branch is also where a delete that COMMITTED
+          // and then lost its response lands, so the message must not promise the rows
+          // are still there — see GEAR_DELETE_FAILED_MESSAGE's own comment. Still not a
+          // raw PostgREST string, exactly like every other error on this page.
+          bulkError = GEAR_DELETE_FAILED_MESSAGE;
         } else {
-          // The same filtered/sorted/paged view the visitor was on, plus the fresh
-          // undo token and count — built from gearQueryToSearchParams(parseGearQuery
-          // (...)) rather than copying Astro.url.searchParams and deleting/re-setting
-          // UNDO_PARAM/UNDO_COUNT_PARAM by hand, so this can never accidentally carry
-          // forward an EARLIER, unrelated undo/count pair that happened to already be
-          // sitting in the current URL (e.g. a second bulk delete performed while a
-          // previous delete's undo banner was still showing).
-          //
-          // I6 (PK-4 review): `count` is the number of rows bulkSoftDelete actually
-          // touched, read off its own `.select('id')` — not `ids.length`, the number
-          // the visitor merely asked for. A stale selection racing another tab now
-          // reports honestly instead of claiming every requested id was moved.
-          const redirectParams = gearQueryToSearchParams(parseGearQuery(Astro.url.searchParams));
-          redirectParams.set(UNDO_PARAM, token);
-          redirectParams.set(UNDO_COUNT_PARAM, String(count));
-          return Astro.redirect(`${GEAR_PATH}?${redirectParams.toString()}`, 303);
+          // The same filtered/sorted/paged view the visitor was on, exactly like the
+          // other two actions below — a delete is not a reason to throw away the
+          // filter they are working through.
+          return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
         }
       }
     } else if (action.intent === BULK_INTENT.setCategory) {
@@ -184,12 +152,13 @@ if (Astro.request.method === 'POST') {
         bulkError = GENERIC_WRITE_ERROR;
       } else {
         // Same filtered/sorted/paged view, via gearListPath rather than
-        // `${GEAR_PATH}${Astro.url.search}` verbatim — the difference matters
-        // whenever the undo banner is currently showing (this form's own action
-        // defaults to the current document URL, undo/count included): the verbatim
-        // form would carry that now-unrelated undo/count pair forward into this
-        // redirect, reviving a banner for an action that has nothing to do with it.
-        // gearListPath drops both, the same way it does for the undo POST itself.
+        // `${GEAR_PATH}${Astro.url.search}` verbatim: this form's own action defaults
+        // to the current document URL, so the verbatim version would carry every
+        // param sitting in it forward — including any this page does not own (a stray
+        // `?utm_source=`, a typo'd `?cagegory=`, a param a future feature adds
+        // elsewhere). Routing through parseGearQuery means the redirect target is
+        // rebuilt from the filter state alone; see gearListPath's own comment for why
+        // that is done through GearQuery rather than by deleting params by name.
         return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
     } else if (action.intent === BULK_INTENT.setStatus) {
@@ -201,11 +170,26 @@ if (Astro.request.method === 'POST') {
         return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
     } else {
-      // restore / delete-permanently: valid BULK_INTENT values, but they belong to
-      // GEAR_TRASH_PATH, not this page — this list never renders a control that posts
-      // either one. Reachable only by a hand-crafted or stale request, so it is
-      // reported the same way an unrecognised intent is, not silently no-opped.
-      bulkError = 'Choose a valid bulk action.';
+      // Unreachable, and typed so that it stays unreachable (PK-60 review, F2).
+      // `parseBulkAction` has already refused every intent that is not one of the three
+      // BULK_INTENT values, so no request can arrive here; the assignment to `never` is
+      // what makes that a guarantee the COMPILER keeps rather than a fact somebody has
+      // to re-verify by reading bulk.ts.
+      //
+      // What this replaced was a plain `else` holding the bulk-set-status write, with a
+      // comment claiming a future fourth BULK_INTENT could not slip through because it
+      // would land here "typed without a `status` field, which is a compile error". That
+      // was only two-thirds true, and it was tested: a fourth member without a `status`
+      // field does fail to compile, but one that HAPPENS TO CARRY a `status` field (a
+      // plausible future `bulk-retire`, say) compiles cleanly and silently performs a
+      // status write under a different action's name — a wrong write, in the branch
+      // meant to be the safe one. Narrowing the write to its own explicit `=== setStatus`
+      // test and leaving `never` here makes the guarantee structural instead: ANY new
+      // member of the union fails to compile on the line below, whatever fields it
+      // carries, because reaching this branch with a member left unhandled is exactly
+      // what stops `action` narrowing to `never` — and `never` accepts nothing.
+      const unhandled: never = action;
+      throw new Error(`Unhandled bulk intent: ${(unhandled as BulkAction).intent}`);
     }
   }
 }
@@ -241,9 +225,10 @@ const totalPages = Math.max(1, Math.ceil(totalCount / GEAR_PAGE_SIZE));
 const rangeStart = totalCount === 0 ? 0 : (page - 1) * GEAR_PAGE_SIZE + 1;
 const rangeEnd = totalCount === 0 ? 0 : rangeStart + items.length - 1;
 
-// "The closet has no active items at all" is exactly optionRows being empty: that
-// query carries no filter beyond deleted_at is null, so an empty result there can only
-// mean there is nothing to filter — never that today's filters merely matched nothing.
+// "The closet has no items at all" is exactly optionRows being empty: that query
+// carries no filter beyond the owner scope (see loadGearOptions), so an empty result
+// there can only mean there is nothing to filter — never that today's filters merely
+// matched nothing.
 // This is what lets the two empty states below say two different, honest things
 // instead of collapsing "you have no gear" and "no gear matches these filters" into
 // one sentence that would be wrong for whichever case it wasn't written for.
@@ -260,16 +245,6 @@ const checkedStatuses = checkedGearStatuses(query.statuses);
 // because `category` and `brand` legitimately repeat.
 const unsurfacedFilters = [...unsurfacedFilterParams(query)];
 const closetIsSilentlyFiltered = hasUnsurfacedFilters(query);
-
-// The undo banner: only rendered for a token that survives validation — a malformed
-// or tampered `undo` param is silently ignored rather than shown to anybody, exactly
-// as parseUndoToken's own "reject anything malformed" contract promises the caller.
-const undoToken = parseUndoToken(Astro.url.searchParams.get(UNDO_PARAM));
-const undoCount = parseUndoCount(Astro.url.searchParams.get(UNDO_COUNT_PARAM));
-const undoMessage =
-  undoCount !== null
-    ? `${undoCount} item${undoCount === 1 ? '' : 's'} moved to the trash.`
-    : 'Items moved to the trash.';
 
 /**
  * The labelled column headers live in `GEAR_LIST_COLUMNS` (src/lib/gear/fields.ts), not
@@ -327,27 +302,6 @@ function pageHref(target: number): string {
     </div>
 
     {
-      undoToken && (
-        <div
-          role="status"
-          class="border-hairline bg-sunk text-ink mt-6 flex items-center justify-between gap-4 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          <p>{undoMessage}</p>
-          <form method="POST">
-            <input type="hidden" name={BULK_FORM_FIELD.intent} value={UNDO_INTENT} />
-            <input type="hidden" name={UNDO_PARAM} value={undoToken} />
-            <button
-              type="submit"
-              class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
-            >
-              Undo
-            </button>
-          </form>
-        </div>
-      )
-    }
-
-    {
       bulkError && (
         <p
           role="alert"
@@ -373,13 +327,42 @@ function pageHref(target: number): string {
       loadError ? null : pendingDelete ? (
         <div class="border-rust/40 bg-rust/10 mt-6 rounded-[var(--r)] border px-5 py-4">
           <h2 class="text-rust text-lg">Confirm delete</h2>
+          {/* Names the irreversibility in the same breath as the count, and then the
+              one thing a visitor might reasonably fear losing along with the item: a
+              pack that lists it. gear_items_snapshot_before_delete (core_schema.sql)
+              freezes the row's name, weight and price into every pack_items row still
+              pointing at it, so the pack keeps its line rather than losing it — see
+              deleteGearItems's own comment in src/lib/gear/mutations.ts. Deliberately
+              NOT a typed-word confirmation like account/index.astro's: that gate is
+              reserved for the one action that takes everything, and asking someone to
+              type a word before deleting a tent would spend the gesture's whole force
+              on the wrong thing.
+
+              THE PACK CLAUSE IS PLURALISED AS A WHOLE, not just its opening words
+              (PK-60 review, B4). Switching only "If it appears"/"If any appear" left the
+              rest of the sentence singular — "…on a saved pack, that pack keeps a frozen
+              copy" — which both reads wrong after a plural subject and describes the
+              wrong mechanic: three deleted items can sit on three DIFFERENT packs, and
+              the trigger freezes each one separately, so there is no single "that pack"
+              to point at. */}
           <p class="text-ink-2 mt-2 text-sm">
-            Move {pendingDelete.ids.length} item{pendingDelete.ids.length === 1 ? '' : 's'} to the
-            trash? You can undo this from the closet list right after.
+            Delete {pendingDelete.ids.length} item{pendingDelete.ids.length === 1 ? '' : 's'}{' '}
+            permanently? This cannot be undone.{' '}
+            {pendingDelete.ids.length === 1
+              ? 'If it appears on a saved pack, that pack keeps a frozen copy.'
+              : 'If any appear on saved packs, those packs keep a frozen copy.'}
           </p>
           <form method="POST" class="mt-4 flex gap-3">
             <input type="hidden" name={BULK_FORM_FIELD.intent} value={BULK_INTENT.delete} />
-            <input type="hidden" name={BULK_FORM_FIELD.confirm} value="1" />
+            {/* The value comes from the same constant confirmsGearDeletion compares
+                against, never a bare "1": the writer and the reader of this gate must
+                not be able to drift apart — see GEAR_DELETE_CONFIRMATION_VALUE in
+                src/lib/gear/bulk.ts. */}
+            <input
+              type="hidden"
+              name={BULK_FORM_FIELD.confirm}
+              value={GEAR_DELETE_CONFIRMATION_VALUE}
+            />
             {pendingDelete.ids.map((id) => (
               <input type="hidden" name={BULK_FORM_FIELD.id} value={id} />
             ))}
@@ -387,7 +370,7 @@ function pageHref(target: number): string {
               type="submit"
               class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"
             >
-              Move to trash
+              Delete permanently
             </button>
             <a
               href={`${GEAR_PATH}${Astro.url.search}`}
@@ -619,17 +602,16 @@ function pageHref(target: number): string {
                                 unmarked default. */}
                             <span class="flex items-center gap-1.5">
                               <GearStatusIcon status={item.status} />
-                              {/* THE ONLY PLACE AN ACTIVE ROW'S MALFORMED STATUS STILL
-                                  SURFACES. Removing the Status column took away the one
-                                  cell that rendered `item.status` as text, and
-                                  `gearStatusMarker` draws nothing for a value it does
-                                  not recognise — identical to `owned`. The trash page
-                                  still renders a status verbatim, but it only ever shows
-                                  SOFT-DELETED rows, so without this an out-of-constraint
-                                  status would be invisible everywhere an active item
-                                  appears. sr-only costs no layout, so the deliberately
-                                  ragged left edge is untouched; nothing renders here at
-                                  all for the three real statuses. */}
+                              {/* THE ONLY PLACE A MALFORMED STATUS SURFACES ANYWHERE.
+                                  Removing the Status column took away the one cell that
+                                  rendered `item.status` as text, and `gearStatusMarker`
+                                  draws nothing for a value it does not recognise —
+                                  identical to `owned`. The trash page used to render a
+                                  status verbatim and was the fallback this once pointed
+                                  at; PK-60 deleted it, so this span is now the whole of
+                                  it. sr-only costs no layout, so the deliberately ragged
+                                  left edge is untouched; nothing renders here at all for
+                                  the three real statuses. */}
                               {!isGearStatus(item.status) && (
                                 <span class="sr-only">{formatGearStatus(item.status)}</span>
                               )}

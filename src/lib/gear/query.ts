@@ -397,25 +397,23 @@ export function hasUnsurfacedFilters(query: GearQuery): boolean {
  * redirect from an unfiltered view does not grow a pointless trailing `?`), or
  * `GEAR_PATH` with `gearQueryToSearchParams(query)` appended otherwise.
  *
- * WHY THIS EXISTS (PK-4 defect: "Undo throws away the active filter"). The closet
- * list's undo banner used to redirect unconditionally to a bare `GEAR_PATH` once
- * acted on, discarding whatever `q`/category/status/brand/weight/sort/page state the
- * visitor was looking at — precisely the moment they are LEAST willing to lose it,
- * since they are actively correcting a mistake (a filtered-down "Bear Canister"
- * search, say, losing its filter and dumping them back on the full, unfiltered
- * closet). `src/pages/gear/index.astro`'s undo/set-category/set-status POST branches
- * all redirect through this function now instead.
+ * WHY THIS EXISTS (PK-4 defect: "a bulk action throws away the active filter"). A
+ * bulk action posts from, and belongs to, one particular filtered view; redirecting
+ * unconditionally to a bare `GEAR_PATH` afterwards discards whatever
+ * `q`/category/status/brand/weight/sort/page state the visitor was looking at — a
+ * filtered-down "Bear Canister" search, say, losing its filter and dumping them back on
+ * the full, unfiltered closet, immediately after an action they will very likely want
+ * to follow with another one on the same selection. `src/pages/gear/index.astro`'s
+ * bulk-action POST branches all redirect through this function instead.
  *
- * BUILT ON `gearQueryToSearchParams`, NOT A HAND-COPIED `URLSearchParams`. The
- * tempting alternative — `new URLSearchParams(Astro.url.searchParams)` with `undo`
- * and `count` deleted afterward by name — has to be kept in sync BY HAND with every
- * param that is not really part of `GearQuery` (today that is exactly `undo` and
- * `count`, from `src/lib/gear/bulk.ts`; there is no guarantee it stays exactly those
- * two forever). Routing the redirect target through a parsed `GearQuery` instead
- * means any param `parseGearQuery` does not recognise as one of ITS OWN fields is
- * dropped for free, the same way a stray `?utm_source=` or a typo'd `?cagegory=`
- * already is on every other place this module round-trips a query — nothing has to
- * remember to delete it by name.
+ * BUILT ON `gearQueryToSearchParams`, NOT A HAND-COPIED `URLSearchParams`. The tempting
+ * alternative — `new URLSearchParams(Astro.url.searchParams)`, carried through as-is —
+ * has to be kept in sync BY HAND with every param that is not really part of
+ * `GearQuery`, and there is no guarantee the set of those stays empty forever. Routing
+ * the redirect target through a parsed `GearQuery` instead means any param
+ * `parseGearQuery` does not recognise as one of ITS OWN fields is dropped for free, the
+ * same way a stray `?utm_source=` or a typo'd `?cagegory=` already is on every other
+ * place this module round-trips a query — nothing has to remember to delete it by name.
  */
 export function gearListPath(query: GearQuery): string {
   const search = gearQueryToSearchParams(query).toString();
@@ -558,19 +556,6 @@ export const GEAR_SELECT =
 export const GEAR_DETAIL_SELECT =
   'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, acquired_on, url, notes, status, photo_path, created_at';
 
-/** The columns `src/pages/gear/trash.astro` needs. NO LONGER "the same list-row shape as
- *  `GEAR_SELECT` plus `deleted_at`" — PK-61 added `acquired_on` to `GEAR_SELECT`, and
- *  deliberately did NOT add it here too: the trash view orders by `deleted_at desc`, not
- *  by "added", and renders no acquired date anywhere, so fetching a column this view
- *  never displays would be exactly the waste `GEAR_SELECT`'s own comment already refuses
- *  for `notes`/`url`/`description`. The two constants are otherwise the same list-row
- *  shape, with `deleted_at` added — every trash row needs it, and no active-closet row
- *  (`GEAR_SELECT`'s own consumers) ever renders it, since every query built on
- *  `GEAR_SELECT` is guarded with `.is('deleted_at', null)` and so would only ever read
- *  back `null` for it. */
-export const GEAR_TRASH_SELECT =
-  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at, deleted_at';
-
 /**
  * The exact shape `client.from('gear_items').select(GEAR_SELECT)` produces, derived
  * from `PacksheetClient` rather than hand-written — see `src/lib/supabase.ts`'s own doc
@@ -620,11 +605,12 @@ type GearItemsQueryBuilder = ReturnType<typeof _gearItemsQuery>;
 const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 1e-6;
 
 /**
- * The search/category/status/brand/weight filters and the `deleted_at is null` floor
- * every closet-list query needs (a trashed item is never a "gear closet" row — see
- * `GEAR_TRASH_PATH` in `src/lib/gear/routes.ts` for the page that reads the OTHER side
- * of that filter). Deliberately does NOT add ordering, `.range()`, or the owner scope —
- * see `applyGearQuery` for the first two and `loadGearCloset` for the third.
+ * The search/category/status/brand/weight filters every closet-list query needs.
+ * Every row this visitor owns is a closet row — the closet has no hidden tier of items
+ * a query has to filter back out, and `status` (including `'retired'`) is an ordinary
+ * filterable value like any other rather than a floor applied before the visitor's own
+ * filters are. Deliberately does NOT add ordering, `.range()`, or the owner scope — see
+ * `applyGearQuery` for the first two and `loadGearCloset` for the third.
  *
  * SPLIT OUT FROM `applyGearQuery` FOR C2 (PK-4 review): `loadGearCloset` needs to run
  * this same filter set TWICE for one page render — once as an unranged, `head: true`
@@ -634,7 +620,7 @@ const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 1e-6;
  * whose size is not yet known.
  */
 function applyGearFilters(builder: GearItemsQueryBuilder, query: GearQuery): GearItemsQueryBuilder {
-  let next = builder.is('deleted_at', null);
+  let next = builder;
 
   if (query.search !== '') {
     next = next.or(buildSearchFilter(query.search));
@@ -660,8 +646,8 @@ function applyGearFilters(builder: GearItemsQueryBuilder, query: GearQuery): Gea
 
 /**
  * Applies a parsed `GearQuery` to a `client.from('gear_items').select(GEAR_SELECT)`
- * builder: `applyGearFilters` (search, the three `in` filters, the weight range, the
- * `deleted_at is null` floor), ordering, and `.range()` for pagination.
+ * builder: `applyGearFilters` (search, the three `in` filters, the weight range),
+ * ordering, and `.range()` for pagination.
  *
  * A STABLE `id` TIEBREAKER IS ADDED AFTER THE SORT COLUMN, ALWAYS. Without it, two rows
  * that tie on the sort column (two items literally named "Stakes", say, or two added in
@@ -825,17 +811,18 @@ export async function loadGearCloset(client: PacksheetClient, userId: string, qu
  * `loadGearCloset` above.
  *
  * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces — see the identical
- * comment on `loadGearCloset`. Relying on RLS alone here would let this page render
- * ANY visitor's gear item the moment it sits on someone's public pack — "your item"
- * silently becoming a stranger's. `.is('deleted_at', null)` is the second guard: a
- * soft-deleted item is not a page this id should keep answering for — see
- * `GEAR_TRASH_PATH` for where a trashed item is read back.
+ * comment on `loadGearCloset`. `gear_items` carries TWO permissive SELECT policies and
+ * RLS unions them, so `.eq('id', id)` alone would let this page render ANY visitor's
+ * gear item the moment it sits on someone's public pack — "your item" silently becoming
+ * a stranger's, and its edit form silently offering to change somebody else's row. The
+ * id in the URL is the only other thing narrowing this query, and an id is guessable in
+ * exactly the way an ownership check is not.
  *
- * A missing row, another visitor's row, a soft-deleted row, and a malformed id (which
- * PostgREST refuses with an error before RLS is even consulted) all collapse to the
- * SAME `{ data: null }` shape here, on purpose — `src/pages/gear/[id].astro` turns that
- * into one real 404 for all four, and none of the four is a distinction its visitor
- * should be able to probe for.
+ * A missing row, another visitor's row, and a malformed id (which PostgREST refuses
+ * with an error before RLS is even consulted) all collapse to the SAME `{ data: null }`
+ * shape here, on purpose — `src/pages/gear/[id].astro` turns that into one real 404 for
+ * all three, and none of the three is a distinction its visitor should be able to probe
+ * for.
  */
 export async function loadGearItem(client: PacksheetClient, userId: string, id: string) {
   return client
@@ -843,31 +830,5 @@ export async function loadGearItem(client: PacksheetClient, userId: string, id: 
     .select(GEAR_DETAIL_SELECT)
     .eq('id', id)
     .eq('user_id', userId)
-    .is('deleted_at', null)
     .maybeSingle();
-}
-
-// ---------------------------------------------------------------------------
-// loadGearTrash — the owner-scoped trash list
-// ---------------------------------------------------------------------------
-
-/**
- * The owner-scoped trash list query — moved here from `src/pages/gear/trash.astro`
- * (PK-4 review, C3) for the same reason as `loadGearCloset` above.
- *
- * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces — see the identical
- * comment on `loadGearCloset`. `gear_items_select_via_public_pack` is granted to
- * `authenticated` visitors too, so a plain `.select()` relying on RLS alone could
- * return a stranger's gear the moment it sits on their own public pack — "your trash"
- * silently showing somebody else's item. `.not('deleted_at', 'is', null)` is what
- * actually confines this to the trash; the two guards are independent, not redundant.
- */
-export async function loadGearTrash(client: PacksheetClient, userId: string) {
-  return client
-    .from('gear_items')
-    .select(GEAR_TRASH_SELECT)
-    .eq('user_id', userId)
-    .not('deleted_at', 'is', null)
-    .order('deleted_at', { ascending: false })
-    .order('id', { ascending: true });
 }

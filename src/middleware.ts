@@ -68,8 +68,8 @@ const AUTH_ROUTE_PATHS: readonly string[] = [
   // (`/gear`) is itself session-shaped — it lists, filters and bulk-edits the
   // signed-in visitor's own gear_items, and redirects a signed-out visitor to sign-in
   // before rendering anything else — and every sub-path this ticket and the ones after
-  // it add (`/gear/new`, `/gear/<id>`, `/gear/trash`) is exactly the kind of thing this
-  // list's own comment says belongs under an enumerated root: a page where a shared
+  // it add (`/gear/new`, `/gear/<id>`) is exactly the kind of thing this list's own
+  // comment says belongs under an enumerated root: a page where a shared
   // cache handing one visitor's closet to the next visitor is the failure this rule
   // exists to prevent. One line here covers all of them, the same way ACCOUNT_PATH
   // covers every future `/account/` sub-page without each one earning its own entry.

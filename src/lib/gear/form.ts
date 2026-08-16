@@ -53,8 +53,8 @@ import { type GearStatus, isGearStatus } from './fields';
 /** The `<input name="…">`/`<select name="…">` values the gear item form uses — one
  *  name per `gear_items` column the form edits, so the form markup and this parser
  *  cannot silently disagree about what a field is called. Deliberately excludes
- *  `photo_path`, `weight_grams`, `id`, `user_id`, `deleted_at`, `created_at` and
- *  `updated_at` — none of those are ever supplied by this form. */
+ *  `photo_path`, `weight_grams`, `id`, `user_id`, `created_at` and `updated_at` — none
+ *  of those are ever supplied by this form. */
 export const GEAR_FORM_FIELD = {
   name: 'name',
   quantity: 'quantity',

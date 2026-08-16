@@ -20,9 +20,6 @@ export const GEAR_PATH = '/gear';
 /** The form for adding a new gear item. */
 export const GEAR_NEW_PATH = '/gear/new';
 
-/** Soft-deleted gear items — `deleted_at is not null` — with restore/empty actions. */
-export const GEAR_TRASH_PATH = '/gear/trash';
-
 /**
  * The detail/edit page for a single gear item. A function rather than a constant
  * because it needs an id; kept here rather than assembled ad hoc at each call site so
