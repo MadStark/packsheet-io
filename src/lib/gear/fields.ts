@@ -65,6 +65,25 @@ export const GEAR_STATUS_LABELS: Record<GearStatus, string> = {
 };
 
 /**
+ * One-sentence explanations of what each status means, for use as a `title` tooltip
+ * next to the visible label (PK-63's item form, where the status picker is a radio
+ * group and each option carries one of these on its label or wrapper).
+ *
+ * NOT A SUBSTITUTE FOR `GEAR_STATUS_LABELS`. A tooltip is an ENHANCEMENT layered on top
+ * of an already-complete visible label and accessible name, never the only place the
+ * meaning lives: `title` is not reliably reachable by keyboard (no native focus
+ * triggers it) or by touch (no hover to speak of), so anyone who cannot hover a mouse
+ * over the option sees only the label `GEAR_STATUS_LABELS` already provides and must be
+ * able to understand the status from that alone. If a label ever needed this text to
+ * make sense, the label would be the thing to fix, not this record.
+ */
+export const GEAR_STATUS_MEANINGS: Record<GearStatus, string> = {
+  owned: 'Gear you have and can pack.',
+  wishlist: 'Gear you want but do not own yet.',
+  retired: 'Gear you no longer use but want to keep a record of.',
+};
+
+/**
  * Which status checkboxes the closet's filter bar renders as TICKED, given the statuses
  * `parseGearQuery` actually found in the URL. This is the whole of PK-62's "zero checked
  * behaves as all three checked" rule.

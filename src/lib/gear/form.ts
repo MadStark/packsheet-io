@@ -26,15 +26,34 @@
  * than a CHECK, plus a future-date rejection (PK-61) that has no database-side mirror
  * whatsoever, CHECK or otherwise.
  *
- * REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS, NOT A GUESS. `name`, `quantity`, `weight`,
- * `weight_unit` and `status` are all `not null` columns on `gear_items` — even where a
- * column also carries a `default` for direct-SQL and other write paths, this form
- * requires the visitor to supply a real value rather than silently substituting the
- * column's default, because the rendered form always carries one (a pre-filled `0`, a
- * selected `g`, a selected `owned`) and an empty submission for one of these can only
- * mean a stale or tampered request. `price`, `currency`, `acquired_on`, `url`, `brand`,
- * `category`, `description` and `notes` are all nullable columns, so an empty
- * submission is treated as "not provided" and becomes `null` rather than an error.
+ * REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS, NOT A GUESS, WITH ONE DELIBERATE EXCEPTION.
+ * `name`, `weight_unit` and `status` are `not null` columns on `gear_items` with no
+ * honest default this form can fall back on: there is no such thing as a sensible
+ * default name. `weight_unit` is always chosen from a fixed list by a `<select>` that
+ * never leaves blank, so an empty submission for it can only mean a stale or tampered
+ * request. `status` is chosen from the same fixed list, but by a RADIO GROUP, not a
+ * `<select>` — see GearItemForm.astro's own comment on that field — and a radio group
+ * with nothing checked posts NOTHING, which is a submission this form's own visitor can
+ * genuinely produce (a JavaScript-disabled browser, a stale form from before this PR, a
+ * tampered request). That blank submission is still rejected, by design: `STATUS_MESSAGE`
+ * below is what tells the visitor to pick one, not evidence that the case cannot happen.
+ * So all three of `name`, `weight_unit` and `status` still require the visitor to supply
+ * a real value, for two different reasons rather than one shared one. `quantity` and
+ * `weight` are also `not null` columns,
+ * but PK-63 deliberately relaxes them: both carry a real column default (`1` and `0`
+ * respectively) that direct-SQL and other write paths already rely on, so a blank
+ * submission for either is no longer an error — it resolves to that same default
+ * instead. `name`, `weight_unit` and `status` remain the three fields whose ABSENCE
+ * blocks a save; `quantity` and `weight` now block only on a non-blank value that fails
+ * to parse. "Name is the only field that can block a save" is the ticket's own shorthand
+ * and it is not literally true — it describes the form as a visitor meets it, where the
+ * unit and status controls always post something, not the parser's actual contract. See
+ * the comments at the `parseQuantity`/`parseNonNegativeDecimal` call sites inside
+ * `parseGearItemForm` for exactly where that default is applied. `price`, `currency`,
+ * `acquired_on`, `url`, `brand`, `category`, `description` and `notes` are all nullable
+ * columns, so an empty submission is treated as "not provided" and becomes `null` rather
+ * than an error. (`volume_litres` was in that list until PK-61 dropped the column from
+ * the product; `acquired_on` is the column PK-61 added in its place.)
  *
  * NEVER A RAW POSTGRES OR POSTGREST STRING. Every message below is a complete,
  * neutral sentence a visitor can read — the same house rule `signUpErrorMessage` in
@@ -529,13 +548,59 @@ export function parseGearItemForm(form: FormData): GearFormResult {
 
   // pairs with: quantity integer not null default 1 check (quantity > 0)
   // (20260813000000_gear_closet.sql)
-  const quantity = parseQuantity(values.quantity);
-  if (quantity === null) errors.quantity = QUANTITY_MESSAGE;
+  //
+  // PK-63: A BLANK QUANTITY NO LONGER BLOCKS A SAVE. Unlike name, quantity has a
+  // real column default a direct-SQL insert already relies on, so a blank field is not
+  // "a stale or tampered request" the way a blank name is — it is simply "the visitor
+  // did not say, use the default", the same presence check `acquired_on` and `url` run
+  // below (trim, then test for '' before ever calling the parser). A NON-BLANK value that
+  // fails to parse is still rejected exactly as it was before this ticket —
+  // parseQuantity itself is untouched, so 'abc', '-1', '1.5' and '1e3' all still
+  // produce QUANTITY_MESSAGE; blank means "no answer, use the default", malformed means
+  // "a wrong answer", and only the first of those two is now forgiven.
+  //
+  // "RESOLVES TO THE COLUMN'S OWN DEFAULT" IS TRUE FOR INSERT AND FALSE FOR UPDATE, and a
+  // maintainer must not read the paragraph above and conclude the edit path is safe.
+  // `updateGearItem` (src/lib/gear/mutations.ts) issues `.update(values)` with this
+  // parser's FULL output, not a partial patch — Postgres never sees "field omitted, keep
+  // the stored value" for a cleared Quantity, it sees a literal `1` written over
+  // whatever was there, including a genuinely-intended 4. This relaxation is still what
+  // the ticket asks for; the point of this paragraph is only that "the column's own
+  // default" is the INSERT-path justification, and the edit path overwrites on purpose,
+  // not by accident.
+  const quantityRaw = values.quantity.trim();
+  let quantity = 1;
+  if (quantityRaw !== '') {
+    const parsedQuantity = parseQuantity(quantityRaw);
+    if (parsedQuantity === null) {
+      errors.quantity = QUANTITY_MESSAGE;
+    } else {
+      quantity = parsedQuantity;
+    }
+  }
 
   // pairs with: weight numeric(12, 3) not null default 0
   //             check (weight >= 0 and weight < 'Infinity'::numeric)
-  const weight = parseNonNegativeDecimal(values.weight, WEIGHT_DECIMALS, NUMERIC_12_3_MAX);
-  if (weight === null) errors.weight = WEIGHT_MESSAGE;
+  //
+  // PK-63: same treatment as quantity immediately above, and for the same reason — 0 is
+  // the column's own default, not a value this parser invents on the visitor's behalf.
+  // A blank weight resolves to 0 without an error; parseNonNegativeDecimal itself is
+  // untouched, so a non-blank but malformed value ('NaN', '1e3', a fourth decimal
+  // place) still produces WEIGHT_MESSAGE exactly as it did before this ticket. Same
+  // INSERT-vs-UPDATE caveat as quantity's own comment above: on the edit path, a cleared
+  // Weight writes a literal `0` over a stored 2400 via `.update(values)` — "the column's
+  // own default" describes why 0 is the right value to write, not a guarantee that
+  // nothing gets overwritten.
+  const weightRaw = values.weight.trim();
+  let weight = 0;
+  if (weightRaw !== '') {
+    const parsedWeight = parseNonNegativeDecimal(weightRaw, WEIGHT_DECIMALS, NUMERIC_12_3_MAX);
+    if (parsedWeight === null) {
+      errors.weight = WEIGHT_MESSAGE;
+    } else {
+      weight = parsedWeight;
+    }
+  }
 
   // pairs with: weight_unit text not null default 'g'
   //             check (weight_unit in ('g', 'kg', 'oz', 'lb'))
@@ -642,7 +707,15 @@ export function parseGearItemForm(form: FormData): GearFormResult {
   const description = parseOptionalText(values.description);
   const notes = parseOptionalText(values.notes);
 
-  if (Object.keys(errors).length > 0) {
+  // weightUnit and status are the only fields left that can be `null` here — quantity
+  // and weight no longer can, PK-63 made both always resolve to a real number, either
+  // parsed from a non-blank field or the column's own default for a blank one, see the
+  // comments at their parse sites above. Folding the `=== null` checks into this same
+  // guard, rather than asserting `weightUnit!`/`status!` below, lets TypeScript itself
+  // narrow both to their non-null type in the `ok: true` branch: the invariant that
+  // "errors empty implies weightUnit and status are set" is now enforced by the
+  // compiler, not merely asserted in a comment next to two `!`s.
+  if (weightUnit === null || status === null || Object.keys(errors).length > 0) {
     return { ok: false, errors, values };
   }
 
@@ -650,16 +723,13 @@ export function parseGearItemForm(form: FormData): GearFormResult {
     ok: true,
     values: {
       name,
-      // Non-null assertions below are safe, not hopeful: every field that can produce
-      // `null` here (quantity, weight, weightUnit, status) also sets an `errors` entry
-      // on that same path, and this branch only runs once `errors` is confirmed empty.
-      quantity: quantity!,
-      weight: weight!,
-      weight_unit: weightUnit!,
+      quantity,
+      weight,
+      weight_unit: weightUnit,
       price,
       currency,
       acquired_on: acquiredOn,
-      status: status!,
+      status,
       url,
       brand,
       category,
@@ -709,15 +779,22 @@ export function gearItemToFormValues(row: GearItemRow): GearFormValues {
 /**
  * The blank state `src/pages/gear/new.astro` renders on a plain GET, before the visitor
  * has typed anything. Not all-empty-strings: `quantity`, `weight`, `weight_unit` and
- * `status` are `not null` columns with a database default (`1`, `0`, `'g'`, `'owned'`),
- * and this form REQUIRES the visitor to supply a real value for each of those four
- * rather than silently writing the column's default on an empty submission — see the
- * module comment's "REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS" section. A blank text
- * input for any of the four would make the very first render of this form already
- * invalid, which is a strange way to greet somebody who has not done anything yet; a
- * pre-filled value matching the column's own default is what `parseGearItemForm` will
- * accept unchanged if the visitor never touches that field at all. Every other field is
- * a nullable column with no default, so `''` — "not provided" — is the honest blank.
+ * `status` are `not null` columns with a database default (`1`, `0`, `'g'`, `'owned'`).
+ * For `weight_unit` that pre-fill is still load-bearing exactly as before — see the
+ * module comment's "REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS" section — because a
+ * `<select>` has no honest blank state of its own, so an empty submission can only mean
+ * a stale or tampered request. `status` is still load-bearing too, but for a DIFFERENT
+ * reason now that PK-63 renders it as a radio group rather than a `<select>`: `'owned'`
+ * here is what makes one radio checked on the very first render — a radio group starts
+ * with none checked unless some option's `value` matches `values.status`, so without
+ * this default the first-ever render of the form would show no status selected at all.
+ * For `quantity` and `weight`, PK-63 has since made a blank submission acceptable in its
+ * own right — see the comments at their parse sites in `parseGearItemForm` — so `'1'`
+ * and `'0'` here are no longer load-bearing in that same way; they stay because showing
+ * the column's own default in the field is still the right thing for a visitor to see
+ * on the very first render, not because clearing the field would now be rejected — it
+ * works too. Every other field is a nullable column with no default, so `''` — "not
+ * provided" — is the honest blank.
  *
  * `acquired_on` IS ONE OF THOSE OTHERS, DELIBERATELY, not a fifth pre-filled field —
  * it is a nullable column with no database default, exactly like `price` and `url`, so

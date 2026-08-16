@@ -9,7 +9,7 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import GearItemForm from '../../components/GearItemForm.astro';
 import { createAuthClient } from '../../lib/auth';
-import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { SIGN_IN_PATH, NEXT_PARAM } from '../../lib/auth-routes';
 import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import { loadGearItem } from '../../lib/gear/query';
 import {
@@ -19,6 +19,12 @@ import {
   type GearFormValues,
   type GearItemRow,
 } from '../../lib/gear/form';
+// PK-63 needs the options query here too, to back the Category input's datalist on the
+// detail page the same way new.astro does.
+import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
+// The delete path is PK-60's, not PK-63's: `softDeleteGearItem`, `makeUndoToken` and the
+// UNDO_* params no longer exist, because a delete is now final and there is no trash to
+// undo it from.
 import { deleteGearItems, updateGearItem } from '../../lib/gear/mutations';
 import {
   BULK_FORM_FIELD,
@@ -26,6 +32,11 @@ import {
   GEAR_DELETE_FAILED_MESSAGE,
   confirmsGearDeletion,
 } from '../../lib/gear/bulk';
+import {
+  gearFormHrefReturningTo,
+  gearReturnPathFromFormOrNull,
+  gearReturnPathOrNull,
+} from '../../lib/gear/return-path';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -56,6 +67,15 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 // did not happen — see that constant's own comment for the case where that is false.
 const GENERIC_WRITE_ERROR = 'Something went wrong updating this item. Please try again.';
 
+// The category suggestions offered under the Category field's <datalist> — see
+// GearItemForm's own comment on that field for why a datalist rather than a <select>.
+// A query error here degrades to an empty suggestion list rather than failing the whole
+// page: a missing suggestion list costs a visitor nothing but the convenience of
+// autocomplete, and refusing to render the edit form over that would turn a minor
+// inconvenience into a hard block on editing an item the visitor already owns.
+const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
+const categories = optionsError ? [] : extractGearOptions(optionRows ?? []).categories;
+
 // This page answers two different POSTs from two different forms — save the edit, or
 // delete the item — told apart by this hidden `intent` field the same way
 // src/lib/gear/bulk.ts's BULK_FORM_FIELD.intent tells the closet list's several bulk
@@ -77,6 +97,17 @@ let formValuesOverride: GearFormValues | null = null;
 let writeError: string | null = null;
 let pendingDelete = false;
 
+// The return-to-caller destination (PK-63) — "saving returns you where you were", and
+// Cancel agrees with it: both this GET render's cancelHref/next and a POSTed edit's
+// validation-failure re-render use the same value. `null` means "nothing usable was
+// carried" — no `?next=` on this GET, or a refused/absent value on a POST — which the
+// successful-edit fork below has to tell apart from a real carried destination; see
+// that fork's own comment. Computed up front from the query string, then overwritten
+// from the form's own carried value once a POST body is available — see
+// gearReturnPathFromFormOrNull's own comment for why the form field takes precedence
+// over the query string that produced this same page.
+let returnPath: string | null = gearReturnPathOrNull(Astro.url.searchParams.get(NEXT_PARAM));
+
 // ---------------------------------------------------------------------------
 // POST: save an edit, or delete (with the same two-step reveal the closet list's own
 // bulk delete uses — see src/pages/gear/index.astro's "Method discipline" comment,
@@ -85,6 +116,7 @@ let pendingDelete = false;
 // ---------------------------------------------------------------------------
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
+  returnPath = gearReturnPathFromFormOrNull(form, Astro.url);
   const intent = form.get('intent');
 
   if (intent === GEAR_ITEM_INTENT.delete) {
@@ -140,6 +172,21 @@ if (Astro.request.method === 'POST') {
         // the right values to show back rather than reloading the pre-edit row.
         formValuesOverride = rawGearFormValues(form);
       } else {
+        // PK-63: "saving returns you where you were" — but only when there IS a
+        // "where you were" to return to. If a valid return target was carried on this
+        // submission (via the hidden `next` field or the query string that rendered the
+        // form), Cancel and Save now agree: both send the visitor back to the same
+        // closet view. If NOT — this page was reached directly, with no `?next=`
+        // anywhere, so `returnPath` is `null` — this keeps today's exact behaviour
+        // instead: redirect to the item's own page with `?updated=1` and show "Saved."
+        // there. That is a deliberate fork, not an oversight: bouncing a visitor who
+        // has nowhere to go back to into the closet list would silently swallow the
+        // "Saved." confirmation this page has always given a visitor who reached it
+        // directly (a bookmark, a shared link, GearNav), trading a real feedback
+        // message for a redirect nobody asked for.
+        if (returnPath !== null) {
+          return Astro.redirect(returnPath, 303);
+        }
         return Astro.redirect(`${gearItemPath(id)}?updated=1`, 303);
       }
     }
@@ -217,8 +264,10 @@ const updated = Astro.url.searchParams.get('updated') === '1';
         values={values}
         errors={formErrors}
         submitLabel="Save changes"
-        cancelHref={GEAR_PATH}
+        cancelHref={returnPath ?? GEAR_PATH}
         intentField={{ name: 'intent', value: GEAR_ITEM_INTENT.edit }}
+        categories={categories}
+        next={returnPath ?? undefined}
       />
     </div>
 
@@ -256,8 +305,20 @@ const updated = Astro.url.searchParams.get('updated') === '1';
               >
                 Delete permanently
               </button>
+              {/* CARRIES `next` BACK TO ITSELF. Backing out of a delete must not cost
+                  the visitor their return target: this link re-enters the same page, and
+                  a bare `gearItemPath(id)` would drop the `?next=` the rest of the page
+                  is careful to preserve. The failure that caused was silent and
+                  outlived the interaction — filter the closet, open an item, click
+                  Delete, change your mind, and from then on Save landed on `?updated=1`
+                  and Cancel on a bare `/gear`, because the return target had been
+                  dropped by a link that has nothing to do with either. */}
               <a
-                href={gearItemPath(id)}
+                href={
+                  returnPath === null
+                    ? gearItemPath(id)
+                    : gearFormHrefReturningTo(gearItemPath(id), returnPath)
+                }
                 class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
               >
                 Cancel

@@ -16,16 +16,17 @@
  *     full-but-filtered. PK-60 deleted the soft delete and the trash page outright, so
  *     there is no longer any such thing as a row that exists but is not in the closet,
  *     and the owner filter alone now answers the question.
- *   - `extractGearOptions` has NO production caller as of PK-62 and is kept, with its
- *     tests, for the item form's category autocomplete (PK-63). That is a forward-looking
- *     bet: if PK-63 changes shape and never wants it, delete this function rather than
- *     leaving it here indefinitely on the strength of this sentence.
+ *   - `extractGearOptions` is called by `src/pages/gear/new.astro` and
+ *     `src/pages/gear/[id].astro`, which build the item form's category `datalist` from
+ *     its `categories` list (PK-63). It was briefly caller-less: PK-62 removed the filter
+ *     checkboxes that used to be its only consumer and kept the function on the bet that
+ *     PK-63 would want it. PK-63 landed and does. Its `brands` list, on the other hand,
+ *     now has no caller at all — the form autocompletes categories only.
  *
- * SINCE ONLY A BOOLEAN IS READ FROM IT TODAY, `loadGearOptions` fetches up to
- * `db-max-rows` rows and two columns to answer a question `.limit(1)` or a `head: true`
- * count would answer. Left as-is deliberately rather than optimised into something PK-63
- * would immediately have to widen again — but if PK-63 does not land, narrowing it is
- * the obvious cleanup.
+ * BOTH HALVES ARE THEREFORE LOAD-BEARING AGAIN, which retires the note that used to sit
+ * here suggesting `loadGearOptions` be narrowed to `.limit(1)` or a `head: true` count.
+ * That was the right cleanup while the closet list read nothing but a row count from it;
+ * three pages now read the rows for real, so narrowing it would break two of them.
  *
  * WHY THIS LIVES IN src/lib/ RATHER THAN IN THE PAGE. Same reasoning as every other
  * module in this directory (see `src/lib/gear/query.ts`'s own module comment):

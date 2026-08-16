@@ -108,6 +108,28 @@ export const UPDATE_PASSWORD_PATH = '/update-password';
  *   - Must contain no `:`. A colon is how a scheme gets introduced (`javascript:`,
  *     `https:`); no legitimate same-origin path needs one, so refusing it outright is
  *     cheaper and safer than trying to parse for just the dangerous schemes.
+ *   - Must contain no C0 control character (U+0000-U+001F) or U+007F. This one is not
+ *     defence in depth; without it the `//` clause above DOES NOT HOLD. The WHATWG URL
+ *     parser REMOVES every tab, line feed and carriage return from a URL before it
+ *     resolves it, so `/⇥/evil.example` — which starts with a single `/`, has no
+ *     backslash and no colon, and is therefore accepted by all four clauses above —
+ *     becomes `//evil.example` in the parser's hands and resolves to
+ *     `https://evil.example/`. Verified against the platform `URL`, not argued:
+ *
+ *         new URL('/\t/evil.example', 'https://packsheet.io').href
+ *           -> 'https://evil.example/'
+ *
+ *     `\n` and `\r` do the same thing. That is a working open redirect out of every
+ *     `?next=` this function guards, so the shape has to be refused before the parser
+ *     ever gets to strip anything.
+ *
+ *     NOTE THE SET IS C0 CONTROLS, NOT `\s`. A literal SPACE is deliberately still
+ *     accepted: the URL parser does not strip interior spaces, so a space cannot
+ *     reconstitute `//`, and `?next=` legitimately carries them — a closet search for
+ *     `Alpha Tent` round-trips through `URLSearchParams` as a decoded space, and
+ *     rejecting it would break the gear closet's return-to-your-view feature for any
+ *     multi-word search. Refuse what the parser deletes, not everything that looks
+ *     like whitespace.
  *
  * Anything that fails any of those — including empty input, a full URL, or nothing at
  * all — falls back to `HOME_PATH` rather than being rejected as an error: this runs
@@ -124,13 +146,19 @@ export const UPDATE_PASSWORD_PATH = '/update-password';
  * signed-in person lands is one edit in one file rather than an edit plus a hunt for
  * every default that had quietly hard-coded the old answer.
  */
+/** C0 controls plus DEL. Declared out here rather than inline so the `no-control-regex`
+ *  suppression sits on the pattern itself: the control characters ARE the point of it. */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
 export function safeNextPath(raw: string | null | undefined): string {
   if (
     typeof raw === 'string' &&
     raw.startsWith('/') &&
     !raw.startsWith('//') &&
     !raw.includes('\\') &&
-    !raw.includes(':')
+    !raw.includes(':') &&
+    !CONTROL_CHARACTERS.test(raw)
   ) {
     return raw;
   }

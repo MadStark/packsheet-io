@@ -16,10 +16,22 @@
 // in src/lib/gear/form.ts, both covered by tests/gear-form.test.ts. This component only
 // arranges markup around them; see that module's own "WHY THIS LIVES IN src/lib/ RATHER
 // THAN IN THE PAGE" for why the validation itself could not live here instead.
+// `acquiredOnFutureCutoff` is PK-61's; `GEAR_STATUS_MEANINGS` is PK-63's, for the title
+// tooltip on each radio option.
 import { GEAR_FORM_FIELD, acquiredOnFutureCutoff, type GearFormValues } from '../lib/gear/form';
-import { GEAR_STATUSES } from '../lib/gear/fields';
+import { GEAR_STATUS_MEANINGS, GEAR_STATUSES } from '../lib/gear/fields';
 import { formatGearStatus } from '../lib/gear/format';
 import { WEIGHT_UNITS } from '../lib/units';
+import GearStatusIcon from './GearStatusIcon.astro';
+// `NEXT_PARAM` only — safe not because src/lib/auth-routes.ts is dependency-free (it is
+// not: it imports `./routes`, its own header comment's "the one import this file has"),
+// but because it sits OUTSIDE `src/lib/auth/`, the only directory Invariant A in
+// `tests/anonymous-read-path.test.ts` guards edges into. That is what "one door away
+// from the choke point" (auth-routes.ts's own phrase) means — a module that can import
+// freely because it never crosses the guarded boundary, not one with no imports of its
+// own. Nothing here touches an auth SDK or a Supabase client; this form does not become
+// an AUTH_CONSUMERS entry by reading a path.
+import { NEXT_PARAM } from '../lib/auth-routes';
 
 interface Props {
   values: GearFormValues;
@@ -31,9 +43,19 @@ interface Props {
    *  next to its own separate delete form. Omitted on `new.astro`, whose page has only
    *  one form and so nothing to disambiguate. */
   intentField?: { readonly name: string; readonly value: string };
+  /** The category names already in use, offered as `<datalist>` suggestions under the
+   *  Category field (PK-63) — see that field's own comment below for why a `datalist`
+   *  rather than a `<select>`. The page that renders this form is responsible for
+   *  querying which categories exist; this component only arranges them into options. */
+  categories: readonly string[];
+  /** The post-submit return path, rendered as a hidden field when the caller supplies
+   *  one — see the field itself, further down, for why this travels through the form
+   *  rather than the page reading it straight off the URL. This component only accepts
+   *  and renders it; both new.astro and [id].astro pass it. */
+  next?: string;
 }
 
-const { values, errors, submitLabel, cancelHref, intentField } = Astro.props;
+const { values, errors, submitLabel, cancelHref, intentField, categories, next } = Astro.props;
 
 const errorEntries = Object.entries(errors);
 
@@ -43,6 +65,11 @@ const SELECT_CLASS = INPUT_CLASS;
 const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-24`;
 const LABEL_CLASS = 'text-ink-2 block text-sm';
 const ERROR_CLASS = 'text-rust mt-1 text-sm';
+/** One option in the status fieldset (PK-63) — a bordered, clickable card around the
+ *  radio input and its label, echoing INPUT_CLASS's own border/radius vocabulary rather
+ *  than inventing a second visual language just for this one field. */
+const STATUS_OPTION_CLASS =
+  'border-hairline has-[:checked]:border-blue-deep has-[:checked]:bg-blue-tint flex cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border px-3 py-2 text-sm';
 
 function describedBy(field: string): string | undefined {
   return errors[field] ? `${field}-error` : undefined;
@@ -66,6 +93,17 @@ const acquiredOnMax = acquiredOnFutureCutoff();
 
 <form method="POST" class="space-y-5">
   {intentField && <input type="hidden" name={intentField.name} value={intentField.value} />}
+  {
+    /* The same mechanism sign-in.astro and sign-up.astro use for their own `next`
+       fields (see NEXT_PARAM's comment in src/lib/auth-routes.ts): a
+       `<form method="POST">` with no `action` posts to the current URL, so a `next`
+       carried only in the query string would already survive an ordinary submit, but
+       putting it in the form as well means it also survives an `action` being added to
+       this form later for any reason — the exact silent-drop failure mode
+       `nextFromForm`'s own comment describes for those two pages. This component only
+       renders whatever it is given; new.astro and [id].astro decide where it points. */
+  }
+  {next !== undefined && <input type="hidden" name={NEXT_PARAM} value={next} />}
 
   {
     errorEntries.length > 0 && (
@@ -84,16 +122,33 @@ const acquiredOnMax = acquiredOnFutureCutoff();
   }
 
   <div>
-    <label for="name" class={LABEL_CLASS}> Name </label>
+    <label for="name" class={LABEL_CLASS}>
+      Name <span aria-hidden="true" class="text-rust">*</span>
+    </label>
     <input
       id="name"
       name={GEAR_FORM_FIELD.name}
       type="text"
       value={values.name}
+      aria-required="true"
       aria-describedby={describedBy('name')}
       aria-invalid={invalid('name')}
       class={INPUT_CLASS}
     />
+    {
+      /* NOT the HTML `required` attribute, deliberately. `required` triggers native
+         constraint validation, which blocks the form submit entirely in-browser the
+         moment Name is blank — the visitor never leaves the page, `parseGearItemForm`
+         never runs, and this ticket's own acceptance criterion ("a blank Name re-renders
+         the form with the field outlined in --rust") could not be demonstrated in a
+         browser, because the browser would refuse the submit first — constraint
+         validation is bypassed by `novalidate` and by any non-browser client, so the
+         server path this comment describes always runs regardless. `aria-required`
+         communicates the same thing to assistive tech without touching submission
+         behaviour, and the red asterisk communicates it visually; the actual
+         enforcement — and the --rust border on `errors.name` below — stays entirely
+         server-side in parseGearItemForm, same as every other field on this form. */
+    }
     {
       errors.name && (
         <p id="name-error" class={ERROR_CLASS}>
@@ -116,13 +171,26 @@ const acquiredOnMax = acquiredOnFutureCutoff();
     </div>
     <div>
       <label for="category" class={LABEL_CLASS}> Category </label>
+      {
+        /* `list`/`<datalist>`, not a `<select>` (PK-63). A datalist only SUGGESTS —
+           the input stays free text, so typing a brand-new category a visitor's closet
+           has never seen works exactly as it did before this field grew suggestions, and
+           `parseGearItemForm` goes on receiving a bare string it validates the same way
+           regardless of whether it came from a click or was typed by hand. A `<select>`
+           would have to either invent an "Other" escape hatch or reject any category not
+           already in `categories`, and this ticket asks for neither. */
+      }
       <input
         id="category"
         name={GEAR_FORM_FIELD.category}
         type="text"
+        list="category-options"
         value={values.category}
         class={INPUT_CLASS}
       />
+      <datalist id="category-options">
+        {categories.map((category) => <option value={category} />)}
+      </datalist>
     </div>
   </div>
 
@@ -294,22 +362,58 @@ const acquiredOnMax = acquiredOnFutureCutoff();
       }
     </div>
     <div>
-      <label for="status" class={LABEL_CLASS}> Status </label>
-      <select
-        id="status"
-        name={GEAR_FORM_FIELD.status}
-        aria-describedby={describedBy('status')}
-        aria-invalid={invalid('status')}
-        class={SELECT_CLASS}
-      >
-        {
-          GEAR_STATUSES.map((status) => (
-            <option value={status} selected={status === values.status}>
-              {formatGearStatus(status)}
-            </option>
-          ))
-        }
-      </select>
+      {
+        /* A radio group, not a `<select>` (PK-63). This makes "exactly one status" a
+           STRUCTURAL property of the markup — the browser itself refuses to let two
+           radios in the same `name` group be checked at once — rather than one this
+           component or a script would have to enforce. It works identically with
+           JavaScript disabled, same as every other field on this form: the group posts
+           whichever `value` was checked, or nothing at all if none was, and
+           `parseGearItemForm` is exactly as able to make sense of either outcome as it
+           was reading a `<select>`'s single value. */
+      }
+      {
+        /* aria-describedby AND aria-invalid GO ON THE RADIOS, NOT THE FIELDSET. A
+           `<fieldset>` maps to role `group`, which does not support `aria-invalid` — put
+           it there and assistive technology ignores it, so the field reads as valid while
+           an error is showing. `aria-describedby` on the fieldset is likewise unreliable
+           here: a screen-reader user arrowing between radios is inside the group, not on
+           it, so the description is not necessarily re-announced. Both attributes are
+           therefore repeated on every `<input type="radio">`, which is where a visitor's
+           focus actually lands. The fieldset keeps the `<legend>`, which is what it is
+           genuinely for. */
+      }
+      <fieldset>
+        <legend class={LABEL_CLASS}>Status</legend>
+        <div class="mt-1 grid gap-2">
+          {
+            GEAR_STATUSES.map((status) => (
+              <label class={STATUS_OPTION_CLASS} title={GEAR_STATUS_MEANINGS[status]}>
+                <input
+                  type="radio"
+                  name={GEAR_FORM_FIELD.status}
+                  value={status}
+                  checked={status === values.status}
+                  aria-describedby={describedBy('status')}
+                  aria-invalid={invalid('status')}
+                />
+                <GearStatusIcon status={status} decorative />
+                {formatGearStatus(status)}
+              </label>
+            ))
+          }
+        </div>
+      </fieldset>
+      {
+        /* If `values.status` matches none of GEAR_STATUSES — a tampered or otherwise
+           stale submission `parseGearItemForm` has already rejected via `errors.status`
+           — NO radio ends up checked here. That is correct, not a bug to paper over: this
+           component makes no decisions (see the header comment), so it has no business
+           inventing a silent fallback to `owned` for a value the parser itself refused.
+           The visitor sees the error below and an unchecked group, which is an honest
+           reflection of "you did not tell us a valid status", not a wrong answer picked
+           on their behalf. */
+      }
       {
         errors.status && (
           <p id="status-error" class={ERROR_CLASS}>

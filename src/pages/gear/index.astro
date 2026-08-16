@@ -42,9 +42,11 @@ import {
 // removed the Category and Brand filter checkboxes this page built from it, but the
 // QUERY still runs, because `closetIsEmpty` below is derived from its row count and
 // nothing else on this page can tell "your closet is empty" from "these filters matched
-// nothing". `extractGearOptions` itself stays in src/lib/gear/options.ts, tested and
-// unused for now, for the item form's category autocomplete (PK-63) — deleting it here
-// would only mean writing it again there.
+// nothing". `extractGearOptions` itself lives in src/lib/gear/options.ts and IS called —
+// by new.astro and [id].astro, for the item form's category autocomplete (PK-63). It was
+// briefly caller-less between PK-62 and PK-63 landing, which is why PK-62 kept it rather
+// than deleting it; that bet has now paid off and this comment no longer describes an
+// open question.
 import { loadGearOptions } from '../../lib/gear/options';
 // `deleteGearItems` rather than the bulkSoftDelete/undoBulkDelete pair: PK-60 dropped the
 // soft delete, the trash page and the undo banner, so a delete is now final.
@@ -53,7 +55,15 @@ import { bulkSetCategory, bulkSetStatus, deleteGearItems } from '../../lib/gear/
 // `created_at` and onto the visitor's own `acquired_on` date. `WEIGHT_UNITS` came in on
 // the same import block on staging and is deliberately NOT carried across: PK-62 removed
 // the weight-range fieldset that was its only consumer on this page.
-import { formatGearAcquiredOn, formatGearPrice, formatGearStatus } from '../../lib/gear/format';
+import {
+  formatGearAcquiredOn,
+  formatGearPrice,
+  formatGearStatus,
+  gearStatusMarker,
+} from '../../lib/gear/format';
+// PK-63: every link out of this list carries the current view as a return target, so
+// saving the item form lands the visitor back on the same filters, sort and page.
+import { gearFormHrefReturningTo } from '../../lib/gear/return-path';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -272,6 +282,19 @@ function sortIndicator(key: GearSortKey): string {
 function pageHref(target: number): string {
   return `${GEAR_PATH}?${gearQueryToSearchParams({ ...query, page: target }).toString()}`;
 }
+
+/**
+ * PK-63: "saving returns you where you were" starts here — every route INTO the gear
+ * item form (Add item, the empty-state's own copy of it, and each row's item-name
+ * link) has to carry the current view so new.astro/[id].astro can hand it back to
+ * gearReturnPath (src/lib/gear/return-path.ts) on Cancel and on a successful save. The
+ * current view is exactly `${Astro.url.pathname}${Astro.url.search}` — this page's own
+ * URL, filters/sort/page and all — passed to gearFormHrefReturningTo at each of the
+ * three call sites below so they cannot drift into three slightly different ideas of
+ * "here". See that function's own comment (src/lib/gear/return-path.ts) for why it
+ * lives there rather than as a page-local helper.
+ */
+const currentView = `${Astro.url.pathname}${Astro.url.search}`;
 ---
 
 <Layout
@@ -294,7 +317,7 @@ function pageHref(target: number): string {
            rather than inventing a second vocabulary for "add an item". */
       }
       <a
-        href={GEAR_NEW_PATH}
+        href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
         class="border-blue-deep text-blue-deep hover:bg-blue-tint shrink-0 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
       >
         Add item
@@ -384,7 +407,7 @@ function pageHref(target: number): string {
         <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
           <p class="text-ink-2">Your closet is empty.</p>
           <a
-            href={GEAR_NEW_PATH}
+            href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
             class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
           >
             Add your first item
@@ -593,30 +616,39 @@ function pageHref(target: number): string {
                           </td>
                           <td class="px-3 py-2">
                             {/* THE RAGGED LEFT EDGE HERE IS DELIBERATE. `gap-1.5`
-                                applies BETWEEN children, so an owned row — which
-                                renders no icon at all — has its name start flush at the
-                                cell's padding while wishlist and retired rows are
-                                indented by the glyph. PK-62 accepts that and explicitly
-                                forbids evening it up with a spacer or a placeholder
-                                glyph; see GearStatusIcon.astro for why owned is the
-                                unmarked default. */}
+                                applies BETWEEN children, so an owned row — which renders
+                                no icon at all — has its name start flush at the cell's
+                                padding while wishlist and retired rows are indented by the
+                                glyph. PK-62 accepts that and explicitly forbids evening it
+                                up with a spacer or a placeholder glyph.
+
+                                THE `gearStatusMarker` GUARD IS WHAT KEEPS OWNED UNMARKED
+                                HERE, and it has to live at this call site rather than in
+                                the component. GearStatusIcon draws all three statuses,
+                                because PK-63's radio group presents them as equal choices
+                                and an icon-less "Owned" option there would read as a bug.
+                                This list wants the opposite: owned is its unmarked default.
+                                Policy per caller, drawing in the component — see that
+                                file's own comment. */}
                             <span class="flex items-center gap-1.5">
-                              <GearStatusIcon status={item.status} />
+                              {gearStatusMarker(item.status) && (
+                                <GearStatusIcon status={item.status} />
+                              )}
                               {/* THE ONLY PLACE A MALFORMED STATUS SURFACES ANYWHERE.
                                   Removing the Status column took away the one cell that
                                   rendered `item.status` as text, and `gearStatusMarker`
-                                  draws nothing for a value it does not recognise —
-                                  identical to `owned`. The trash page used to render a
-                                  status verbatim and was the fallback this once pointed
-                                  at; PK-60 deleted it, so this span is now the whole of
-                                  it. sr-only costs no layout, so the deliberately ragged
-                                  left edge is untouched; nothing renders here at all for
-                                  the three real statuses. */}
+                                  returns null for a value it does not recognise — so such
+                                  a row draws nothing, identical to `owned`. The trash page
+                                  used to render a status verbatim and was the fallback
+                                  this once pointed at; PK-60 deleted it, so this span is
+                                  now the whole of it. sr-only costs no layout, so the
+                                  ragged left edge is untouched; nothing renders here at
+                                  all for the three real statuses. */}
                               {!isGearStatus(item.status) && (
                                 <span class="sr-only">{formatGearStatus(item.status)}</span>
                               )}
                               <a
-                                href={gearItemPath(item.id)}
+                                href={gearFormHrefReturningTo(gearItemPath(item.id), currentView)}
                                 class="text-blue-deep hover:text-blue-ink underline"
                               >
                                 {item.name}

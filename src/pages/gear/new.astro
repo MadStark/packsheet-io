@@ -9,14 +9,16 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import GearItemForm from '../../components/GearItemForm.astro';
 import { createAuthClient } from '../../lib/auth';
-import { SIGN_IN_PATH } from '../../lib/auth-routes';
-import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
+import { SIGN_IN_PATH, NEXT_PARAM } from '../../lib/auth-routes';
 import {
   EMPTY_GEAR_FORM_VALUES,
   parseGearItemForm,
   rawGearFormValues,
   type GearFormValues,
 } from '../../lib/gear/form';
+import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
+import { extractGearOptions, loadGearOptions } from '../../lib/gear/options';
+import { gearReturnPathFromFormOrNull, gearReturnPathOrNull } from '../../lib/gear/return-path';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -38,9 +40,33 @@ const client = createAuthClient(Astro.cookies, Astro.request);
 // and src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule.
 const GENERIC_WRITE_ERROR = 'Something went wrong adding this item. Please try again.';
 
+// The category suggestions offered under the Category field's <datalist> — see
+// GearItemForm's own comment on that field for why a datalist rather than a <select>.
+// A query error here degrades to an empty suggestion list rather than failing the whole
+// page: a missing suggestion list costs a visitor nothing but the convenience of
+// autocomplete, and refusing to render the add-item form over that would turn a minor
+// inconvenience into a hard block on the one thing this page exists for.
+const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
+const categories = optionsError ? [] : extractGearOptions(optionRows ?? []).categories;
+
 let values: GearFormValues = EMPTY_GEAR_FORM_VALUES;
 let errors: Readonly<Record<string, string>> = {};
 let writeError: string | null = null;
+
+// The return-to-caller destination (PK-63) — "saving returns you where you were": the
+// same filtered/sorted/paged closet view Cancel would also send the visitor back to.
+// `null` means "nothing usable was carried" — no `?next=` on this GET, or a refused/
+// absent value on a POST — so the hidden `next` field this component renders (see
+// GearItemForm's own comment on it) never carries a value the visitor did not actually
+// supply. `GEAR_PATH` is substituted only where a concrete destination is required: the
+// redirect on a successful insert, and cancelHref/next below. See
+// src/lib/gear/return-path.ts for why GEAR_PATH is the right fallback here rather than
+// reusing safeNextPath's own HOME_PATH default. Computed up front from the query string
+// so the GET render has a value even before any POST is seen; the POST branch
+// overwrites it with the form's own carried value the moment the form is available,
+// since a hidden field can disagree with the query string that produced this same page
+// (see gearReturnPathFromFormOrNull's own comment on precedence).
+let returnPath: string | null = gearReturnPathOrNull(Astro.url.searchParams.get(NEXT_PARAM));
 
 // ---------------------------------------------------------------------------
 // POST: create the item.
@@ -51,6 +77,7 @@ let writeError: string | null = null;
 // ---------------------------------------------------------------------------
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
+  returnPath = gearReturnPathFromFormOrNull(form, Astro.url);
   const result = parseGearItemForm(form);
 
   if (!result.ok) {
@@ -77,6 +104,31 @@ if (Astro.request.method === 'POST') {
       // a value reconstructed from the already-reformatted GearItemInput.
       values = rawGearFormValues(form);
     } else {
+      // PK-63: "saving returns you where you were" — but only when there IS a "where
+      // you were", exactly the same fork [id].astro makes on its own successful edit,
+      // and for the same reason. Read that page's comment too; the hazard is shared.
+      //
+      // WHEN A RETURN TARGET WAS CARRIED, honour it: that is the ticket's requirement,
+      // and the visitor asked to go back to their filtered view.
+      //
+      // WHEN NONE WAS — this page was reached directly, with no `?next=` anywhere —
+      // land on the new item's own page, which is what this page did before PK-63 and
+      // is the ONLY confirmation a create has ever given. Redirecting to a bare
+      // GEAR_PATH here would swallow it: the closet list renders no success banner, so
+      // an unconditional redirect leaves a visitor who has just saved staring at a list
+      // with no evidence anything happened. `.select('id').single()` is what makes that
+      // possible, and is also what makes `data === null` a meaningful check that the
+      // insert produced a row.
+      //
+      // WHAT THIS STILL DOES NOT FIX, stated rather than papered over: when a return
+      // target IS carried, the visitor lands back on a view the new item may not appear
+      // in — saved as `owned` while the view filters `wishlist`, or on page 3, or under
+      // a search the new name does not match. The honest fix is a success banner on the
+      // closet list, which is new UI this ticket did not ask for; the fork below is the
+      // half that costs nothing and restores the confirmation that used to exist.
+      if (returnPath !== null) {
+        return Astro.redirect(returnPath, 303);
+      }
       return Astro.redirect(gearItemPath(data.id), 303);
     }
   }
@@ -103,7 +155,14 @@ if (Astro.request.method === 'POST') {
     }
 
     <div class="mt-8">
-      <GearItemForm values={values} errors={errors} submitLabel="Add item" cancelHref={GEAR_PATH} />
+      <GearItemForm
+        values={values}
+        errors={errors}
+        submitLabel="Add item"
+        cancelHref={returnPath ?? GEAR_PATH}
+        categories={categories}
+        next={returnPath ?? undefined}
+      />
     </div>
   </main>
 </Layout>

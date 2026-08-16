@@ -78,6 +78,35 @@ describe('safeNextPath', () => {
     // is also `javascript:alert(1)` to anything that resolves the string as a URL rather
     // than as a path, and a redirect target is resolved, not opened as a file.
     ['a path carrying a javascript: scheme', '/javascript:alert(1)'],
+
+    // ---------------------------------------------------------------------------
+    // ONLY the no-control-character rule refuses these, and without it the `//` rule
+    // above DOES NOT HOLD.
+    // ---------------------------------------------------------------------------
+    //
+    // These are the cases this table was missing, and their absence was a working open
+    // redirect rather than a gap in coverage. Every one of them starts with a single
+    // `/`, is not `//`, has no backslash and no colon — so all four original clauses
+    // ACCEPT them and `safeNextPath` echoed them back verbatim. The WHATWG URL parser
+    // then REMOVES tab, line feed and carriage return from a URL before resolving it,
+    // which puts the two slashes back together:
+    //
+    //     new URL('/\t/evil.example', 'https://packsheet.io').href
+    //       -> 'https://evil.example/'
+    //
+    // Verified against the platform `URL`, not reasoned about. A test that only listed
+    // `//evil.com` proved the clause against the one spelling an attacker would not
+    // bother using — exactly the trap this file's own header warns about.
+    ['a tab between the slashes, which the URL parser strips back into //', '/\t/evil.example'],
+    ['a line feed doing the same', '/\n/evil.example'],
+    ['a carriage return doing the same', '/\r/evil.example'],
+    // A CRLF does not even reach the browser: `Astro.redirect` builds a `Response`, and
+    // `Headers` refuses a `Location` containing one, so this used to THROW — after the
+    // insert or update had already committed. The visitor saw a 500 for a save that had
+    // in fact succeeded, and resubmitting duplicated the row.
+    ['a CRLF that would throw when set as a Location header', '/gear\r\nX-Injected: 1'],
+    ['a NUL byte', '/gear\u0000x'],
+    ['a DEL byte', '/gear\u007fx'],
   ];
 
   it.each(accepted)('accepts %s (%s) unchanged', (_label, input) => {
