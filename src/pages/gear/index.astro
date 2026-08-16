@@ -54,7 +54,15 @@ import {
   bulkSoftDelete,
   undoBulkDelete,
 } from '../../lib/gear/mutations';
-import { formatGearPrice, formatGearStatus } from '../../lib/gear/format';
+// `formatGearAcquiredOn` arrives with PK-61, which moved the "Added" column off
+// `created_at` and onto the visitor's own `acquired_on` date. `WEIGHT_UNITS` came in on
+// the same import block on staging and is deliberately NOT carried across: PK-62 removed
+// the weight-range fieldset that was its only consumer on this page.
+import {
+  formatGearAcquiredOn,
+  formatGearPrice,
+  formatGearStatus,
+} from '../../lib/gear/format';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading
 // it here rather than calling getUser() again is the whole point of doing it once in
@@ -646,7 +654,9 @@ function pageHref(target: number): string {
                           <td class="numeric px-3 py-2">
                             {formatGearPrice(item.price, item.currency)}
                           </td>
-                          <td class="numeric px-3 py-2">{item.created_at.slice(0, 10)}</td>
+                          <td class="numeric px-3 py-2">
+                            {formatGearAcquiredOn(item.acquired_on)}
+                          </td>
                           <td class="px-3 py-2">
                             {item.photo_path ? (
                               <span

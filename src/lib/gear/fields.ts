@@ -125,25 +125,41 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
  * must never invent one. This is left as a known limitation for the UI to surface later
  * (e.g. grouping or flagging mixed-currency results) rather than solved here.
  *
- * `brand` (PK-62) sorts by the raw column, which is the whole mapping — but it is worth
- * writing down what a nullable sort key does, because `brand` is the first one whose
- * nulls a visitor will actually notice (`price` has been nullable and sortable since
- * PK-4; a closet full of unpriced gear simply made that less visible than a closet full
- * of unbranded gear does). Postgres orders nulls LAST ascending and
- * FIRST descending by default, and neither PostgREST nor this module overrides that, so
- * items with no brand cluster at the bottom going up and at the top coming down. That is
- * left as-is deliberately: `nullslast` in both directions would make descending no longer
- * the exact reverse of ascending, which is a stranger promise for a column header whose
- * two clicks a visitor reasonably expects to mirror each other. `applyGearQuery`'s
- * secondary `.order('id')` keeps the run of null-brand rows in a stable, repeatable order
- * across pages rather than letting Postgres return them differently per request.
+ * `brand` (PK-62) sorts by the raw column, which is the whole mapping. It is nullable,
+ * and undated/unbranded placement is NOT this module's decision: `applyGearQuery` passes
+ * `nullsFirst: false` on every sort key (PK-61), so null brands are pinned LAST in BOTH
+ * directions — not at the top of descending, which is where Postgres's own asymmetric
+ * default (NULLS LAST ascending, NULLS FIRST descending) would otherwise put them.
+ *
+ * A NOTE FOR ANYONE READING THE PK-62 HISTORY. An earlier version of this paragraph
+ * argued the opposite — that the Postgres default was deliberately left alone so that
+ * descending stayed the exact reverse of ascending. That was true when PK-62 was written
+ * and stopped being true when PK-61 landed `nullsFirst: false` first; the two branches
+ * were developed in parallel and merged in that order. The pinning is the better
+ * behaviour and it is what ships: "no brand" reads as "at the end" whichever way the
+ * visitor sorted, consistent with "no date" and "no price". Descending is therefore the
+ * reverse of ascending only among the rows that HAVE a brand, which is the trade PK-61
+ * made knowingly for `acquired_on` and which applies here for exactly the same reason.
+ *
+ * `added` sorts by `acquired_on` (PK-61), NOT `created_at` — that swap is the entire
+ * point of PK-61. `created_at` is a database audit timestamp: when the row was
+ * inserted, which for an item logged weeks after it was actually bought answers a
+ * question nobody asked ("when did you get around to typing this in") rather than the
+ * one the "Added" column exists to answer ("when did you get this item"). `acquired_on`
+ * is the visitor's own claim about that, so it is what "Added" now means.
+ *
+ * `acquired_on` IS NULLABLE, WITH NO DATABASE DEFAULT — unlike `created_at`, which is
+ * always present. A row with no `acquired_on` cannot simply fall wherever Postgres's
+ * own default null ordering would put it; it has to be placed deliberately. See the
+ * `.order(column, { ascending, nullsFirst: false })` call in `query.ts`'s
+ * `applyGearQuery`, which pins undated rows LAST regardless of sort direction.
  */
 export const GEAR_SORT_COLUMNS: Record<GearSortKey, GearItemColumn> = {
   name: 'name',
   brand: 'brand',
   weight: 'weight_grams',
   price: 'price',
-  added: 'created_at',
+  added: 'acquired_on',
 };
 
 /**
