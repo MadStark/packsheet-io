@@ -21,7 +21,7 @@
  */
 
 import { formatMoney, fromDecimal, isCurrencyCode } from '../money';
-import { GEAR_STATUS_LABELS, isGearStatus } from './fields';
+import { GEAR_STATUS_LABELS, isGearStatus, type GearStatus } from './fields';
 
 /** Shown wherever a closet-list cell has nothing to render: a row with no price at all
  *  or with a price this module refuses to render (see `formatGearPrice` for both), and
@@ -83,6 +83,51 @@ export function formatGearPrice(price: number | null, currency: string | null): 
  */
 export function formatGearStatus(status: string): string {
   return isGearStatus(status) ? GEAR_STATUS_LABELS[status] : status;
+}
+
+/** The glyphs `GearStatusIcon.astro` can draw. `null` is a real answer, not a failure:
+ *  it means "this status is drawn by drawing nothing". */
+export type GearStatusMarker = 'wishlist' | 'retired';
+
+/**
+ * WHICH STATUSES GET A GLYPH, as an exhaustive map rather than a pair of `===` checks.
+ *
+ * `Record<GearStatus, ...>` is the enforcement: add a fourth value to `GEAR_STATUSES`
+ * and this stops compiling until somebody decides whether it has an icon. The two
+ * equality checks this replaced were in `GearStatusIcon.astro`, where a fourth status
+ * would simply have rendered nothing — silently, with no compile error, and looking
+ * exactly like `owned`. Every other part of the status vocabulary (`GEAR_STATUS_LABELS`,
+ * `GEAR_SORT_COLUMNS`) is already total in the same way; this was the one gap.
+ */
+const GEAR_STATUS_MARKERS: Record<GearStatus, GearStatusMarker | null> = {
+  // The unmarked default. PK-62's whole argument for dropping the Status column is that
+  // marking the overwhelmingly common case says nothing — see GearStatusIcon.astro for
+  // why the ragged left edge this produces is accepted rather than padded away.
+  owned: null,
+  wishlist: 'wishlist',
+  retired: 'retired',
+};
+
+/**
+ * The glyph (if any) for a `gear_items` row's status. Takes the widened `string` the
+ * database client hands back, for exactly the reason `formatGearStatus` above does:
+ * `status` is typed `string` on the generated row type and the CHECK constraint backing
+ * it is not proven to still hold by the time a row is read back.
+ *
+ * AN UNRECOGNISED VALUE DRAWS NOTHING, which is deliberately the SAME answer as `owned`
+ * — there is no honest glyph for a value this product has never heard of, and inventing
+ * a defect badge would put one on a row whose only fault is having been written straight
+ * against PostgREST. That does mean the two are visually indistinguishable, so the
+ * closet list pairs this with a screen-reader-only rendering of the raw value for
+ * anything `isGearStatus` rejects (`src/pages/gear/index.astro`) — and that pairing is
+ * now the ONLY place such a value surfaces at all. When PK-62 removed the Status column
+ * there was still one other per-row `formatGearStatus` call, on the trash page; PK-60
+ * then deleted that page along with the soft delete, so nothing else renders a stored
+ * status as text. Remove the sr-only span and a malformed status becomes invisible
+ * everywhere, not merely everywhere obvious.
+ */
+export function gearStatusMarker(status: string): GearStatusMarker | null {
+  return isGearStatus(status) ? GEAR_STATUS_MARKERS[status] : null;
 }
 
 /**

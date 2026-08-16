@@ -86,9 +86,17 @@ export interface GearQuery {
   /** Upper bound on `weight_grams`, same conversion. `null` means "no upper bound". */
   maxGrams: number | null;
   /** The unit `wmin`/`wmax` were entered in — kept (rather than discarded once converted
-   *  to grams) purely so a form re-rendering this query can show the visitor back what
-   *  they actually typed, in the unit they typed it in, rather than a grams figure they
-   *  never entered. */
+   *  to grams) so that a round trip through `gearQueryToSearchParams` gives back the
+   *  figure the visitor actually typed, in the unit they typed it in, rather than a grams
+   *  figure they never entered.
+   *
+   *  PK-62 REMOVED THE FORM THIS WAS WRITTEN FOR. The weight-range inputs and the unit
+   *  picker are gone from `src/pages/gear/index.astro`, so nothing re-renders these
+   *  values to a visitor today; what still depends on the round trip is every link that
+   *  rebuilds the current query — sort headers, the pager, and the hidden inputs the
+   *  filter form re-emits (see `unsurfacedFilterParams`). Dropping the unit would silently
+   *  change a hand-edited or bookmarked `?wmin=2&wunit=lb` into a 2-GRAM bound the first
+   *  time the visitor clicked a column header. */
   weightUnit: WeightUnit;
   sort: GearSortKey;
   direction: 'asc' | 'desc';
@@ -275,10 +283,12 @@ export function gearQueryToSearchParams(query: GearQuery): URLSearchParams {
   for (const status of query.statuses) params.append('status', status);
   for (const brand of query.brands) params.append('brand', brand);
 
-  // wunit is emitted whenever it is non-default, even if both bounds are null — a
-  // visitor who picked "lb" in the form but has not yet typed a number still has that
-  // choice as part of their query state, and dropping it here would silently reset
-  // their unit picker to grams the next time this URL was parsed.
+  // wunit is emitted whenever it is non-default, even if both bounds are null. The unit
+  // picker this originally protected was removed by PK-62, but the emission still has to
+  // be unconditional for the round-trip property to hold: `parseGearQuery` reads `wunit`
+  // whether or not a bound is present, so omitting it here would make
+  // `parse(serialize(q))` differ from `q` for any query carrying a non-gram unit and no
+  // bound — exactly the invariant tests/gear-query.test.ts property-tests.
   if (query.weightUnit !== 'g') params.set('wunit', query.weightUnit);
   if (query.minGrams !== null)
     params.set('wmin', String(fromGrams(query.minGrams, query.weightUnit)));
@@ -318,6 +328,63 @@ export function sortLinkSearchParams(query: GearQuery, key: GearSortKey): URLSea
   const direction: 'asc' | 'desc' =
     query.sort === key && query.direction === 'asc' ? 'desc' : 'asc';
   return gearQueryToSearchParams({ ...query, sort: key, direction, page: 1 });
+}
+
+// ---------------------------------------------------------------------------
+// Unsurfaced filters — the params PK-62 left honoured but stopped rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * The `GearQuery` params that this module still parses and `applyGearFilters` still
+ * applies, but which the closet list no longer renders any control for: `category`,
+ * `brand` and the weight range (`wmin`/`wmax`/`wunit`).
+ *
+ * WHY THESE EXIST AT ALL AFTER PK-62. That ticket removed the Category, Brand and
+ * Weight-range fieldsets from the UI. It deliberately did NOT remove them from the query
+ * layer: they are tested, working, owner-scoped filtering that a later ticket may want to
+ * surface again, and `/gear?category=Shelter` links were shipped to staging by PK-4, so
+ * bookmarked and shared URLs carrying them already exist in the wild.
+ *
+ * WHAT THAT LEFT BROKEN, AND WHAT THESE TWO FUNCTIONS FIX. Removing the controls without
+ * removing the behaviour gave the page three different answers to the same question.
+ * Sort headers (`sortLinkSearchParams`, above) and the pager both round-trip the whole
+ * query, so they PRESERVED these params; the filter form carried only `q`/`status`/
+ * `sort`/`dir`, so submitting a search silently DROPPED them. A visitor arriving on a
+ * bookmarked `?category=Shelter` therefore saw a closet narrowed for no stated reason,
+ * kept that invisible filter while sorting and paging, and lost it the moment they typed
+ * in the search box — three behaviours, none of them disclosed.
+ *
+ * `unsurfacedFilterParams` is what the form re-emits as hidden inputs so it stops being
+ * the odd one out, and `hasUnsurfacedFilters` is what the page uses to TELL the visitor
+ * the closet is filtered and offer them a way out. Derived from
+ * `gearQueryToSearchParams` by subtraction rather than by listing the five names, so a
+ * param added to `GearQuery` later is carried automatically instead of being silently
+ * dropped by a list nobody remembered to update.
+ */
+export function unsurfacedFilterParams(query: GearQuery): URLSearchParams {
+  const params = gearQueryToSearchParams(query);
+  // Everything the closet list DOES render a control for, plus `page`, which the filter
+  // form deliberately never carries (a new filter set changes what "page 3" means).
+  for (const surfaced of ['q', 'status', 'sort', 'dir', 'page']) params.delete(surfaced);
+  return params;
+}
+
+/**
+ * Whether any unsurfaced filter is actually NARROWING the closet — which is not the same
+ * question as whether `unsurfacedFilterParams` is non-empty. `wunit` alone is a unit
+ * preference with no bound attached (`gearQueryToSearchParams` emits it whenever it is
+ * non-default, precisely so a visitor's choice of `lb` survives a round trip), and it
+ * filters nothing. Telling somebody their closet is filtered because a stale `?wunit=lb`
+ * is sitting in the URL would be a false alarm, and false alarms are how a notice like
+ * this one gets ignored when it matters.
+ */
+export function hasUnsurfacedFilters(query: GearQuery): boolean {
+  return (
+    query.categories.length > 0 ||
+    query.brands.length > 0 ||
+    query.minGrams !== null ||
+    query.maxGrams !== null
+  );
 }
 
 // ---------------------------------------------------------------------------

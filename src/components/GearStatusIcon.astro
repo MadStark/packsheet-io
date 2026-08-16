@@ -1,0 +1,105 @@
+---
+// The closet's status marker (PK-62): the icon that replaced the Status *column* on
+// src/pages/gear/index.astro, sitting immediately left of an item's name.
+//
+// OWNED RENDERS NOTHING, AND THAT IS THE DESIGN. Owned is the unmarked default — the
+// overwhelming majority of a closet — so marking it would put a glyph on nearly every
+// row to say "nothing unusual here". The visible consequence is that names on owned
+// rows sit further left than names on wishlist and retired rows; PK-62 accepts that
+// ragged left edge explicitly and forbids "fixing" it with a spacer or a placeholder
+// glyph, so do not add one.
+//
+// WHICH STATUS GETS WHICH GLYPH IS NOT DECIDED HERE. `gearStatusMarker`
+// (src/lib/gear/format.ts) owns that, as a map that is total over `GearStatus`, so a
+// fourth status becomes a compile error there rather than a row that silently draws
+// nothing here. This file owns the drawing and nothing else. It also means the decision
+// is testable: `vitest.config.ts` collects `src/lib/`, and there is no harness in this
+// repo for rendering an `.astro` component in a test.
+//
+// KEEP THIS A PLAIN .astro COMPONENT. Same rule GearNav.astro and GearItemForm.astro
+// carry in their own comments, and it is a CONVENTION those comments enforce by being
+// read — not something a test checks. (tests/anonymous-read-path.test.ts guards a
+// different and narrower thing: that no auth SDK or service-role key reaches the
+// anonymous read path. It inspects the build's module graph for those imports and does
+// not enumerate any gear route, so it would not notice a `client:*` directive here.)
+// Two hand-written inline SVGs are not a reason to ship an icon package to the browser,
+// let alone a hydration runtime.
+//
+// COLOUR IS NEVER THE ONLY SIGNAL (WCAG 1.4.1). Each icon carries its own accessible
+// name via role="img" + aria-label, so a screen reader announces "Wishlist" or
+// "Retired" beside the item name, and the two glyphs differ in SHAPE as well as hue.
+// Never --blue: per tokens.css's own standing rule, blue marks something INTERACTIVE,
+// and a status marker is not clickable.
+//
+// WHY WISHLIST IS --ochre-ink AND NOT --ochre, which is what PK-62's text asks for.
+// Because owned draws nothing, this glyph is the ONLY visual carrier of "wishlist" on
+// its row — a graphical object under WCAG 1.4.11, which wants 3:1 against its
+// background, not decoration, which wants nothing. --ochre #b5822e manages 3.40:1 on
+// --surface but only 2.84:1 on --sunk #efeae1, and --sunk is the row's own hover
+// background (`hover:bg-sunk` on every row in the closet table), so the icon fails the
+// moment a pointer crosses its row. --ochre-ink #8a6118 is 4.61:1 on --sunk and 5.52:1
+// on --surface. It is the same family, already in the palette, and invents nothing —
+// tokens.css's "do not invent values here" rule is respected, and PK-62's own
+// requirement that status must not rest on colour alone is better served by a colour
+// that can actually be seen. --rust needed no such change: #b24a3c is 4.45:1 on --sunk.
+// Dark mode was never the problem in either case (--ochre's dark cut #d4a353 is ~6.7:1
+// on dark --sunk); this is a light-mode fix that dark mode simply inherits.
+import { GEAR_STATUS_LABELS } from '../lib/gear/fields';
+import { gearStatusMarker } from '../lib/gear/format';
+
+interface Props {
+  /** A `gear_items` row's `status`, typed as the bare `string` the database client
+   *  hands back rather than a `GearStatus` — mirroring `formatGearStatus`, which takes
+   *  the same widened type for the same reason: the CHECK constraint backing the column
+   *  is not proven to still hold by the time a row is read back. */
+  readonly status: string;
+}
+
+const { status } = Astro.props;
+
+const marked = gearStatusMarker(status);
+
+// h-4 w-4 pairs with the table's text-sm rows; shrink-0 keeps the glyph its full size
+// when a long item name competes for the cell. stroke-based rather than filled, at a
+// width that stays legible at 16px.
+const SVG_CLASS = 'h-4 w-4 shrink-0';
+const SVG_ATTRS = {
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  'stroke-width': 1.7,
+  'stroke-linecap': 'round',
+  'stroke-linejoin': 'round',
+  role: 'img',
+} as const;
+---
+
+{
+  marked === 'wishlist' && (
+    <svg
+      {...SVG_ATTRS}
+      class={`${SVG_CLASS} text-ochre-ink`}
+      aria-label={GEAR_STATUS_LABELS.wishlist}
+    >
+      {/* A shopping trolley: wanted, not yet owned. */}
+      <path d="M2.75 3.75h2.1l2.55 11.05a1.6 1.6 0 0 0 1.56 1.24h7.74a1.6 1.6 0 0 0 1.55-1.21l1.67-6.86H6.1" />
+      <circle cx="9.5" cy="19.75" r="1.4" />
+      <circle cx="17.25" cy="19.75" r="1.4" />
+    </svg>
+  )
+}
+{
+  marked === 'retired' && (
+    <svg {...SVG_ATTRS} class={`${SVG_CLASS} text-rust`} aria-label={GEAR_STATUS_LABELS.retired}>
+      {/* A waste bin: out of service, but STILL IN THE CLOSET. "Retired" is a status the
+          row keeps, not a deletion — deleting an item (PK-60) removes it outright and
+          there is no trash to recover it from, which is all the more reason the two must
+          not read as the same thing. */}
+      <path d="M3.75 6.5h16.5" />
+      <path d="M9.75 6.5V4.4A1.4 1.4 0 0 1 11.15 3h1.7a1.4 1.4 0 0 1 1.4 1.4v2.1" />
+      <path d="M6.4 6.5 7.5 19.9A1.5 1.5 0 0 0 9 21.25h6a1.5 1.5 0 0 0 1.5-1.35L17.6 6.5" />
+      <path d="M10.35 10.5v6.5" />
+      <path d="M13.65 10.5v6.5" />
+    </svg>
+  )
+}

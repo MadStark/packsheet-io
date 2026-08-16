@@ -495,7 +495,7 @@ describe('search matches name or brand, case-insensitively, mid-word', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Sorting — each of the four sort keys, both directions.
+// 4. Sorting — each of the five sort keys, both directions (`brand` added by PK-62).
 // ---------------------------------------------------------------------------
 
 describe('sorting', () => {
@@ -504,6 +504,24 @@ describe('sorting', () => {
   beforeAll(async () => {
     sortUser = await createUser('gear-closet-sort');
 
+    // BRANDS ARE SET ON TWO OF THE THREE, AND THE THIRD IS DELIBERATELY LEFT NULL.
+    // PK-62 made `brand` a sort key, and it is a NULLABLE one — so the fixture has to
+    // contain a null to say anything honest about where those rows land. (`price` and,
+    // since PK-61, `acquired_on` are nullable and sortable too; `brand` is simply the
+    // case a real closet notices, unbranded gear being commoner than undated gear.)
+    //
+    // THE BRAND ORDER MUST DISAGREE WITH THE NAME ORDER, OR THE BRAND-SORT TEST BELOW
+    // PROVES NOTHING. `name` is the default sort and the fallback for an unrecognised
+    // sort key, so a `sort=brand` that never reached GEAR_SORT_COLUMNS would come back
+    // in name order — and if the fixture's two orders happened to coincide, every
+    // assertion would still pass while the feature was entirely broken. An earlier
+    // version of this fixture had exactly that hole: 'Camp Chef' (Basecamp Grill) <
+    // 'Enlightened Equipment' (Featherweight Quilt) < null (Overnight Pack) is the same
+    // sequence as the alphabetical name order, in both directions. 'Alpkit' on the
+    // QUILT and 'Weber' on the GRILL inverts the first two relative to their names, so
+    // name order and brand order now differ in both directions and the fallback is
+    // distinguishable from the real thing.
+    //
     // `added` sorts by `acquired_on` (PK-61), not `created_at` — see GEAR_SORT_COLUMNS
     // in src/lib/gear/fields.ts. Each row below is given an explicit, distinct
     // `acquired_on` for the same reason the old version of this fixture inserted rows
@@ -521,6 +539,7 @@ describe('sorting', () => {
     const rows: GearInsert[] = [
       {
         name: 'Featherweight Quilt',
+        brand: 'Alpkit',
         weight: 300,
         weight_unit: 'g',
         price: 200,
@@ -529,6 +548,7 @@ describe('sorting', () => {
       },
       {
         name: 'Basecamp Grill',
+        brand: 'Weber',
         weight: 500,
         weight_unit: 'g',
         price: 50,
@@ -536,6 +556,10 @@ describe('sorting', () => {
         acquired_on: '2026-02-01',
       },
       {
+        // No brand: the null this fixture needs. It still carries an `acquired_on`,
+        // because the null placement `added` cares about is covered by PK-61's own
+        // pagination fixture — one nullable column per fixture is enough to pin a
+        // behaviour, and giving every row a date keeps the `added` order unambiguous.
         name: 'Overnight Pack',
         weight: 2,
         weight_unit: 'lb', // ≈ 907 g — heavier than either of the two above in grams
@@ -583,6 +607,70 @@ describe('sorting', () => {
       'Overnight Pack',
       'Basecamp Grill',
       'Featherweight Quilt',
+    ]);
+  });
+
+  it('sorts by brand, both directions, and not merely in name order (PK-62)', async () => {
+    // Alpkit (Featherweight Quilt) < Weber (Basecamp Grill), which is the OPPOSITE of
+    // those two rows' alphabetical name order — so these two assertions fail if
+    // `sort=brand` ever falls back to the default `name` sort. See the fixture's own
+    // comment for why that inversion is load-bearing rather than incidental.
+    //
+    // Overnight Pack has NO brand, and it sorts LAST IN BOTH DIRECTIONS. That is not
+    // Postgres's own behaviour — its default is asymmetric (NULLS LAST ascending, NULLS
+    // FIRST descending) — but `applyGearQuery` passes `nullsFirst: false` on every sort
+    // key (PK-61), so "no brand" reads as "at the end" whichever way the visitor sorted,
+    // exactly as "no date" and "no price" now do. An earlier version of this test
+    // expected the unbranded row FIRST on descending, which was correct against the
+    // Postgres default and became wrong the moment PK-61 landed; the two branches were
+    // written in parallel and merged in that order.
+    expect(await sortedNames('brand', 'asc')).toEqual([
+      'Featherweight Quilt', // Alpkit
+      'Basecamp Grill', // Weber
+      'Overnight Pack', // no brand — pinned last
+    ]);
+    expect(await sortedNames('brand', 'desc')).toEqual([
+      'Basecamp Grill', // Weber
+      'Featherweight Quilt', // Alpkit
+      'Overnight Pack', // no brand — pinned last here TOO, not first
+    ]);
+
+    // And the guard that makes the above mean something: the name sort really does
+    // disagree, so "passes the brand assertions" cannot be satisfied by name ordering.
+    expect(await sortedNames('name', 'asc')).not.toEqual(await sortedNames('brand', 'asc'));
+  });
+
+  it('a brand sort survives an active search — PK-62 acceptance', async () => {
+    // The search filter and the sort are applied by two different functions
+    // (`applyGearFilters` and `applyGearQuery`), which is exactly why "does one survive
+    // the other" is worth its own assertion rather than being assumed from the two
+    // passing separately.
+    const searched = async (direction: 'asc' | 'desc') => {
+      const { items, error } = await closetQuery(sortUser, {
+        q: 'a',
+        sort: 'brand',
+        dir: direction,
+      });
+      expect(error).toBeNull();
+      return names(items);
+    };
+
+    // WHAT THIS DOES AND DOES NOT PROVE, stated plainly so nobody reads more into it:
+    // 'a' occurs in all three names, so the search narrows NOTHING away here. The claim
+    // under test is therefore "an active `q` does not disturb the brand ordering", not
+    // "the search filters correctly" — that second question has its own describe block
+    // above, and duplicating it here would only make this test slower to read. The
+    // expected order is the brand order, NOT the name order, so a search that reset the
+    // sort would still be caught.
+    expect(await searched('asc')).toEqual([
+      'Featherweight Quilt',
+      'Basecamp Grill',
+      'Overnight Pack',
+    ]);
+    expect(await searched('desc')).toEqual([
+      'Basecamp Grill',
+      'Featherweight Quilt',
+      'Overnight Pack', // still pinned last under an active search, same as without one
     ]);
   });
 
