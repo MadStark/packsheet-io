@@ -66,7 +66,6 @@ async function searchLabels(term: string): Promise<string[]> {
   const { data, error } = await owner.client
     .from('gear_items')
     .select('id')
-    .is('deleted_at', null)
     .or(buildSearchFilter(term));
   expect(error).toBeNull();
 

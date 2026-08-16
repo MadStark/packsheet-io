@@ -32,7 +32,7 @@ const VALID: GearFormValues = {
   weight_unit: 'kg',
   price: '199.99',
   currency: 'GBP',
-  volume_litres: '4.2',
+  acquired_on: '2026-08-13',
   status: 'owned',
   url: 'https://example.com/tent',
   brand: 'Example Co',
@@ -75,7 +75,7 @@ describe('parseGearItemForm: a fully valid submission', () => {
       weight_unit: 'kg',
       price: 199.99,
       currency: 'GBP',
-      volume_litres: 4.2,
+      acquired_on: '2026-08-13',
       status: 'owned',
       url: 'https://example.com/tent',
       brand: 'Example Co',
@@ -434,44 +434,185 @@ describe('parseGearItemForm: price and currency', () => {
 });
 
 // ---------------------------------------------------------------------------
-// volume_litres — pairs with: check (volume_litres >= 0 and volume_litres < 'Infinity'::numeric)
+// acquired_on (PK-61) — mirrors a TYPE (date), not a CHECK constraint; see
+// isRealCalendarDate's own doc comment in src/lib/gear/form.ts for why a shape match
+// alone (ACQUIRED_ON_PATTERN) is not enough and the round-trip through Date.UTC is.
 // ---------------------------------------------------------------------------
 
-describe('parseGearItemForm: volume_litres', () => {
-  it('accepts a blank value as "not provided" — the column is nullable with no default', () => {
-    const result = parseGearItemForm(formData({ volume_litres: '' }));
+describe('parseGearItemForm: acquired_on', () => {
+  // THE SINGLE MOST IMPORTANT CASE IN THE TICKET: acquired_on is a nullable column with
+  // NO database default (unlike quantity/weight/weight_unit/status, which this form
+  // requires precisely because THEY have no honest blank — see the module comment's
+  // "REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS" section). A blank date box means "I don't
+  // know when I got this", which is a normal, complete answer, not a mistake — so this
+  // must come back `ok: true` with `acquired_on: null`, never an error.
+  it('a blank value is not an error — it means "I do not know", and stores null', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '' }));
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.values.volume_litres).toBeNull();
+    if (result.ok) expect(result.values.acquired_on).toBeNull();
   });
 
-  it('accepts up to three decimal places, matching numeric(12, 3)', () => {
-    const result = parseGearItemForm(formData({ volume_litres: '4.321' }));
+  // Same acceptance as blank, via the same `trimmed === ''` check every other optional
+  // field in this module uses (parseOptionalText) — a visitor who tabs into the date
+  // field and back out again without typing anything must not be penalised for the
+  // stray whitespace a browser autofill or a copy-paste could leave behind.
+  it('a whitespace-only value is treated the same as blank', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '   ' }));
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.values.volume_litres).toBe(4.321);
+    if (result.ok) expect(result.values.acquired_on).toBeNull();
   });
 
-  it('rejects a negative volume', () => {
-    const result = parseGearItemForm(formData({ volume_litres: '-1' }));
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.volume_litres).toBeTruthy();
+  // Stored as the TRIMMED string, not reformatted otherwise — same "no rewriting"
+  // discipline as `url` below: this is a validator, not a normaliser. ("Exactly as
+  // given" would overstate it — the accepted value is `values.acquired_on.trim()`, not
+  // the untrimmed raw string; this test's input has no surrounding whitespace to trim,
+  // so it does not distinguish the two, but the wording here should not claim more than
+  // the code does.)
+  it('accepts a valid date and stores it exactly as given', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '2026-08-13' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.acquired_on).toBe('2026-08-13');
   });
 
-  it('rejects the literal string "NaN"', () => {
-    const result = parseGearItemForm(formData({ volume_litres: 'NaN' }));
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.volume_litres).toBeTruthy();
+  // A real leap day. If isRealCalendarDate had a hand-rolled days-per-month table
+  // instead of round-tripping through Date.UTC, this is the exact case a forgotten
+  // "february has 29 days every 4 years, except..." rule would get wrong.
+  it('accepts a real leap day (2024 was a leap year)', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '2024-02-29' }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.acquired_on).toBe('2024-02-29');
   });
 
-  it('rejects the literal string "Infinity"', () => {
-    const result = parseGearItemForm(formData({ volume_litres: 'Infinity' }));
+  // 2026 is not a leap year — Date.UTC(2026, 1, 29) normalises forward to March 1st,
+  // so the round-trip comparison against the typed day (29) fails and this is refused.
+  // The false-positive twin of the case above: a validator that merely checked "is this
+  // day <= 31" would wrongly accept it.
+  it('rejects a February 29th in a non-leap year', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '2026-02-29' }));
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.volume_litres).toBeTruthy();
+    if (!result.ok) expect(result.errors.acquired_on).toBeTruthy();
   });
 
-  it('rejects a fourth decimal place', () => {
-    const result = parseGearItemForm(formData({ volume_litres: '1.2345' }));
+  // Shape-valid (matches ACQUIRED_ON_PATTERN) but not a real date — exactly the case
+  // isRealCalendarDate's own comment names Postgres would otherwise reject with a raw
+  // `date/time field value out of range` error, which this module exists to never let a
+  // visitor see.
+  it.each(['2026-02-30', '2026-13-01'])(
+    'rejects %s — shape-valid but not a real calendar date',
+    (value) => {
+      const result = parseGearItemForm(formData({ acquired_on: value }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.acquired_on).toBeTruthy();
+    },
+  );
+
+  // Zero month / zero day: still shape-valid against \d{4}-\d{2}-\d{2}, and still not a
+  // real date — Date.UTC(2026, -1, 10) and Date.UTC(2026, 0, 0) both normalise away from
+  // what was typed, so the round-trip catches both the same way it catches an
+  // out-of-range month or day above 12/31.
+  it.each(['2026-00-10', '2026-01-00'])(
+    'rejects %s — zero month/day is not a real date',
+    (value) => {
+      const result = parseGearItemForm(formData({ acquired_on: value }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.acquired_on).toBeTruthy();
+    },
+  );
+
+  // Malformed shapes ACQUIRED_ON_PATTERN refuses outright, before isRealCalendarDate
+  // ever runs — the same reason parseNonNegativeDecimal gates with a regexp before
+  // calling Number(). NOT because Postgres itself would refuse these: verified against
+  // the local stack, `select '2026-2-3'::date` is ACCEPTED (Postgres's date parser
+  // tolerates a single-digit month/day) — only '26-02-03', the two-digit-year shape, is
+  // genuinely rejected by Postgres. This module is stricter than Postgres ON PURPOSE
+  // (see ACQUIRED_ON_PATTERN's own comment in form.ts for the full reasoning: Postgres's
+  // leniency depends on a `datestyle` session setting this module cannot see), not
+  // because Postgres's own `date` input function would refuse the leniency `new Date()`
+  // shows. '13/08/2026'/'today' are shapes nobody typing into a `YYYY-MM-DD` field would
+  // produce by accident, regardless of what either parser does with them.
+  it.each(['2026-2-3', '26-02-03', '13/08/2026', 'today'])(
+    'rejects the malformed shape %s',
+    (value) => {
+      const result = parseGearItemForm(formData({ acquired_on: value }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.acquired_on).toBeTruthy();
+    },
+  );
+
+  // Pinned deliberately, not a bug this test happens to demonstrate: isRealCalendarDate's
+  // own doc comment documents that Date.UTC maps a two-digit year argument into the
+  // 1900s (Date.UTC(26, ...) means 1926, not 26 AD), so the round-trip comparison never
+  // matches for years 0000-0099 and '0026-02-03' comes back invalid — the right answer
+  // for a field recording when somebody acquired a piece of camping gear, where a
+  // first-century date is a typo every time. This test exists so a future refactor that
+  // "fixes" the year-1900 mapping changes this assertion on purpose, rather than
+  // silently, the day someone reworks the date-validation internals.
+  it('rejects a four-digit year in 0000-0099, per the documented Date.UTC two-digit-year mapping', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '0026-02-03' }));
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.errors.volume_litres).toBeTruthy();
+    if (!result.ok) expect(result.errors.acquired_on).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// acquired_on: future-date rejection (PK-61, isAcquiredOnInFuture in form.ts)
+// ---------------------------------------------------------------------------
+
+/** `YYYY-MM-DD` for `daysFromToday` days from today, computed in UTC — the exact
+ *  arithmetic `acquiredOnFutureCutoff` (form.ts) itself does, so these tests stay
+ *  correct on whatever day they happen to run rather than rotting the moment "today"
+ *  moves past a hard-coded date. */
+function isoDateOffsetUTC(daysFromToday: number): string {
+  const now = new Date();
+  const target = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysFromToday),
+  );
+  const year = String(target.getUTCFullYear()).padStart(4, '0');
+  const month = String(target.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(target.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+describe('parseGearItemForm: acquired_on cannot be in the future', () => {
+  // The case the ticket names explicitly: nothing previously bounded this field, so
+  // `9999-12-31` — a perfectly real calendar date, which is exactly why it must NOT be
+  // rejected with ACQUIRED_ON_MESSAGE's "enter a valid date" — validated and stored.
+  // Distinctly worded from the malformed-shape rejections above: this date IS well
+  // formed, so it needs its own message rather than reusing the "not a valid date" one.
+  it('rejects a date far in the future, with a message distinct from the malformed-date one', () => {
+    const result = parseGearItemForm(formData({ acquired_on: '9999-12-31' }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.acquired_on).toBeTruthy();
+      expect(result.errors.acquired_on).toBe('An acquired date cannot be in the future.');
+    }
+  });
+
+  it("accepts today's date", () => {
+    const result = parseGearItemForm(formData({ acquired_on: isoDateOffsetUTC(0) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.acquired_on).toBe(isoDateOffsetUTC(0));
+  });
+
+  // THE ONE-DAY TOLERANCE, PINNED: a visitor whose local calendar date is a day ahead
+  // of this server's UTC date (UTC+13/UTC+14, say) must not be told their honest
+  // "today" is in the future. `isAcquiredOnInFuture`'s own comment names this exact
+  // scenario as the reason the cutoff is "today in UTC, plus one day" rather than "today
+  // in UTC" with no slack at all.
+  it('accepts a date one day ahead of UTC today — the cross-time-zone tolerance', () => {
+    const result = parseGearItemForm(formData({ acquired_on: isoDateOffsetUTC(1) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.acquired_on).toBe(isoDateOffsetUTC(1));
+  });
+
+  // One day past the tolerance: no real time-zone offset explains being two calendar
+  // days ahead of UTC, so this is where the cutoff actually bites.
+  it('rejects a date two days ahead of UTC today — just past the tolerance', () => {
+    const result = parseGearItemForm(formData({ acquired_on: isoDateOffsetUTC(2) }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.acquired_on).toBe('An acquired date cannot be in the future.');
+    }
   });
 });
 
@@ -645,7 +786,7 @@ describe('gearItemToFormValues', () => {
     weight_unit: 'kg',
     price: 199.99,
     currency: 'GBP',
-    volume_litres: 4.2,
+    acquired_on: '2026-08-13',
     url: 'https://example.com/tent',
     notes: 'Bought secondhand.',
     status: 'owned',
@@ -661,7 +802,7 @@ describe('gearItemToFormValues', () => {
       expect(reparsed.values.weight).toBe(FULL_ROW.weight);
       expect(reparsed.values.price).toBe(FULL_ROW.price);
       expect(reparsed.values.currency).toBe(FULL_ROW.currency);
-      expect(reparsed.values.volume_litres).toBe(FULL_ROW.volume_litres);
+      expect(reparsed.values.acquired_on).toBe(FULL_ROW.acquired_on);
     }
   });
 
@@ -671,9 +812,9 @@ describe('gearItemToFormValues', () => {
     expect(values.currency).toBe('');
   });
 
-  it('renders a null volume_litres as an empty string', () => {
-    const values = gearItemToFormValues({ ...FULL_ROW, volume_litres: null });
-    expect(values.volume_litres).toBe('');
+  it('renders a null acquired_on as an empty string, not the literal "null"', () => {
+    const values = gearItemToFormValues({ ...FULL_ROW, acquired_on: null });
+    expect(values.acquired_on).toBe('');
   });
 
   it('renders a null brand/category/description/notes/url as an empty string, never the literal "null"', () => {

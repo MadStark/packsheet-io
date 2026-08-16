@@ -6,6 +6,17 @@
  * PostgREST query" question live in separate, separately-testable files.
  */
 
+import type { Database } from '../database.types';
+
+/**
+ * The column names `gear_items` actually has, read off the generated types rather than
+ * spelled out here. `GEAR_SORT_COLUMNS` is typed against this so that a mistyped column
+ * (`'brnad'`) is a BUILD failure rather than a PostgREST error at request time on
+ * whichever sort link nobody clicked before release — the same reason
+ * `scripts/database-types.sh` commits the generated file at all.
+ */
+type GearItemColumn = keyof Database['public']['Tables']['gear_items']['Row'];
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -72,12 +83,39 @@ export const GEAR_STATUS_MEANINGS: Record<GearStatus, string> = {
   retired: 'Gear you no longer use but want to keep a record of.',
 };
 
+/**
+ * Which status checkboxes the closet's filter bar renders as TICKED, given the statuses
+ * `parseGearQuery` actually found in the URL. This is the whole of PK-62's "zero checked
+ * behaves as all three checked" rule.
+ *
+ * WHY IT IS A FUNCTION IN HERE RATHER THAN A TERNARY IN THE PAGE. `vitest.config.ts`
+ * excludes `src/pages/**`, so a line written in `src/pages/gear/index.astro`'s
+ * frontmatter cannot be asserted on by anything — and this particular line is one of
+ * PK-62's four acceptance criteria ("unchecking every status shows the full closet, not
+ * an empty one"). Inverting the condition here is a failing test; inverting it in the
+ * page was a green suite and a closet that renders nothing, with the filter bar the
+ * visitor would need to recover offering no state that fixes it. Same argument every
+ * other module in this directory makes for itself.
+ *
+ * THE QUERY LAYER NEEDED NO MATCHING CHANGE, and that is the point rather than an
+ * omission: `applyGearFilters` already applies no `status` filter at all for an empty
+ * list, so "none ticked" and "all three ticked" were ALREADY the same result set. All
+ * that was missing was rendering them as the same STATE, so that "default" and "cleared"
+ * stop looking like two different things that behave identically.
+ */
+export function checkedGearStatuses(statuses: readonly GearStatus[]): readonly GearStatus[] {
+  return statuses.length === 0 ? GEAR_STATUSES : statuses;
+}
+
 // ---------------------------------------------------------------------------
 // Sorting
 // ---------------------------------------------------------------------------
 
-/** The sort keys the closet list offers, as they appear in the URL's `sort` parameter. */
-export const GEAR_SORT_KEYS = ['name', 'weight', 'price', 'added'] as const;
+/** The sort keys the closet list offers, as they appear in the URL's `sort` parameter.
+ *  `brand` was added by PK-62 alongside its Brand column header becoming a sort link —
+ *  ordering a closet by maker is the one grouping the removed Brand filter checkboxes
+ *  used to provide, and a sort does it without a panel of every brand the visitor owns. */
+export const GEAR_SORT_KEYS = ['name', 'brand', 'weight', 'price', 'added'] as const;
 
 export type GearSortKey = (typeof GEAR_SORT_KEYS)[number];
 
@@ -105,13 +143,81 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
  * would require an exchange rate, and `money.ts` argues at length for why this product
  * must never invent one. This is left as a known limitation for the UI to surface later
  * (e.g. grouping or flagging mixed-currency results) rather than solved here.
+ *
+ * `brand` (PK-62) sorts by the raw column, which is the whole mapping. It is nullable,
+ * and undated/unbranded placement is NOT this module's decision: `applyGearQuery` passes
+ * `nullsFirst: false` on every sort key (PK-61), so null brands are pinned LAST in BOTH
+ * directions — not at the top of descending, which is where Postgres's own asymmetric
+ * default (NULLS LAST ascending, NULLS FIRST descending) would otherwise put them.
+ *
+ * A NOTE FOR ANYONE READING THE PK-62 HISTORY. An earlier version of this paragraph
+ * argued the opposite — that the Postgres default was deliberately left alone so that
+ * descending stayed the exact reverse of ascending. That was true when PK-62 was written
+ * and stopped being true when PK-61 landed `nullsFirst: false` first; the two branches
+ * were developed in parallel and merged in that order. The pinning is the better
+ * behaviour and it is what ships: "no brand" reads as "at the end" whichever way the
+ * visitor sorted, consistent with "no date" and "no price". Descending is therefore the
+ * reverse of ascending only among the rows that HAVE a brand, which is the trade PK-61
+ * made knowingly for `acquired_on` and which applies here for exactly the same reason.
+ *
+ * `added` sorts by `acquired_on` (PK-61), NOT `created_at` — that swap is the entire
+ * point of PK-61. `created_at` is a database audit timestamp: when the row was
+ * inserted, which for an item logged weeks after it was actually bought answers a
+ * question nobody asked ("when did you get around to typing this in") rather than the
+ * one the "Added" column exists to answer ("when did you get this item"). `acquired_on`
+ * is the visitor's own claim about that, so it is what "Added" now means.
+ *
+ * `acquired_on` IS NULLABLE, WITH NO DATABASE DEFAULT — unlike `created_at`, which is
+ * always present. A row with no `acquired_on` cannot simply fall wherever Postgres's
+ * own default null ordering would put it; it has to be placed deliberately. See the
+ * `.order(column, { ascending, nullsFirst: false })` call in `query.ts`'s
+ * `applyGearQuery`, which pins undated rows LAST regardless of sort direction.
  */
-export const GEAR_SORT_COLUMNS: Record<GearSortKey, string> = {
+export const GEAR_SORT_COLUMNS: Record<GearSortKey, GearItemColumn> = {
   name: 'name',
+  brand: 'brand',
   weight: 'weight_grams',
   price: 'price',
-  added: 'created_at',
+  added: 'acquired_on',
 };
+
+/**
+ * Every labelled column header the closet list renders, in render order, with
+ * `key: null` marking one that is not sortable. The Status column is absent because
+ * PK-62 removed it — a three-value field an icon beside the name says faster (see
+ * `GearStatusIcon.astro`).
+ *
+ * WHY THIS IS HERE AND NOT IN THE PAGE. "The Brand column header becomes a sort link"
+ * is one of PK-62's requirements, and a list written in `src/pages/gear/index.astro`
+ * frontmatter cannot be asserted on — `vitest.config.ts` excludes `src/pages/**`.
+ * Dropping `key: 'brand'` there would have regressed the requirement with a green suite,
+ * because `tests/gear-closet.test.ts` proves `sort=brand` WORKS, never that the header
+ * OFFERS it. Those are two different claims and only one of them was covered.
+ *
+ * ONE LIST, NOT TWO SLICES. The page used to hold a sortable-only list rendered as
+ * `.slice(0, 1)`, then four hand-written unsortable headers, then `.slice(1)` — an
+ * interleaving held together by two magic indices that had to be recounted by hand every
+ * time a column moved. Naming each column's sortability removes the slicing altogether.
+ *
+ * WHAT THIS STILL DOES NOT CAPTURE: the `<tbody>` cells in `src/pages/gear/index.astro`
+ * are a SEPARATE, hand-maintained list in the same order, and nothing checks the two
+ * move together. Adding an entry here without adding the matching `<td>` there silently
+ * misaligns every row after it. This diff exercised exactly that coupling — removing the
+ * Status column meant deleting an entry here AND a cell there. Keep them in step by
+ * reading; there is no compiler help.
+ */
+export const GEAR_LIST_COLUMNS: readonly {
+  readonly key: GearSortKey | null;
+  readonly label: string;
+}[] = [
+  { key: 'name', label: 'Name' },
+  { key: 'brand', label: 'Brand' },
+  { key: null, label: 'Category' },
+  { key: null, label: 'Qty' },
+  { key: 'weight', label: 'Weight' },
+  { key: 'price', label: 'Price' },
+  { key: 'added', label: 'Added' },
+];
 
 // ---------------------------------------------------------------------------
 // Paging and search

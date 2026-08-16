@@ -86,9 +86,17 @@ export interface GearQuery {
   /** Upper bound on `weight_grams`, same conversion. `null` means "no upper bound". */
   maxGrams: number | null;
   /** The unit `wmin`/`wmax` were entered in — kept (rather than discarded once converted
-   *  to grams) purely so a form re-rendering this query can show the visitor back what
-   *  they actually typed, in the unit they typed it in, rather than a grams figure they
-   *  never entered. */
+   *  to grams) so that a round trip through `gearQueryToSearchParams` gives back the
+   *  figure the visitor actually typed, in the unit they typed it in, rather than a grams
+   *  figure they never entered.
+   *
+   *  PK-62 REMOVED THE FORM THIS WAS WRITTEN FOR. The weight-range inputs and the unit
+   *  picker are gone from `src/pages/gear/index.astro`, so nothing re-renders these
+   *  values to a visitor today; what still depends on the round trip is every link that
+   *  rebuilds the current query — sort headers, the pager, and the hidden inputs the
+   *  filter form re-emits (see `unsurfacedFilterParams`). Dropping the unit would silently
+   *  change a hand-edited or bookmarked `?wmin=2&wunit=lb` into a 2-GRAM bound the first
+   *  time the visitor clicked a column header. */
   weightUnit: WeightUnit;
   sort: GearSortKey;
   direction: 'asc' | 'desc';
@@ -275,10 +283,12 @@ export function gearQueryToSearchParams(query: GearQuery): URLSearchParams {
   for (const status of query.statuses) params.append('status', status);
   for (const brand of query.brands) params.append('brand', brand);
 
-  // wunit is emitted whenever it is non-default, even if both bounds are null — a
-  // visitor who picked "lb" in the form but has not yet typed a number still has that
-  // choice as part of their query state, and dropping it here would silently reset
-  // their unit picker to grams the next time this URL was parsed.
+  // wunit is emitted whenever it is non-default, even if both bounds are null. The unit
+  // picker this originally protected was removed by PK-62, but the emission still has to
+  // be unconditional for the round-trip property to hold: `parseGearQuery` reads `wunit`
+  // whether or not a bound is present, so omitting it here would make
+  // `parse(serialize(q))` differ from `q` for any query carrying a non-gram unit and no
+  // bound — exactly the invariant tests/gear-query.test.ts property-tests.
   if (query.weightUnit !== 'g') params.set('wunit', query.weightUnit);
   if (query.minGrams !== null)
     params.set('wmin', String(fromGrams(query.minGrams, query.weightUnit)));
@@ -321,6 +331,63 @@ export function sortLinkSearchParams(query: GearQuery, key: GearSortKey): URLSea
 }
 
 // ---------------------------------------------------------------------------
+// Unsurfaced filters — the params PK-62 left honoured but stopped rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * The `GearQuery` params that this module still parses and `applyGearFilters` still
+ * applies, but which the closet list no longer renders any control for: `category`,
+ * `brand` and the weight range (`wmin`/`wmax`/`wunit`).
+ *
+ * WHY THESE EXIST AT ALL AFTER PK-62. That ticket removed the Category, Brand and
+ * Weight-range fieldsets from the UI. It deliberately did NOT remove them from the query
+ * layer: they are tested, working, owner-scoped filtering that a later ticket may want to
+ * surface again, and `/gear?category=Shelter` links were shipped to staging by PK-4, so
+ * bookmarked and shared URLs carrying them already exist in the wild.
+ *
+ * WHAT THAT LEFT BROKEN, AND WHAT THESE TWO FUNCTIONS FIX. Removing the controls without
+ * removing the behaviour gave the page three different answers to the same question.
+ * Sort headers (`sortLinkSearchParams`, above) and the pager both round-trip the whole
+ * query, so they PRESERVED these params; the filter form carried only `q`/`status`/
+ * `sort`/`dir`, so submitting a search silently DROPPED them. A visitor arriving on a
+ * bookmarked `?category=Shelter` therefore saw a closet narrowed for no stated reason,
+ * kept that invisible filter while sorting and paging, and lost it the moment they typed
+ * in the search box — three behaviours, none of them disclosed.
+ *
+ * `unsurfacedFilterParams` is what the form re-emits as hidden inputs so it stops being
+ * the odd one out, and `hasUnsurfacedFilters` is what the page uses to TELL the visitor
+ * the closet is filtered and offer them a way out. Derived from
+ * `gearQueryToSearchParams` by subtraction rather than by listing the five names, so a
+ * param added to `GearQuery` later is carried automatically instead of being silently
+ * dropped by a list nobody remembered to update.
+ */
+export function unsurfacedFilterParams(query: GearQuery): URLSearchParams {
+  const params = gearQueryToSearchParams(query);
+  // Everything the closet list DOES render a control for, plus `page`, which the filter
+  // form deliberately never carries (a new filter set changes what "page 3" means).
+  for (const surfaced of ['q', 'status', 'sort', 'dir', 'page']) params.delete(surfaced);
+  return params;
+}
+
+/**
+ * Whether any unsurfaced filter is actually NARROWING the closet — which is not the same
+ * question as whether `unsurfacedFilterParams` is non-empty. `wunit` alone is a unit
+ * preference with no bound attached (`gearQueryToSearchParams` emits it whenever it is
+ * non-default, precisely so a visitor's choice of `lb` survives a round trip), and it
+ * filters nothing. Telling somebody their closet is filtered because a stale `?wunit=lb`
+ * is sitting in the URL would be a false alarm, and false alarms are how a notice like
+ * this one gets ignored when it matters.
+ */
+export function hasUnsurfacedFilters(query: GearQuery): boolean {
+  return (
+    query.categories.length > 0 ||
+    query.brands.length > 0 ||
+    query.minGrams !== null ||
+    query.maxGrams !== null
+  );
+}
+
+// ---------------------------------------------------------------------------
 // gearListPath
 // ---------------------------------------------------------------------------
 
@@ -330,25 +397,23 @@ export function sortLinkSearchParams(query: GearQuery, key: GearSortKey): URLSea
  * redirect from an unfiltered view does not grow a pointless trailing `?`), or
  * `GEAR_PATH` with `gearQueryToSearchParams(query)` appended otherwise.
  *
- * WHY THIS EXISTS (PK-4 defect: "Undo throws away the active filter"). The closet
- * list's undo banner used to redirect unconditionally to a bare `GEAR_PATH` once
- * acted on, discarding whatever `q`/category/status/brand/weight/sort/page state the
- * visitor was looking at — precisely the moment they are LEAST willing to lose it,
- * since they are actively correcting a mistake (a filtered-down "Bear Canister"
- * search, say, losing its filter and dumping them back on the full, unfiltered
- * closet). `src/pages/gear/index.astro`'s undo/set-category/set-status POST branches
- * all redirect through this function now instead.
+ * WHY THIS EXISTS (PK-4 defect: "a bulk action throws away the active filter"). A
+ * bulk action posts from, and belongs to, one particular filtered view; redirecting
+ * unconditionally to a bare `GEAR_PATH` afterwards discards whatever
+ * `q`/category/status/brand/weight/sort/page state the visitor was looking at — a
+ * filtered-down "Bear Canister" search, say, losing its filter and dumping them back on
+ * the full, unfiltered closet, immediately after an action they will very likely want
+ * to follow with another one on the same selection. `src/pages/gear/index.astro`'s
+ * bulk-action POST branches all redirect through this function instead.
  *
- * BUILT ON `gearQueryToSearchParams`, NOT A HAND-COPIED `URLSearchParams`. The
- * tempting alternative — `new URLSearchParams(Astro.url.searchParams)` with `undo`
- * and `count` deleted afterward by name — has to be kept in sync BY HAND with every
- * param that is not really part of `GearQuery` (today that is exactly `undo` and
- * `count`, from `src/lib/gear/bulk.ts`; there is no guarantee it stays exactly those
- * two forever). Routing the redirect target through a parsed `GearQuery` instead
- * means any param `parseGearQuery` does not recognise as one of ITS OWN fields is
- * dropped for free, the same way a stray `?utm_source=` or a typo'd `?cagegory=`
- * already is on every other place this module round-trips a query — nothing has to
- * remember to delete it by name.
+ * BUILT ON `gearQueryToSearchParams`, NOT A HAND-COPIED `URLSearchParams`. The tempting
+ * alternative — `new URLSearchParams(Astro.url.searchParams)`, carried through as-is —
+ * has to be kept in sync BY HAND with every param that is not really part of
+ * `GearQuery`, and there is no guarantee the set of those stays empty forever. Routing
+ * the redirect target through a parsed `GearQuery` instead means any param
+ * `parseGearQuery` does not recognise as one of ITS OWN fields is dropped for free, the
+ * same way a stray `?utm_source=` or a typo'd `?cagegory=` already is on every other
+ * place this module round-trips a query — nothing has to remember to delete it by name.
  */
 export function gearListPath(query: GearQuery): string {
   const search = gearQueryToSearchParams(query).toString();
@@ -464,30 +529,32 @@ export function buildSearchFilter(search: string): string {
 // applyGearQuery
 // ---------------------------------------------------------------------------
 
-/** The columns the closet list view needs — named once so the page's `.select()` and
+/** The columns the closet list view fetches — named once so the page's `.select()` and
  *  any test asserting against it cannot drift apart. Deliberately does not include
  *  `notes`, `url` or `description`: those are detail-view fields, not list-row fields,
  *  and fetching them for every row on every page load would be pure waste for a view
- *  that never renders them. */
+ *  that never renders them.
+ *
+ *  "NEEDS" IS AN OVERSTATEMENT FOR TWO OF THESE COLUMNS, HONESTLY RECORDED RATHER THAN
+ *  QUIETLY TRUE. `created_at` is fetched here but, as of PK-61 (which replaced its only
+ *  renderer, the old "Added" column, with `acquired_on`), rendered nowhere in the list
+ *  view — and `updated_at` has never had a renderer in this view at all. Neither is
+ *  removed here: `updated_at` is in the identical unused state, and trimming either is
+ *  separate cleanup this change does not attempt, not a reason to leave the comment
+ *  claiming every column here earns its place by being displayed. Take "needs" as
+ *  "roughly what the view uses", not a guarantee every field in this list has a
+ *  renderer today. */
 export const GEAR_SELECT =
-  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at';
+  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, acquired_on, photo_path, created_at, updated_at';
 
 /** The columns `src/pages/gear/[id].astro` needs: every `GEAR_FORM_FIELD` (so
  *  `gearItemToFormValues` can pre-fill the edit form) plus `id`, `photo_path` and
  *  `created_at` for the parts of the page that are not the form itself. Unlike
- *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes`, `url` and
- *  `volume_litres` — the very fields that comment says a list row has no business
- *  fetching — because a detail/edit page is exactly the view that renders them. */
+ *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes` and `url` — the
+ *  very fields that comment says a list row has no business fetching — because a
+ *  detail/edit page is exactly the view that renders them. */
 export const GEAR_DETAIL_SELECT =
-  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, volume_litres, url, notes, status, photo_path, created_at';
-
-/** The columns `src/pages/gear/trash.astro` needs: the same list-row shape as
- *  `GEAR_SELECT` plus `deleted_at`, which every trash row needs and no active-closet row
- *  (`GEAR_SELECT`'s own consumers) ever renders — that column is `null` by definition
- *  wherever `GEAR_SELECT` is used, since every one of those queries is guarded with
- *  `.is('deleted_at', null)`. */
-export const GEAR_TRASH_SELECT =
-  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, photo_path, created_at, updated_at, deleted_at';
+  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, acquired_on, url, notes, status, photo_path, created_at';
 
 /**
  * The exact shape `client.from('gear_items').select(GEAR_SELECT)` produces, derived
@@ -538,11 +605,12 @@ type GearItemsQueryBuilder = ReturnType<typeof _gearItemsQuery>;
 const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 1e-6;
 
 /**
- * The search/category/status/brand/weight filters and the `deleted_at is null` floor
- * every closet-list query needs (a trashed item is never a "gear closet" row — see
- * `GEAR_TRASH_PATH` in `src/lib/gear/routes.ts` for the page that reads the OTHER side
- * of that filter). Deliberately does NOT add ordering, `.range()`, or the owner scope —
- * see `applyGearQuery` for the first two and `loadGearCloset` for the third.
+ * The search/category/status/brand/weight filters every closet-list query needs.
+ * Every row this visitor owns is a closet row — the closet has no hidden tier of items
+ * a query has to filter back out, and `status` (including `'retired'`) is an ordinary
+ * filterable value like any other rather than a floor applied before the visitor's own
+ * filters are. Deliberately does NOT add ordering, `.range()`, or the owner scope — see
+ * `applyGearQuery` for the first two and `loadGearCloset` for the third.
  *
  * SPLIT OUT FROM `applyGearQuery` FOR C2 (PK-4 review): `loadGearCloset` needs to run
  * this same filter set TWICE for one page render — once as an unranged, `head: true`
@@ -552,7 +620,7 @@ const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 1e-6;
  * whose size is not yet known.
  */
 function applyGearFilters(builder: GearItemsQueryBuilder, query: GearQuery): GearItemsQueryBuilder {
-  let next = builder.is('deleted_at', null);
+  let next = builder;
 
   if (query.search !== '') {
     next = next.or(buildSearchFilter(query.search));
@@ -578,8 +646,8 @@ function applyGearFilters(builder: GearItemsQueryBuilder, query: GearQuery): Gea
 
 /**
  * Applies a parsed `GearQuery` to a `client.from('gear_items').select(GEAR_SELECT)`
- * builder: `applyGearFilters` (search, the three `in` filters, the weight range, the
- * `deleted_at is null` floor), ordering, and `.range()` for pagination.
+ * builder: `applyGearFilters` (search, the three `in` filters, the weight range),
+ * ordering, and `.range()` for pagination.
  *
  * A STABLE `id` TIEBREAKER IS ADDED AFTER THE SORT COLUMN, ALWAYS. Without it, two rows
  * that tie on the sort column (two items literally named "Stakes", say, or two added in
@@ -609,7 +677,49 @@ export function applyGearQuery(
   // refuses to invent an exchange rate, and canonicalising a price needs one.
   const column = GEAR_SORT_COLUMNS[query.sort];
   const ascending = query.direction === 'asc';
-  next = next.order(column, { ascending }).order('id', { ascending });
+
+  // nullsFirst: false, ALWAYS, REGARDLESS OF DIRECTION (PK-61). `acquired_on` is
+  // nullable with no database default, so an "added" sort has to decide where an
+  // undated row goes — Postgres will not decide it neutrally on its own. Postgres's
+  // own default null ordering is NOT symmetric: NULLS LAST for ascending, but NULLS
+  // FIRST for descending. Left unpinned, "newest first" (`added` desc) would put every
+  // item with no date at all at the very TOP of the closet — the least informative rows
+  // crowding out the most relevant ones, on exactly the sort a visitor reaches for to
+  // see what they logged most recently. Pinning nulls last in BOTH directions means
+  // "undated" always reads as "at the end", whichever way the visitor sorted, rather
+  // than flipping to the front the moment they click the column header a second time.
+  //
+  // THIS OPTION APPLIES TO EVERY SORT KEY, NOT ONLY `added`. `column` above is
+  // `GEAR_SORT_COLUMNS[query.sort]`, so `nullsFirst: false` is passed on this `.order()`
+  // call regardless of which key the visitor actually chose — and `price` and
+  // `weight_grams` (the columns behind the `price` and `weight` sort keys) are ALSO
+  // nullable. So this same PK-61 change quietly changed where an unpriced row lands on
+  // `price desc` too: previously Postgres's own unpinned default (NULLS FIRST for
+  // descending) put every unpriced item at the top of "most expensive first"; now it is
+  // pinned to the bottom, same as every other direction and column. That is a
+  // deliberate, and arguably overdue, consistency fix — an unpriced item reads no more
+  // usefully at the top of "most expensive" than an undated item did at the top of
+  // "newest" — but it is real behaviour this migration changed beyond the `acquired_on`
+  // column its own name promises, worth knowing for anyone auditing "what did PK-61
+  // actually touch".
+  next = next
+    .order(column, { ascending, nullsFirst: false })
+    // The `id` tiebreaker matters MORE now, not less. Ties on `created_at` were already
+    // GUARANTEED, not merely possible, for any multi-row insert: `set_row_timestamps()`
+    // stamps `created_at = now()`, and `now()` is `transaction_timestamp()` — constant
+    // for an entire transaction, not re-evaluated per row (verified: three rows
+    // inserted in one statement come back sharing exactly one distinct timestamp). This
+    // function's own comment above already names that exact case ("two added in the
+    // same transaction and so sharing `created_at` to the microsecond"), and the
+    // baseline migration's comment on `set_row_timestamps()` says the same thing again
+    // — a tie-free `created_at` sort was never something this codebase could assume.
+    // `acquired_on` is a `date`, not a timestamp, so switching `added` to it does not
+    // introduce ties where there were none before; it WIDENS how easily they happen —
+    // from "rows inserted in the same transaction" to "anything acquired on the same
+    // calendar day", which needs no shared transaction at all. A sort with no stable
+    // tiebreaker was always a latent pagination bug (see this function's own comment
+    // above); this column swap makes the tie case even more common, not newly possible.
+    .order('id', { ascending });
 
   const offset = (query.page - 1) * GEAR_PAGE_SIZE;
   next = next.range(offset, offset + GEAR_PAGE_SIZE - 1);
@@ -701,17 +811,18 @@ export async function loadGearCloset(client: PacksheetClient, userId: string, qu
  * `loadGearCloset` above.
  *
  * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces — see the identical
- * comment on `loadGearCloset`. Relying on RLS alone here would let this page render
- * ANY visitor's gear item the moment it sits on someone's public pack — "your item"
- * silently becoming a stranger's. `.is('deleted_at', null)` is the second guard: a
- * soft-deleted item is not a page this id should keep answering for — see
- * `GEAR_TRASH_PATH` for where a trashed item is read back.
+ * comment on `loadGearCloset`. `gear_items` carries TWO permissive SELECT policies and
+ * RLS unions them, so `.eq('id', id)` alone would let this page render ANY visitor's
+ * gear item the moment it sits on someone's public pack — "your item" silently becoming
+ * a stranger's, and its edit form silently offering to change somebody else's row. The
+ * id in the URL is the only other thing narrowing this query, and an id is guessable in
+ * exactly the way an ownership check is not.
  *
- * A missing row, another visitor's row, a soft-deleted row, and a malformed id (which
- * PostgREST refuses with an error before RLS is even consulted) all collapse to the
- * SAME `{ data: null }` shape here, on purpose — `src/pages/gear/[id].astro` turns that
- * into one real 404 for all four, and none of the four is a distinction its visitor
- * should be able to probe for.
+ * A missing row, another visitor's row, and a malformed id (which PostgREST refuses
+ * with an error before RLS is even consulted) all collapse to the SAME `{ data: null }`
+ * shape here, on purpose — `src/pages/gear/[id].astro` turns that into one real 404 for
+ * all three, and none of the three is a distinction its visitor should be able to probe
+ * for.
  */
 export async function loadGearItem(client: PacksheetClient, userId: string, id: string) {
   return client
@@ -719,31 +830,5 @@ export async function loadGearItem(client: PacksheetClient, userId: string, id: 
     .select(GEAR_DETAIL_SELECT)
     .eq('id', id)
     .eq('user_id', userId)
-    .is('deleted_at', null)
     .maybeSingle();
-}
-
-// ---------------------------------------------------------------------------
-// loadGearTrash — the owner-scoped trash list
-// ---------------------------------------------------------------------------
-
-/**
- * The owner-scoped trash list query — moved here from `src/pages/gear/trash.astro`
- * (PK-4 review, C3) for the same reason as `loadGearCloset` above.
- *
- * `.eq('user_id', userId)` IS LOAD-BEARING, not belt-and-braces — see the identical
- * comment on `loadGearCloset`. `gear_items_select_via_public_pack` is granted to
- * `authenticated` visitors too, so a plain `.select()` relying on RLS alone could
- * return a stranger's gear the moment it sits on their own public pack — "your trash"
- * silently showing somebody else's item. `.not('deleted_at', 'is', null)` is what
- * actually confines this to the trash; the two guards are independent, not redundant.
- */
-export async function loadGearTrash(client: PacksheetClient, userId: string) {
-  return client
-    .from('gear_items')
-    .select(GEAR_TRASH_SELECT)
-    .eq('user_id', userId)
-    .not('deleted_at', 'is', null)
-    .order('deleted_at', { ascending: false })
-    .order('id', { ascending: true });
 }

@@ -2,12 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   gearListPath,
   gearQueryToSearchParams,
+  hasUnsurfacedFilters,
   parseGearQuery,
   sortLinkSearchParams,
+  unsurfacedFilterParams,
   MAX_GEAR_PAGE,
   type GearQuery,
 } from '../src/lib/gear/query';
-import { GEAR_STATUSES, MAX_SEARCH_LENGTH, type GearStatus } from '../src/lib/gear/fields';
+import {
+  GEAR_SORT_KEYS,
+  GEAR_STATUSES,
+  MAX_SEARCH_LENGTH,
+  type GearSortKey,
+  type GearStatus,
+} from '../src/lib/gear/fields';
 import { GEAR_PATH } from '../src/lib/gear/routes';
 
 /**
@@ -279,6 +287,7 @@ describe('parseGearQuery: weight range (wmin/wmax/wunit)', () => {
 describe('parseGearQuery: sort / dir', () => {
   it.each([
     ['name', 'name'],
+    ['brand', 'brand'],
     ['weight', 'weight'],
     ['price', 'price'],
     ['added', 'added'],
@@ -458,6 +467,14 @@ describe('gearQueryToSearchParams / parseGearQuery: round trip', () => {
       ],
     ],
     [
+      'sort by brand descending, alongside a search that must survive it (PK-62)',
+      [
+        ['q', 'quilt'],
+        ['sort', 'brand'],
+        ['dir', 'desc'],
+      ],
+    ],
+    [
       'sort by price ascending on page 4',
       [
         ['sort', 'price'],
@@ -504,6 +521,38 @@ describe('gearQueryToSearchParams / parseGearQuery: round trip', () => {
 // ---------------------------------------------------------------------------
 // sortLinkSearchParams
 // ---------------------------------------------------------------------------
+
+describe('sortLinkSearchParams: every sort key, by construction', () => {
+  // Parametrised over GEAR_SORT_KEYS rather than over a hand-listed subset, so a key
+  // added later (as `brand` was, by PK-62) is covered without anybody remembering to add
+  // a case. The hand-listed version below exercised name/weight/price/added and would
+  // have said nothing about `brand`.
+  it.each(GEAR_SORT_KEYS)(
+    '%s becomes the active sort, ascending, from a different column',
+    (key) => {
+      const other: GearSortKey = key === 'name' ? 'added' : 'name';
+      const query: GearQuery = { ...DEFAULT_QUERY, sort: other, direction: 'desc' };
+      const result = parseGearQuery(sortLinkSearchParams(query, key));
+      expect(result.sort).toBe(key);
+      expect(result.direction).toBe('asc');
+    },
+  );
+
+  it.each(GEAR_SORT_KEYS)('%s toggles asc -> desc -> asc when it is already active', (key) => {
+    const ascending: GearQuery = { ...DEFAULT_QUERY, sort: key, direction: 'asc' };
+    const toDescending = parseGearQuery(sortLinkSearchParams(ascending, key));
+    expect(toDescending).toMatchObject({ sort: key, direction: 'desc' });
+    const backToAscending = parseGearQuery(sortLinkSearchParams(toDescending, key));
+    expect(backToAscending).toMatchObject({ sort: key, direction: 'asc' });
+  });
+
+  it.each(GEAR_SORT_KEYS)('%s keeps an active search rather than dropping it', (key) => {
+    // PK-62 acceptance, at the URL layer: sorting by brand must survive a search. Held
+    // for every key, not only the one the ticket named.
+    const query: GearQuery = { ...DEFAULT_QUERY, search: 'quilt' };
+    expect(parseGearQuery(sortLinkSearchParams(query, key)).search).toBe('quilt');
+  });
+});
 
 describe('sortLinkSearchParams', () => {
   it('clicking a column that is not the active sort sets it as sort, ascending', () => {
@@ -592,31 +641,165 @@ describe('gearListPath', () => {
     expect(reparsed).toEqual(query);
   });
 
-  // THE EXACT CASE PK-4's DEFECT 2 NAMES: deleting from a filtered list redirects
-  // with the filter preserved (`/gear?q=Bear+Can&undo=…&count=3`); clicking Undo used
-  // to redirect to a bare `/gear`, dropping `q=Bear+Can` right when the visitor is
-  // correcting a mistake. Parsing the undo POST's own URL — which still carries
-  // `undo`/`count` alongside the real filter — through parseGearQuery and then
-  // gearListPath must reproduce the SAME filtered view, with `undo`/`count` gone
-  // (so a refresh of the redirect target cannot re-trigger the undo) but every real
-  // filter intact.
-  it('parsing a URL that also carries undo/count and feeding it through gearListPath drops undo/count but keeps the active filter', () => {
+  // ANY PARAM parseGearQuery DOES NOT OWN IS DROPPED FROM A REDIRECT TARGET, and every
+  // real filter survives it. That is the property the two tests below pin, and it comes
+  // from gearListPath building its target by round-tripping a parsed GearQuery through
+  // gearQueryToSearchParams rather than carrying `Astro.url.searchParams` through by hand
+  // — see its own "BUILT ON gearQueryToSearchParams, NOT A HAND-COPIED URLSearchParams"
+  // section in src/lib/gear/query.ts. Nothing has to remember to delete a stray param by
+  // name, which is exactly what makes this worth a test rather than a comment: the
+  // mechanism is an absence.
+  //
+  // WHY THE FIRST CASE USES `utm_source` AND THE SECOND STILL USES `undo`/`count`. Both
+  // were originally written against PK-4's defect 2, when deleting from a filtered list
+  // redirected with `undo`/`count` appended and clicking Undo had to land back on the same
+  // filtered view without re-triggering itself. That mechanism no longer exists: PK-60
+  // removed soft delete, and with it the trash, the undo link and both params (see
+  // supabase/migrations/20260813120000_gear_hard_delete.sql). So the first case now uses
+  // `utm_source` — the foreign param gearListPath's own comment reaches for — because the
+  // property under test is about a param being foreign, not about those two names, and a
+  // test naming only dead params would keep proving it with an input the application can
+  // no longer produce.
+  //
+  // The second case DELIBERATELY KEEPS `undo`/`count`, read as HISTORICAL DEAD PARAMS
+  // rather than as anything this application emits today. A bookmark, a browser-history
+  // entry or a shared link made while PK-4's trash was live still carries them, and "a URL
+  // whose every param this module has never heard of" is precisely the shape of such a
+  // stale link arriving at a bulk action today. Neither param is special to gearListPath;
+  // they are here as a real example of the input, and they are only ever asserted to
+  // vanish.
+  it('a foreign param (utm_source) is dropped from the redirect target while the active filter survives', () => {
     const params = PARAMS([
       ['q', 'Bear Can'],
-      ['undo', '2026-01-15T10:30:00.000Z'],
-      ['count', '3'],
+      ['utm_source', 'newsletter'],
     ]);
     const path = gearListPath(parseGearQuery(params));
     expect(path).toBe(`${GEAR_PATH}?q=Bear+Can`);
-    expect(path).not.toContain('undo');
-    expect(path).not.toContain('count');
+    expect(path).not.toContain('utm_source');
+    expect(path).not.toContain('newsletter');
   });
 
-  it('an undo/count pair with NO other active filter drops back to bare GEAR_PATH, not GEAR_PATH?', () => {
+  it('a URL carrying nothing but params parseGearQuery does not own drops back to bare GEAR_PATH, not GEAR_PATH?', () => {
     const params = PARAMS([
       ['undo', '2026-01-15T10:30:00.000Z'],
       ['count', '3'],
     ]);
     expect(gearListPath(parseGearQuery(params))).toBe(GEAR_PATH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unsurfacedFilterParams / hasUnsurfacedFilters (PK-62)
+// ---------------------------------------------------------------------------
+
+/**
+ * The filters PK-62 removed the CONTROLS for without removing the BEHAVIOUR — see
+ * `unsurfacedFilterParams`' own comment for why leaving them half-removed gave the page
+ * three different answers to "does this link keep my category filter".
+ */
+describe('unsurfacedFilterParams', () => {
+  const paramsOf = (entries: [string, string][]) =>
+    [...unsurfacedFilterParams(parseGearQuery(PARAMS(entries)))].sort();
+
+  it('is empty for a query carrying nothing but surfaced filters', () => {
+    expect(
+      paramsOf([
+        ['q', 'quilt'],
+        ['status', 'owned'],
+        ['sort', 'brand'],
+        ['dir', 'desc'],
+        ['page', '3'],
+      ]),
+    ).toEqual([]);
+  });
+
+  it('carries category and brand, including repeats', () => {
+    expect(
+      paramsOf([
+        ['category', 'Shelter'],
+        ['category', 'Sleep'],
+        ['brand', 'Alpkit'],
+      ]),
+    ).toEqual([
+      ['brand', 'Alpkit'],
+      ['category', 'Shelter'],
+      ['category', 'Sleep'],
+    ]);
+  });
+
+  it('carries the weight range in the unit it was entered in, not in grams', () => {
+    // The visitor typed 2 lb. Re-emitting 907.184... g would be a different, uglier
+    // query that happens to mean the same thing — and would not round-trip.
+    expect(
+      paramsOf([
+        ['wmin', '2'],
+        ['wunit', 'lb'],
+      ]),
+    ).toEqual([
+      ['wmin', '2'],
+      ['wunit', 'lb'],
+    ]);
+  });
+
+  it('round-trips: re-parsing a query plus its unsurfaced params restores the filters', () => {
+    // This is the property the hidden inputs depend on — submitting the filter form must
+    // reproduce exactly the filtering the visitor arrived with.
+    const original = parseGearQuery(
+      PARAMS([
+        ['category', 'Shelter'],
+        ['brand', 'Alpkit'],
+        ['wmin', '2'],
+        ['wmax', '5'],
+        ['wunit', 'lb'],
+        ['q', 'tent'],
+      ]),
+    );
+    const resubmitted = new URLSearchParams(unsurfacedFilterParams(original));
+    resubmitted.set('q', original.search);
+    const reparsed = parseGearQuery(resubmitted);
+    expect(reparsed.categories).toEqual(original.categories);
+    expect(reparsed.brands).toEqual(original.brands);
+    expect(reparsed.minGrams).toBe(original.minGrams);
+    expect(reparsed.maxGrams).toBe(original.maxGrams);
+    expect(reparsed.search).toBe(original.search);
+  });
+});
+
+describe('hasUnsurfacedFilters', () => {
+  const check = (entries: [string, string][]) =>
+    hasUnsurfacedFilters(parseGearQuery(PARAMS(entries)));
+
+  it('is false for a bare query', () => {
+    expect(check([])).toBe(false);
+  });
+
+  it('is false for filters the page still shows a control for', () => {
+    expect(
+      check([
+        ['q', 'quilt'],
+        ['status', 'wishlist'],
+        ['sort', 'brand'],
+      ]),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['category', [['category', 'Shelter']]],
+    ['brand', [['brand', 'Alpkit']]],
+    ['a minimum weight', [['wmin', '500']]],
+    ['a maximum weight', [['wmax', '500']]],
+  ])('is true when the closet is narrowed by %s', (_label, entries) => {
+    expect(check(entries as [string, string][])).toBe(true);
+  });
+
+  it('is FALSE for a unit with no bound — a stale ?wunit=lb narrows nothing', () => {
+    // The distinction the notice depends on. gearQueryToSearchParams emits `wunit`
+    // whenever it is non-default, so unsurfacedFilterParams is non-empty here — but
+    // telling the visitor their closet is filtered would be a false alarm, and a notice
+    // that cries wolf is one nobody reads when it is right.
+    expect(check([['wunit', 'lb']])).toBe(false);
+    expect([...unsurfacedFilterParams(parseGearQuery(PARAMS([['wunit', 'lb']])))]).toEqual([
+      ['wunit', 'lb'],
+    ]);
   });
 });
