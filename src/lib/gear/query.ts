@@ -552,7 +552,9 @@ export const GEAR_SELECT =
   'id, name, brand, category, status, quantity, price, currency, weight_grams, acquired_on, photo_path, created_at, updated_at';
 
 /** The columns `src/pages/gear/[id].astro` needs: every `GEAR_FORM_FIELD` (so
- *  `gearItemToFormValues` can pre-fill the edit form) plus `id`, `photo_path` and
+ *  `gearItemToFormValues` can pre-fill the edit form) — with the Weight field reading the
+ *  `weight_grams` column that function converts out of, since PK-67 the one place a form
+ *  field and its column no longer share a name — plus `id`, `photo_path` and
  *  `created_at` for the parts of the page that are not the form itself. Unlike
  *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes` and `url` — the
  *  very fields that comment says a list row has no business fetching — because a
@@ -602,7 +604,7 @@ type GearItemsQueryBuilder = ReturnType<typeof _gearItemsQuery>;
  * `4.4 oz` is converted at entry and QUANTISED to the column's scale, so the row holds
  * `124.738`, not `124.73790175` — an error of up to half a milligram, which is five
  * hundred times the old tolerance. With 1e-6 g of slack, `wmax=4.4&wunit=oz` computes a
- * bound of `124.7379027` and EXCLUDES the row a user entered as exactly 4.4 oz: the exact
+ * bound of `124.73790275` and EXCLUDES the row a user entered as exactly 4.4 oz: the exact
  * failure I2 was filed about, reintroduced from the other end by the rounding rather than
  * by the floating point.
  *

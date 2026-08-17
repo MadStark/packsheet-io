@@ -52,7 +52,8 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
     // the actual wire format, so the type and the response cannot diverge in silence.
     expect(Array.isArray(data?.gear_items), 'the to-one embed came back as an array').toBe(false);
 
-    // `weight` is `numeric(12,3)`, which PostgREST serialises as an unquoted JSON number.
+    // `weight_grams` is `numeric(12,3)`, which PostgREST serialises as an unquoted JSON
+    // number.
     expect(data?.gear_items?.name).toBe('Renamed tent');
     expect(data?.gear_items?.weight_grams).toBe(999);
   });

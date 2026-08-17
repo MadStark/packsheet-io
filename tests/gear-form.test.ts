@@ -537,7 +537,7 @@ describe('parseGearItemForm: price and currency', () => {
 
 describe('parseGearItemForm: acquired_on', () => {
   // THE SINGLE MOST IMPORTANT CASE IN THE TICKET: acquired_on is a nullable column with
-  // NO database default (unlike quantity/weight/weight_unit/status, which this form
+  // NO database default (unlike quantity/weight/status, which this form
   // requires precisely because THEY have no honest blank — see the module comment's
   // "REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS" section). A blank date box means "I don't
   // know when I got this", which is a normal, complete answer, not a mistake — so this
@@ -844,7 +844,8 @@ describe('parseGearItemForm: failure carries the raw typed values back', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       // GEAR_FORM_FIELD's VALUES are the gear_items column names GearFormValues is
-      // keyed by (its own KEYS are camelCase, e.g. weightUnit for weight_unit) — this
+      // keyed by (its own KEYS are camelCase where the column is not, e.g. acquiredOn for
+      // acquired_on) — this
       // compares against the column names, which is what result.values is actually
       // keyed by.
       expect(Object.keys(result.values).sort()).toEqual(Object.values(GEAR_FORM_FIELD).sort());

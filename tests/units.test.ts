@@ -55,11 +55,14 @@ const UNIT_PAIRS: readonly (readonly [WeightUnit, WeightUnit])[] = WEIGHT_UNITS.
 );
 
 describe('WEIGHT_UNITS and isWeightUnit', () => {
-  // Pins the CHECK constraint in supabase/migrations/20260810120000_core_schema.sql
-  // literally: `check (weight_unit in ('g', 'kg', 'oz', 'lb'))`. If this list and that
-  // constraint ever disagree, a row can exist that this module cannot convert, or this
-  // module can accept a unit the database will reject on write.
-  it('is exactly the four units the gear_items.weight_unit CHECK constraint allows', () => {
+  // This USED to pin `check (weight_unit in ('g', 'kg', 'oz', 'lb'))` in
+  // 20260810120000_core_schema.sql, and both failure modes it named — a row this module
+  // cannot convert, a unit the database rejects on write — are now unreachable: PK-67
+  // deleted the column, so no row carries a unit and no write is validated against this
+  // list. What the assertion still pins is internal and worth keeping: `GRAMS_PER_UNIT`
+  // must be total over these four (the compiler says so, this says so at runtime), and
+  // they are the vocabulary `?wunit=` is narrowed against in src/lib/gear/query.ts.
+  it('is exactly the four units GRAMS_PER_UNIT and ?wunit= are defined over', () => {
     expect(WEIGHT_UNITS).toEqual(['g', 'kg', 'oz', 'lb']);
   });
 

@@ -43,7 +43,7 @@
  * stray name fails on entry instead of reaching a formatter that has to guess." That
  * defends the database. It does nothing for a value that has already left it: a row
  * read back through the Data API is typed merely as `string | null` by every client
- * that fetches it, same as `weight_unit` before `isWeightUnit`. `isCurrencyCode` is
+ * that fetches it, same as `profiles.weight_units` before `isWeightSystem`. `isCurrencyCode` is
  * this module's half of that same defence, mirroring the CHECK constraint's own regexp
  * so the two cannot silently drift apart — see the comment on the constant below.
  *
@@ -119,7 +119,9 @@
  * '^[A-Z]{3}$')`. Named here, once, exactly as that migration spells it, rather than
  * re-derived — the two files have no shared import, so keeping the pattern textually
  * identical is the only thing that keeps them from drifting apart the way
- * `WEIGHT_UNITS` and its own CHECK constraint are kept in step in `units.ts`.
+ * `WEIGHT_SYSTEMS` and `profiles.weight_units`' CHECK constraint are kept in step in
+ * `units.ts`. (That pairing was `WEIGHT_UNITS` and `gear_items.weight_unit` until PK-67
+ * removed the column.)
  */
 const CURRENCY_CODE_PATTERN = /^[A-Z]{3}$/;
 

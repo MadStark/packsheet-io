@@ -31,7 +31,9 @@
  * module argued that grams were canonical "in memory, during arithmetic, never at rest",
  * and pointed at `gear_items.weight` — stored as entered, beside a per-row `weight_unit` —
  * as a deliberate counterweight: the database kept the user's own precision, because a
- * 4.4 oz entry is not "124.7381 g" to anybody who typed 4.4.
+ * 4.4 oz entry is not "124.7381 g" to anybody who typed 4.4. (That figure is quoted as
+ * core_schema.sql wrote it; 4.4 oz is 124.738 g, which is the number every other line in
+ * this codebase prints.)
  *
  * What made that reasoning work was the per-row unit, and PK-67 removed it. The unit is
  * now one account-level choice (`public.profiles.weight_units`, metric or imperial), so
@@ -101,7 +103,11 @@
  */
 
 /**
- * The four units a weight can be WRITTEN in, smallest first within each system.
+ * The four units a weight can be DISPLAYED in — or filtered by, through `?wunit=`.
+ *
+ * NOT the units a weight can be ENTERED in, which is a strictly smaller set:
+ * `WEIGHT_ENTRY_UNIT` restricts entry to `g` or `oz`, and nothing lets a visitor type
+ * kilograms or pounds into the form at all.
  *
  * These are no longer the values of a database column. Until PK-67 this list mirrored
  * `check (weight_unit in ('g', 'kg', 'oz', 'lb'))` on `gear_items`, and this comment was
@@ -111,10 +117,11 @@
  * every member, which `Record<WeightUnit, number>` enforces at compile time rather than
  * by comment.
  *
- * The ORDER is load-bearing where the spelling used to be. `WEIGHT_SYSTEM_UNITS` below
- * lists each system's units smallest-first and `formatWeight` walks them in that order to
- * pick a scale, so reordering this array silently changes which unit a weight is rendered
- * in.
+ * THE ORDER HERE IS NOT LOAD-BEARING, and saying so matters more than it looks: nothing
+ * walks this array. `WEIGHT_SYSTEM_UNITS` below is a hand-written literal rather than a
+ * derivation of it, so reordering these four names changes nothing at all. The order that
+ * IS load-bearing is that array's, which `displayUnit` walks smallest-first — its own
+ * comment says so, and that is the one place to be careful.
  */
 export const WEIGHT_UNITS = ['g', 'kg', 'oz', 'lb'] as const;
 
@@ -127,11 +134,11 @@ export type WeightUnit = (typeof WEIGHT_UNITS)[number];
  * without a picker in front of them, and all three must fail this exactly as a bare typo
  * would.
  *
- * ITS REMAINING CALLERS ARE NARROWER THAN THEY WERE, and worth naming because the obvious
+ * IT HAS EXACTLY ONE PRODUCTION CALLER LEFT, and it is worth naming because the obvious
  * ones are gone. Nothing reads a unit off a gear row or a form field any more — there is
- * no such column and no such field. What is left is `src/lib/gear/query.ts`, narrowing the
- * hand-editable `?wunit=` search parameter, which is a string a visitor types into an
- * address bar and therefore exactly the case this was written for.
+ * no such column and no such field. What remains is `src/lib/gear/query.ts`, narrowing the
+ * hand-editable `?wunit=` search parameter: a string a visitor types into an address bar,
+ * and therefore exactly the case this was written for.
  */
 export function isWeightUnit(value: unknown): value is WeightUnit {
   return typeof value === 'string' && (WEIGHT_UNITS as readonly string[]).includes(value);
@@ -325,9 +332,17 @@ export function fromGrams(grams: number, unit: WeightUnit): number {
 }
 
 /**
- * Converts a value directly from one unit to another via grams, for the entry-form
- * case where a user switches their preferred unit and the figure they typed has to
- * follow them. Deliberately just `fromGrams(toGrams(...))` rather than a hand-derived
+ * Converts a value directly from one unit to another via grams.
+ *
+ * IT HAS NO PRODUCTION CALLER TODAY, which is worth saying plainly rather than leaving the
+ * next reader to grep. It existed for the entry-form case where a visitor switched their
+ * preferred unit and the figure they had typed had to follow them — a workflow PK-67
+ * removed along with the per-item unit control. It is kept as the composed form of
+ * `toGrams`/`fromGrams`, exercised by tests/units.test.ts, on the grounds that the next
+ * caller wanting a cross-unit conversion should find one here rather than write the
+ * composition again; delete it if that stops being true.
+ *
+ * Deliberately just `fromGrams(toGrams(...))` rather than a hand-derived
  * `from`-to-`to` factor table: a 4×4 table of cross-factors is sixteen numbers that
  * could individually drift from `GRAMS_PER_UNIT`, where this has exactly four numbers
  * to be right, and going via grams is the same trip every other consumer of a weight
@@ -371,10 +386,16 @@ export function roundWeight(value: number): number {
  * `WEIGHT_DECIMALS` — that is the column's scale, a storage fact, and three decimals of a
  * kilogram on a closet list is `1.850 kg`, which is noise pretending to be precision.
  *
- * The four numbers are chosen so that one step of the last shown digit is roughly a gram
- * in every unit: 1 g exactly, 0.01 kg is 10 g, 0.1 oz is 2.8 g, 0.01 lb is 4.5 g. A gear
- * list is compared by eye, and a column where one row resolves to the gram and the next to
- * ten grams reads as though the finer row were measured more carefully.
+ * The four numbers keep each unit's last shown digit within an order of magnitude of a
+ * gram: 1 g exactly, 0.01 kg is 10 g, 0.1 oz is 2.8 g, 0.01 lb is 4.5 g. Three decimals of
+ * a kilogram would render `1.850 kg` — noise pretending to be precision — and none would
+ * render `2 kg` for anything between 1.5 and 2.5 kg.
+ *
+ * A MISMATCH SURVIVES ACROSS EACH SYSTEM'S OWN THRESHOLD, and it is accepted rather than
+ * hidden: a 999 g row resolves to the gram and a 1.00 kg row to ten grams, so the finer
+ * row can read as though it were measured more carefully. Removing that would mean scaling
+ * the shown precision to the magnitude — a second rule, to be kept in step with this one
+ * and with the thresholds, for a difference nobody comparing gear has been troubled by.
  */
 const WEIGHT_DISPLAY_DECIMALS: Readonly<Record<WeightUnit, number>> = {
   g: 0,

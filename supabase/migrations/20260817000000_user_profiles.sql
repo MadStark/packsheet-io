@@ -180,11 +180,19 @@ create policy profiles_update_own on public.profiles
 -- of a SECURITY DEFINER function, where row-level security does not apply at all — so a
 -- delete policy would not be what authorises it even if one existed.
 --
--- Withholding the policy is therefore the tighter position at no cost: DELETE is granted
--- to `authenticated` at the table level (see the grants below, which cannot be narrowed
--- per-statement without breaking PostgREST's embedding — core_schema.sql:965 explains why
--- column and statement grants are not usable here), and with no policy to permit it every
--- attempted delete matches zero rows.
+-- Withholding the policy is therefore the tighter position at almost no cost. DELETE *is*
+-- granted to `authenticated` below, so the privilege exists and it is the absent policy
+-- alone that makes every attempted delete match zero rows.
+--
+-- THAT GRANT IS NOT FORCED ON US, and this comment previously claimed otherwise — it cited
+-- core_schema.sql:965 as though PostgREST needed it. That passage is about COLUMN-level
+-- SELECT grants breaking an embed, which is a different problem: nothing in PostgREST
+-- requires a DELETE grant, and `profiles` participates in no embed at all (no foreign key
+-- points at it). The grant is here for symmetry with the other five tables, and so that a
+-- future "reset my settings" action is a policy change rather than a migration. If that
+-- symmetry is ever worth less than the belt, drop `delete` from the grant below — nothing
+-- depends on it, `delete_own_account()` least of all, since a SECURITY DEFINER function
+-- does not run under these privileges.
 
 -- ---------------------------------------------------------------------------
 -- Grants — REVOKE first, then grant back by name

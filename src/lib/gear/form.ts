@@ -785,11 +785,29 @@ export function parseGearItemForm(form: FormData, system: WeightSystem): GearFor
  *
  * WEIGHT COMES BACK IN THE ACCOUNT'S BASE UNIT, NOT THE SCALED ONE (PK-67). The stored
  * figure is grams, and this converts it to whatever `parseGearItemForm` will read it back
- * as — `g` for metric, `oz` for imperial — so the two are exact inverses and a save that
- * changes nothing else cannot drift the weight. `roundWeight` after `fromGrams` is what
- * makes that true in floating point: dividing 124.738 by 28.349523125 does not land
- * exactly on 4.4, and `String()` of the unrounded quotient would put `4.400000000000001`
- * in the visitor's field.
+ * as — `g` for metric, `oz` for imperial. `roundWeight` after `fromGrams` is what keeps
+ * the field legible: 124.738 g is 4.400003465666761 oz, and `String()` of that quotient
+ * would put seventeen digits in the visitor's box, where rounding gives `4.4`.
+ *
+ * IT IS NOT A LOSSLESS ROUND TRIP FOR AN IMPERIAL ACCOUNT, and that has to be said here
+ * because the paragraph above reads like a promise that it is. 0.001 oz is 0.0283 g —
+ * COARSER than the column's own 0.001 g quantum — so a gram figure that did not originate
+ * as a three-decimal ounce value cannot survive display and re-save unchanged. Measured:
+ * 124.750 g opens as `4.4` and saves back as 124.738 g; 1850 g opens as `65.257` and saves
+ * back as 1850.005 g.
+ *
+ * Reachable without anything unusual: enter a weight under metric, switch the account to
+ * imperial, edit the item's NAME, save. The weight moves by up to half an ounce-quantum
+ * even though nobody touched it. A weight entered under the account's current system is
+ * stable; one inherited from the other system, or from PK-67's own backfill, is not.
+ *
+ * That is the cost of entering in a single base unit, which is the trade the ticket makes
+ * deliberately — the alternative is storing the entered unit again, which is the thing
+ * PK-67 exists to remove. It is bounded (≈14 mg for ounces), it only moves a row somebody
+ * actually saved, and it is far below any weight that distinguishes two pieces of gear.
+ * Note the error here is the column's three-decimal gram quantisation, NOT floating point:
+ * the same distinction `query.ts` draws for `WEIGHT_COMPARISON_TOLERANCE_GRAMS`, where
+ * rounding is likewise some five hundred times larger than the IEEE-754 noise.
  *
  * IT IS THE BASE UNIT AND NOT THE DISPLAYED ONE, deliberately, and PK-67 calls this out
  * so it is not later filed as a bug: an item the closet lists as `1.85 kg` opens its edit

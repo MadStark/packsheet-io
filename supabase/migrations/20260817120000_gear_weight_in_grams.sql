@@ -53,12 +53,15 @@
 --   5. Drop weight_unit.
 --   6. Rename weight to weight_grams.
 --
--- Step 2 MUST precede steps 5 and 6, and this is the constraint that fixes the whole
--- order: rewriting an override that carries a weight but no unit of its own requires
--- knowing which unit that weight was expressed in, and the only two places that fact
--- exists are `pack_items.snapshot->>'weight_unit'` and `gear_items.weight_unit` — one of
--- which step 2 itself removes and the other of which step 5 drops. Do the column surgery
--- first and the information needed to convert those rows is gone.
+-- Step 2 MUST precede step 5, and this is the constraint that fixes the whole order:
+-- rewriting an override that carries a weight but no unit of its own requires knowing
+-- which unit that weight was expressed in, and the only two places that fact exists are
+-- `pack_items.snapshot->>'weight_unit'` and `gear_items.weight_unit`, which step 5 drops.
+-- Do the column surgery first and the information needed to convert those rows is gone.
+-- (Step 6 is only a rename and constrains nothing; it is listed for completeness.)
+--
+-- Step 2 has an internal order for the same reason: 2a reads
+-- `snapshot->>'weight_unit'`, and 2c is what removes that key, so 2a must run first.
 --
 -- Step 1 precedes everything for the reason `20260813120000_gear_schema_slim.sql` sets out
 -- at length for its own replace-before-drop ordering: a `language sql` function body is
@@ -139,25 +142,34 @@ comment on function private.gear_item_snapshot(public.gear_items) is
 -- to prevent. So the rows are converted, once, here — and after this runs there is exactly
 -- one snapshot shape in the database.
 --
--- THE TWO TRIGGERS ON pack_items ARE BOTH SUPPRESSED, and the first of them is not
--- optional in the way the second is:
+-- THE TWO TRIGGERS THAT FIRE ON UPDATE ARE BOTH SUPPRESSED, and the first is not optional
+-- in the way the second is. (`pack_items` carries a third, `pack_items_set_row_timestamps`,
+-- which is BEFORE INSERT and so cannot fire for anything in this section — left enabled
+-- deliberately rather than overlooked.)
 --
 --   - `pack_items_assert_unlocked` (core_schema.sql:606) raises `pack % is locked` on any
---     INSERT or UPDATE at `pg_trigger_depth() = 1`, which a migration's UPDATE is. Every
---     row this section needs to touch is a row that has a snapshot, and a row HAS a
---     snapshot precisely because its pack was locked or its gear was deleted — so without
---     this the statement below does not merely restamp something, it ABORTS the migration
---     on the first locked pack it meets. The trigger is protecting client writes against a
---     locked pack; this is a schema migration rewriting the frozen copy in place, which is
---     the one write that has to be allowed through a lock.
+--     INSERT or UPDATE at `pg_trigger_depth() = 1`, which a migration's UPDATE is. Many of
+--     the rows below sit on locked packs — a row HAS a snapshot precisely because its pack
+--     was locked or its gear was deleted — so without this the statement does not merely
+--     restamp something, it ABORTS the migration on the first locked pack it meets. The
+--     trigger protects CLIENT writes against a locked pack; this is a schema migration
+--     rewriting the frozen copy in place, which is the one write that has to pass a lock.
+--
+--     Not every row here is locked, and the suppression is scoped to the statements rather
+--     than to a row set: 2a below selects on `overrides` alone and reaches live, unlocked,
+--     un-snapshotted pack items too, which the trigger would have let through anyway.
 --   - `pack_items_set_updated_at` is suppressed for the reason
 --     20260813120000_gear_schema_slim.sql gives for the identical move on gear_items: left
 --     enabled it would stamp `updated_at = now()` on every rewritten row, claiming a human
 --     edited a locked pack just now, in a column optimistic-concurrency logic compares
 --     against. No user touched anything.
 --
--- Both are re-enabled immediately afterwards, so every other write against this table —
--- including any running concurrently with this migration — keeps the ordinary guarantees.
+-- Both are re-enabled before the transaction ends. What actually protects a concurrent
+-- writer in between is NOT the re-enable but the ACCESS EXCLUSIVE lock that `alter table
+-- ... disable trigger` takes, being a catalogue change rather than a session setting: no
+-- other session can write this table while the triggers are off, because none can read it.
+-- That is also why this pair and the updates between them must stay in one transaction —
+-- split them apart and the unguarded window becomes real rather than theoretical.
 alter table public.pack_items disable trigger pack_items_assert_unlocked;
 alter table public.pack_items disable trigger pack_items_set_updated_at;
 
@@ -233,10 +245,15 @@ update public.pack_items
 --
 -- NOT ROUNDED to three decimals, deliberately, even though `gear_items.weight` lands in a
 -- `numeric(12, 3)` below and will be. `snapshot` is jsonb with no scale of its own, and the
--- number this replaces was whatever the column held at freeze time; converting at full
--- precision reproduces EXACTLY the gram figure `toGrams` computed from that row before this
--- migration, so a pack locked beforehand reports an identical total afterwards rather than
--- one that merely agrees to three decimals. Rounding here would introduce a discrepancy
+-- number this replaces was whatever the column held at freeze time.
+--
+-- Converting at full precision reproduces the gram figure `toGrams` computed from that row
+-- to within one unit in the last place — not exactly, and the difference is worth naming
+-- rather than overclaiming: Postgres multiplies in exact decimal and yields
+-- `124.7379017500`, where the old TypeScript product was the double `124.73790175000002`.
+-- The two differ in the seventeenth significant digit and nowhere earlier, so a pack locked
+-- beforehand reports the same total to any precision a person can observe. Rounding to
+-- three decimals instead would move it by up to 5e-4 g — some five hundred times further —
 -- purely to match a constraint this column does not have.
 --
 -- The `jsonb_typeof(...) = 'number'` guard matters for the same reason totals.ts checks:
@@ -348,9 +365,10 @@ alter table public.gear_items enable trigger gear_items_set_updated_at;
 -- holding grams is a column every reader has to remember something about, and the memory
 -- is exactly what the old design had `weight_unit` sitting next to it to avoid needing. A
 -- column called `weight_grams` states its unit at every call site that names it, including
--- the ones nobody has written yet — and, usefully, it is the same name `GEAR_SELECT` and
--- the generated types already used for the derived column, so a query that forgets to
--- follow the change fails at `tsc` rather than at request time.
+-- the ones nobody has written yet. It is also the name `GEAR_SELECT` and the generated
+-- types already used for the derived column, so every reader of the GRAM figure keeps
+-- working untouched; what fails at `tsc` rather than at request time is any surviving
+-- reference to `weight` or `weight_unit`, which is the direction that matters.
 alter table public.gear_items
   drop column weight_unit;
 

@@ -26,8 +26,10 @@ type GearItemColumn = keyof Database['public']['Tables']['gear_items']['Row'];
  * `supabase/migrations/20260810120000_core_schema.sql:104` —
  * `check (status in ('owned', 'wishlist', 'retired'))`. The two sides are independent
  * files with no shared import, so nothing enforces them staying in step — this comment
- * is that enforcement, the same way `WEIGHT_UNITS`' own comment pins it against
- * `weight_unit`'s CHECK constraint.
+ * is that enforcement, the same way `WEIGHT_SYSTEMS`' own comment pins it against
+ * `check (weight_units in ('metric', 'imperial'))` on `public.profiles`. (It used to name
+ * `WEIGHT_UNITS` and `weight_unit`; PK-67 deleted that column, and `WEIGHT_SYSTEMS` is now
+ * the list with a constraint behind it.)
  *
  * A NOTE FOR THE NEXT READER WHO DIFFS THIS AGAINST THE TICKET. PK-4's ticket text names
  * a different set — Available / In use / Maintenance / Retired — and that mismatch is
@@ -41,7 +43,7 @@ type GearItemColumn = keyof Database['public']['Tables']['gear_items']['Row'];
  * the mismatch by inventing a fourth label this module would then have nowhere to
  * store. If the product decision is later made to adopt the ticket's set, that is a
  * schema change with its own migration, and `GEAR_STATUSES` moves with it — see
- * `WEIGHT_UNITS`'s comment for the same relationship applied to units.
+ * `WEIGHT_SYSTEMS`'s comment for the same relationship applied to the units setting.
  */
 export const GEAR_STATUSES = ['owned', 'wishlist', 'retired'] as const;
 
@@ -126,11 +128,11 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
 
 /**
  * Maps each public sort key to the real `gear_items` column PostgREST orders by.
- * `weight` sorts by `weight_grams` rather than the raw `weight` column deliberately —
- * `weight` alone is not comparable across rows entered in different units (4.4 is not
- * comparable to 2000 without knowing which is oz and which is g); `weight_grams` is the
- * generated column `supabase/migrations/20260813000000_gear_closet.sql` exists to make
- * that comparison possible at all.
+ * `weight` sorts by `weight_grams`, which since PK-67 IS the stored weight rather than a
+ * generated copy of it: every row is grams, so a plain column sort already compares like
+ * with like. There is no raw `weight` column any more, and no row can be "entered in a
+ * different unit" from its neighbour — the problem this mapping existed to explain, which
+ * `20260817120000_gear_weight_in_grams.sql` removed at the source.
  *
  * `price` sorts by the raw `price` column, and that is a known, accepted limitation
  * rather than an oversight: a pack can hold gear priced in different currencies (see
@@ -138,8 +140,8 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
  * MERELY DISCOURAGED" — the same reasoning applies to ordering, not only summing,
  * because there is no exchange rate this product is willing to invent). Sorting by the
  * bare number therefore orders £10 below $15 as "cheaper", which is not a real value
- * ordering when the two rows disagree about currency. Unlike weight, there is no
- * generated "canonical price" column this migration could add — canonicalising a price
+ * ordering when the two rows disagree about currency. There is no canonical-price column
+ * this migration could add — canonicalising a price
  * would require an exchange rate, and `money.ts` argues at length for why this product
  * must never invent one. This is left as a known limitation for the UI to surface later
  * (e.g. grouping or flagging mixed-currency results) rather than solved here.

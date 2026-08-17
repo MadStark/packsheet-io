@@ -570,11 +570,16 @@ describe('bucket classification', () => {
 
 describe('base + worn + consumable === total', () => {
   /**
-   * Mixed units in one pack, which is the case the grams-canonical claim is actually
-   * about: four items entered in four different units, in three different buckets, in two
-   * categories. An engine that summed the numbers as entered would produce a total that
-   * is not merely imprecise but meaningless, and would still satisfy the partition — so
-   * the identity is asserted alongside the value, not instead of it.
+   * Four items across three buckets and two categories, with weights spanning four orders
+   * of magnitude — the shape that exercises the partition rather than a single bucket.
+   *
+   * These were four items ENTERED IN FOUR DIFFERENT UNITS until PK-67, and the fixture
+   * kept its arithmetic when the units went: each weight is still written as its own
+   * conversion (`1.1 * GRAMS.lb`) so the numbers stay recognisable against the assertions
+   * below. What that no longer tests is an engine summing values as entered, because a
+   * pack can no longer hold two rows denominated differently — every row is grams before
+   * this engine ever sees it. The partition itself is what these cases pin now, and the
+   * identity is asserted alongside the values rather than instead of them.
    */
   const mixed = pack([
     category('worn-and-base', [
@@ -597,7 +602,7 @@ describe('base + worn + consumable === total', () => {
     ]),
   ]);
 
-  it('holds exactly, with four units in one pack', () => {
+  it('holds exactly, across three buckets and two categories', () => {
     const totals = computeTotals(mixed);
 
     // Exact equality, not toBeCloseTo: `total` is DEFINED as this sum rather than
@@ -606,7 +611,7 @@ describe('base + worn + consumable === total', () => {
     expect(totals.base + totals.worn + totals.consumable).toBe(totals.total);
   });
 
-  it('converts every unit to grams before adding anything', () => {
+  it('sums the stored gram figures without rescaling any of them', () => {
     const totals = computeTotals(mixed);
 
     expect(totals.worn).toBeCloseTo(1.1 * GRAMS.lb, 9);

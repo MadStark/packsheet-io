@@ -600,11 +600,13 @@ describe('sorting', () => {
     ]);
   });
 
-  it('sorts by weight_grams, not the raw entered number — a 2 lb item outweighs a 500 g one', async () => {
-    // Featherweight Quilt: 300 g. Basecamp Grill: 500 g. Overnight Pack: 2 lb ≈ 907
-    // g. Sorting by the bare `weight` column would rank Overnight Pack (raw value 2)
-    // below both — this is the assertion that proves weight_grams is what
-    // GEAR_SORT_COLUMNS.weight actually points at.
+  it('sorts by weight_grams — a 2 lb item outweighs a 500 g one', async () => {
+    // Featherweight Quilt: 300 g. Basecamp Grill: 500 g. Overnight Pack: 2 lb, stored as
+    // 907.185 g. Since PK-67 there is no "raw entered number" for this to be contrasted
+    // with — every row is grams — so what this pins is narrower than it used to be:
+    // GEAR_SORT_COLUMNS.weight points at a real column that exists and orders by it. The
+    // fixture keeps its mixed-unit ENTRY values because they are what a reader can check
+    // the ordering against by hand.
     expect(await sortedNames('weight', 'asc')).toEqual([
       'Featherweight Quilt',
       'Basecamp Grill',
@@ -1553,9 +1555,9 @@ describe('500 items remain responsive', () => {
     const PERF_COUNT = 500;
     const categories = ['Shelter', 'Cook', 'Sleep', 'Pack', 'Camp'];
 
-    // weight = i, unit 'g' throughout, so weight_grams = i exactly for every row —
-    // unique and monotonic, which makes the expected sorted page below computable
-    // in plain arithmetic rather than needing to guess how Postgres breaks ties.
+    // weight_grams = i for every row — unique and monotonic, which makes the expected
+    // sorted page below computable in plain arithmetic rather than needing to guess how
+    // Postgres breaks ties.
     const rows = Array.from({ length: PERF_COUNT }, (_, i) => ({
       name: `Perf Item ${String(i).padStart(4, '0')}`,
       category: categories[i % categories.length],
