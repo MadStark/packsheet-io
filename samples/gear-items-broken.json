@@ -1,0 +1,10 @@
+[
+  { "name": "This one is fine", "weight_grams": 100 },
+  { "name": "Priced with no currency", "weight_grams": 100, "price": 42 },
+  { "name": "Written from the old ticket text", "weight": 4.4, "weight_unit": "oz" },
+  { "name": "Bought in the future", "weight_grams": 100, "acquired_on": "2099-01-01" },
+  { "name": "Misspelled field", "weight_grams": 100, "catagory": "Shelter" },
+  { "weight_grams": 100 },
+  { "name": "Impossible status", "weight_grams": 100, "status": "active" },
+  { "name": "Too precise a weight", "weight_grams": 124.7381 }
+]

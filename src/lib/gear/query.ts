@@ -58,6 +58,9 @@ import {
   type GearStatus,
 } from './fields';
 import { GEAR_PATH } from './routes';
+// The export's column list, kept beside the type it produces rather than here — see
+// `GEAR_EXPORT_SELECT`'s own comment in that module for why the two live together.
+import { GEAR_EXPORT_SELECT } from './json-schema';
 
 // ---------------------------------------------------------------------------
 // GearQuery
@@ -831,4 +834,53 @@ export async function loadGearItem(client: PacksheetClient, userId: string, id: 
     .eq('id', id)
     .eq('user_id', userId)
     .maybeSingle();
+}
+
+// ---------------------------------------------------------------------------
+// loadGearItemsForExport — the owner-scoped read behind a JSON export
+// ---------------------------------------------------------------------------
+
+/**
+ * The rows behind a JSON export (PK-65), for a selection of ids.
+ *
+ * `.eq('user_id', userId)` IS LOAD-BEARING HERE FOR A SHARPER REASON THAN ON THE OTHER
+ * TWO LOADS ON THIS PAGE. `gear_items` carries two permissive SELECT policies and RLS
+ * UNIONS them, so `gear_items_select_via_public_pack` makes any item sitting on anybody's
+ * public pack readable by EVERY visitor — that policy is granted to `anon` as well as
+ * `authenticated` (core_schema.sql), which is how a shared pack page renders for a
+ * stranger at all. See `loadGearCloset`'s own comment for the general shape of that trap. What makes it worse in this particular query is the
+ * OUTPUT: the other two loads render a page, where a stranger's row would at least be
+ * visible as something odd on screen. This one serialises whatever it gets into a file
+ * and hands it over as a download, including `notes`, `price` and `url` — the fields a
+ * public pack page does not show. Without the owner filter, a crafted `?id=` list would
+ * be a working data-exfiltration endpoint for every item on every public pack in the
+ * product, delivered as a tidy JSON document. The filter is the whole of what stops that.
+ *
+ * ORDERED BY NAME, NOT BY THE ORDER THE IDS ARRIVED. A file is a document, and a document
+ * that reorders itself between two exports of the same closet is one that cannot be
+ * usefully diffed. Input order is the visitor's checkbox order, which is really the
+ * current sort — a view state that has nothing to do with the file. `id` breaks ties, so
+ * two items sharing a name still come out in a stable order rather than whatever the
+ * planner chose that day.
+ *
+ * NO CAP OF ITS OWN, deliberately, unlike `deleteGearItems` and `importGearItems`. Those
+ * two WRITE, and their caps exist because an unbounded write is irreversible or expensive
+ * at the scale of whatever it matched. This reads, and its caller is `parseBulkAction`,
+ * which refuses a selection over `MAX_BULK_IDS` before an id ever reaches here. An
+ * over-large read is a slow response, not a wrong one.
+ */
+export async function loadGearItemsForExport(
+  client: PacksheetClient,
+  userId: string,
+  ids: readonly string[],
+) {
+  if (ids.length === 0) return { items: [], error: null };
+  const { data, error } = await client
+    .from('gear_items')
+    .select(GEAR_EXPORT_SELECT)
+    .eq('user_id', userId)
+    .in('id', ids as string[])
+    .order('name', { ascending: true })
+    .order('id', { ascending: true });
+  return { items: data ?? [], error };
 }
