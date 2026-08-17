@@ -32,10 +32,17 @@ beforeAll(async () => {
   alicePack = await createPack(alice, { visibility: 'private', itemCount: 2 });
   bob = await createUser('bob');
   bobPack = await createPack(bob, { visibility: 'private', itemCount: 1 });
+
+  // PK-67: both users get a profiles row, so the deletion below is proved against a table
+  // that actually has something in it. A profile is created lazily — absence means the
+  // default — so without this the assertion would pass against a user who never had one,
+  // which is the empty-fixture trap this file's own comments warn about.
+  await alice.client.from('profiles').upsert({ user_id: alice.id, weight_units: 'imperial' });
+  await bob.client.from('profiles').upsert({ user_id: bob.id, weight_units: 'imperial' });
 });
 
 describe('a signed-in user deletes their own account', () => {
-  it('removes the auth.users row and every pack, category, item and gear row it owned', async () => {
+  it('removes the auth.users row and every pack, category, item, gear and profile row it owned', async () => {
     const { error } = await alice.client.rpc('delete_own_account');
     expect(error).toBeNull();
 
@@ -67,11 +74,17 @@ describe('a signed-in user deletes their own account', () => {
     const gear = await adminSql('select id from gear_items where id = any($1)', [
       alicePack.gearItemIds,
     ]);
+    // The sixth table, added by PK-67. It is deleted by name in the function like the
+    // other five, even though `profiles.user_id` carries its own `on delete cascade` —
+    // see that migration's own note on why the guarantee is kept total rather than
+    // "total except for the newest table".
+    const profiles = await adminSql('select user_id from profiles where user_id = $1', [alice.id]);
 
     expect(packs).toEqual([]);
     expect(categories).toEqual([]);
     expect(items).toEqual([]);
     expect(gear).toEqual([]);
+    expect(profiles).toEqual([]);
   });
 
   // The other half of "exactly this user's rows and nobody else's". Everything above

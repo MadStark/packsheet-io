@@ -343,7 +343,7 @@ export async function createUser(label = 'user'): Promise<TestUser> {
  * author. That one is still Ref 26's to close.
  */
 export const PACK_TREE_SELECT =
-  'id, name, slug, visibility, locked_at, pack_categories(id, name, position, pack_items(id, quantity, worn, consumable, packed, position, overrides, snapshot, gear_items(id, name, brand, weight, weight_unit, price, currency)))';
+  'id, name, slug, visibility, locked_at, pack_categories(id, name, position, pack_items(id, quantity, worn, consumable, packed, position, overrides, snapshot, gear_items(id, name, brand, weight_grams, price, currency)))';
 
 // ---------------------------------------------------------------------------
 // Superuser access — catalogue only

@@ -1,22 +1,23 @@
 /**
  * The units and weight engine (Ref 23 — "Units and weight engine (pure functions)").
- * `supabase/migrations/20260810120000_core_schema.sql` says it plainly on the
- * `gear_items.weight` column: "Conversion and totalling are pure functions in the
- * application (Ref 23), not database concerns." This module, and this module alone,
+ * `supabase/migrations/20260817120000_gear_weight_in_grams.sql` says it plainly on the
+ * `gear_items.weight_grams` column, carrying the sentence forward from the core schema's
+ * comment on the `weight` column it replaced: "Conversion and totalling are pure functions
+ * in the application (Ref 23), not database concerns." This module, and this module alone,
  * is that promise kept — no I/O, no framework import, no Supabase client, nothing that
  * can fail for a reason other than a bad argument.
  *
  * ---------------------------------------------------------------------------
- * GRAMS IS THE CANONICAL UNIT
+ * GRAMS IS THE CANONICAL UNIT — IN MEMORY, IN ARITHMETIC, AND AT REST
  * ---------------------------------------------------------------------------
  *
  * Every weight number that exists anywhere downstream of entry — a pack total, a
  * category rollup, a comparison between two items — is a gram figure at full
  * floating-point precision. Unit conversion is an ENTRY AND DISPLAY concern only: a
- * value arrives in whatever unit the user chose, `toGrams` converts it exactly once,
- * and from that point on nothing downstream ever holds, stores, or reasons about a
+ * value arrives in the base unit of the account's system, `toGrams` converts it exactly
+ * once, and from that point on nothing downstream ever holds, stores, or reasons about a
  * non-gram number. `fromGrams` exists solely to bring a gram figure back out to a
- * human-chosen unit at the moment it is rendered.
+ * human-readable unit at the moment it is rendered.
  *
  * The alternative — carrying the original unit alongside every intermediate value and
  * converting lazily wherever two weights need to be combined — is the more "faithful"
@@ -26,19 +27,34 @@
  * carrying grams everywhere after that means there is exactly one place a conversion
  * bug can hide, and this file is that place.
  *
- * This is deliberately the OPPOSITE choice from `gear_items.weight` itself, which is
- * stored as entered rather than canonicalised — see that column's migration comment.
- * The two are not in tension: the database keeps the user's own precision at rest (a
- * 4.4 oz entry is not "124.7381 g" to anybody who typed 4.4), while this module keeps
- * every computation that combines more than one weight honest. Grams are canonical in
- * memory, during arithmetic, never at rest.
+ * THE DATABASE NOW AGREES, AND THIS PARAGRAPH USED TO SAY THE OPPOSITE. Until PK-67 this
+ * module argued that grams were canonical "in memory, during arithmetic, never at rest",
+ * and pointed at `gear_items.weight` — stored as entered, beside a per-row `weight_unit` —
+ * as a deliberate counterweight: the database kept the user's own precision, because a
+ * 4.4 oz entry is not "124.7381 g" to anybody who typed 4.4.
+ *
+ * What made that reasoning work was the per-row unit, and PK-67 removed it. The unit is
+ * now one account-level choice (`public.profiles.weight_units`, metric or imperial), so
+ * there is no longer a per-row "as entered" unit for the column to be faithful to —
+ * keeping one would have recorded which way the account happened to be set on the day
+ * each row was written, which describes a preference rather than a fact about the gear.
+ * `gear_items.weight_grams` is therefore grams at rest, and the name says so.
+ *
+ * The 4.4-oz reader is not worse off. They still type 4.4 and still see `4.4 oz`, because
+ * `formatWeight` derives the displayed unit from their account setting and the magnitude
+ * rather than from a stored string. What is genuinely gone is the ability to distinguish
+ * their row from 124.738 g typed by a metric user — two rows that now hold the same
+ * number because they describe the same weight, which is the entire point of a closet
+ * whose rows can be compared by eye.
  *
  * ---------------------------------------------------------------------------
  * THROW, NOT RETURN, ON NaN, INFINITY AND NEGATIVES
  * ---------------------------------------------------------------------------
  *
- * `gear_items.weight` carries `check (weight >= 0 and weight < 'Infinity'::numeric)`,
- * and that column's comment explains why the upper bound is there at all: Postgres
+ * `gear_items.weight_grams` carries `check (weight_grams >= 0 and weight_grams <
+ * 'Infinity'::numeric)` — the constraint PK-67's rename carried across from `weight`
+ * unchanged, Postgres having rewritten its expression along with the column — and that
+ * column's comment explains why the upper bound is there at all: Postgres
  * orders NaN ABOVE every other numeric value, so a plain `>= 0` check alone lets NaN
  * straight through the Data API, and one NaN poisons every total that touches it
  * afterwards, invisibly, because NaN prints as "NaN" only if something remembers to
@@ -58,9 +74,9 @@
  * every honest figure next to it. A bad weight has to stop the computation that
  * produced it, loudly, at the point where it first becomes a weight — which is here.
  *
- * BOTH HALVES OF THAT CHECK CONSTRAINT, not only the upper one. `weight >= 0` is the
+ * BOTH HALVES OF THAT CHECK CONSTRAINT, not only the upper one. `weight_grams >= 0` is the
  * half that is easy to skip here because it looks like a data-entry concern the database
- * has already handled — and it has, for `gear_items.weight`. It has NOT handled
+ * has already handled — and it has, for `gear_items.weight_grams`. It has NOT handled
  * `pack_items.overrides`, which is constrained only to `jsonb_typeof(overrides) =
  * 'object'` with its contents unconstrained, and which the owner may PATCH on any
  * unlocked pack item through the ordinary Data API. An override of `{"weight": -400}` is
@@ -85,29 +101,127 @@
  */
 
 /**
- * The four units `gear_items.weight_unit` accepts, in the exact order and spelling of
- * the CHECK constraint in `supabase/migrations/20260810120000_core_schema.sql`:
- * `check (weight_unit in ('g', 'kg', 'oz', 'lb'))`. The two sides are independent
- * files with no shared import, so nothing enforces them staying in step — this
- * comment is that enforcement. If a fifth unit is ever added here, the migration's
- * CHECK constraint (and any row already written under the old one) has to move with
- * it, and vice versa.
+ * The four units a weight can be WRITTEN in, smallest first within each system.
+ *
+ * These are no longer the values of a database column. Until PK-67 this list mirrored
+ * `check (weight_unit in ('g', 'kg', 'oz', 'lb'))` on `gear_items`, and this comment was
+ * the only thing keeping two independent files in step; that column is gone, weight is
+ * stored in grams, and nothing in the schema now constrains this list. What it pins
+ * instead is narrower and entirely internal: `GRAMS_PER_UNIT` must have a factor for
+ * every member, which `Record<WeightUnit, number>` enforces at compile time rather than
+ * by comment.
+ *
+ * The ORDER is load-bearing where the spelling used to be. `WEIGHT_SYSTEM_UNITS` below
+ * lists each system's units smallest-first and `formatWeight` walks them in that order to
+ * pick a scale, so reordering this array silently changes which unit a weight is rendered
+ * in.
  */
 export const WEIGHT_UNITS = ['g', 'kg', 'oz', 'lb'] as const;
 
 export type WeightUnit = (typeof WEIGHT_UNITS)[number];
 
 /**
- * `weight_unit` arrives from the database — and from any form field before it ever
- * reaches the database — typed merely as `string`. This is the narrowing guard that
- * turns that string into a `WeightUnit` the compiler will hold everything else in this
- * module to, rather than trusting a value that merely looks plausible. `'G'`, `'lbs'`
- * and `'gram'` are all the kind of near-miss a human types without a picker in front
- * of them, and all three must fail this exactly as a bare typo would.
+ * The narrowing guard that turns a `string` into a `WeightUnit` the compiler will hold
+ * everything else in this module to, rather than trusting a value that merely looks
+ * plausible. `'G'`, `'lbs'` and `'gram'` are all the kind of near-miss a human types
+ * without a picker in front of them, and all three must fail this exactly as a bare typo
+ * would.
+ *
+ * ITS REMAINING CALLERS ARE NARROWER THAN THEY WERE, and worth naming because the obvious
+ * ones are gone. Nothing reads a unit off a gear row or a form field any more — there is
+ * no such column and no such field. What is left is `src/lib/gear/query.ts`, narrowing the
+ * hand-editable `?wunit=` search parameter, which is a string a visitor types into an
+ * address bar and therefore exactly the case this was written for.
  */
 export function isWeightUnit(value: unknown): value is WeightUnit {
   return typeof value === 'string' && (WEIGHT_UNITS as readonly string[]).includes(value);
 }
+
+/**
+ * The two systems an account can think in — the whole of `public.profiles.weight_units`,
+ * mirroring `check (weight_units in ('metric', 'imperial'))` in
+ * `supabase/migrations/20260817000000_user_profiles.sql`. Independent files with no shared
+ * import, so this comment is the enforcement, exactly as the one above `WEIGHT_UNITS` used
+ * to be for the column PK-67 deleted: add a third system here and that CHECK constraint
+ * has to move with it, and vice versa.
+ */
+export const WEIGHT_SYSTEMS = ['metric', 'imperial'] as const;
+
+export type WeightSystem = (typeof WEIGHT_SYSTEMS)[number];
+
+/**
+ * Narrows the `string` the generated row type gives `profiles.weight_units` into a
+ * `WeightSystem`. The same gap `isWeightUnit` exists for, and reachable for the same
+ * reason: the CHECK constraint holds on write but is not proven to still hold by the time
+ * a row is read back through a client that types the column as a bare `string`.
+ */
+export function isWeightSystem(value: unknown): value is WeightSystem {
+  return typeof value === 'string' && (WEIGHT_SYSTEMS as readonly string[]).includes(value);
+}
+
+/**
+ * What a missing `profiles` row means. Named here rather than written as a bare
+ * `'metric'` at each of the handful of call sites that need it, because "no row yet" is
+ * the ordinary state of every account that has never opened the account page — see the
+ * profiles migration's "A MISSING ROW MEANS THE DEFAULT" section — and it must agree with
+ * that column's own `default 'metric'` or the two disagree for exactly the users who have
+ * saved nothing.
+ */
+export const DEFAULT_WEIGHT_SYSTEM: WeightSystem = 'metric';
+
+/**
+ * Each system's units, SMALLEST FIRST. `formatWeight` walks these in order and stops at
+ * the last unit whose threshold the weight clears, so the order is the scaling rule rather
+ * than presentation.
+ *
+ * Two entries each, not four. A metric reader is shown grams or kilograms and never
+ * ounces; that is the entire content of the account setting, and mixing systems in one
+ * list would reintroduce the `4.4 oz` beside `120 g` comparison problem PK-67 exists to
+ * remove. Milligrams and stones are deliberately absent: neither is a unit backpacking
+ * gear is weighed in, and adding one means adding a `GRAMS_PER_UNIT` factor and a
+ * threshold together.
+ */
+export const WEIGHT_SYSTEM_UNITS: Readonly<Record<WeightSystem, readonly WeightUnit[]>> = {
+  metric: ['g', 'kg'],
+  imperial: ['oz', 'lb'],
+};
+
+/**
+ * The unit a weight is ENTERED in for each system — always the smaller of the two, so
+ * there is no magnitude guessing on the way in and the form needs no unit control at all.
+ *
+ * Derived from `WEIGHT_SYSTEM_UNITS` rather than written out a second time. Two literal
+ * maps holding `'g'`/`'oz'` in one and `['g', 'kg']`/`['oz', 'lb']` in the other are two
+ * statements of one fact, and the way they drift is that somebody reorders the arrays
+ * above for the scaling rule and the entry unit silently stays behind.
+ *
+ * The consequence, which PK-67 calls out so it is not later filed as a bug: editing an
+ * item the closet lists as `1.85 kg` opens its form with `1850` in the weight field and a
+ * `g` suffix. Entry is in the base unit; only display scales.
+ */
+export const WEIGHT_ENTRY_UNIT: Readonly<Record<WeightSystem, WeightUnit>> = {
+  metric: WEIGHT_SYSTEM_UNITS.metric[0],
+  imperial: WEIGHT_SYSTEM_UNITS.imperial[0],
+};
+
+/**
+ * How each system is named to a visitor, on the one control that picks between them.
+ *
+ * THE UNITS ARE IN THE LABEL ON PURPOSE. "Metric" and "Imperial" alone are the names of
+ * the systems, not an answer to the question the visitor is actually asking, which is
+ * "what will my closet look like" — and a reader who thinks in ounces should not have to
+ * know that "imperial" is the word this product filed them under. Naming both units each
+ * system will actually render makes the control self-describing, and it is the whole of
+ * what changes on screen.
+ *
+ * `Record<WeightSystem, string>`, like `GEAR_STATUS_LABELS` in `gear/fields.ts`: a third
+ * system stops this compiling until somebody writes its label, rather than rendering a
+ * bare `'…'` nobody notices.
+ */
+export const WEIGHT_SYSTEM_LABELS: Readonly<Record<WeightSystem, string>> = {
+  metric: 'Metric (g · kg)',
+  imperial: 'Imperial (oz · lb)',
+};
 
 /**
  * Grams per unit, i.e. how many grams one of each unit is worth. `g` and `kg` are
@@ -127,10 +241,16 @@ export const GRAMS_PER_UNIT: Readonly<Record<WeightUnit, number>> = {
 };
 
 /**
- * `gear_items.weight` is `numeric(12, 3)`: at most three decimal places, in whatever
- * unit was entered. Named here, once, rather than left as a bare `3` scattered across
- * every rounding call site — the next person touching this file should be able to
- * change the column's scale and grep for exactly one place that needs to agree with it.
+ * `gear_items.weight_grams` is `numeric(12, 3)`: at most three decimal places, of a gram.
+ * Named here, once, rather than left as a bare `3` scattered across every rounding call
+ * site — the next person touching this file should be able to change the column's scale
+ * and grep for exactly one place that needs to agree with it.
+ *
+ * Since PK-67 this is unambiguously three decimals OF A GRAM rather than of whatever unit
+ * a row happened to be entered in, which makes it a stricter bound than it used to be:
+ * 0.001 g is finer than 0.001 of any imperial unit, so nothing entered in ounces or pounds
+ * loses precision by being stored in grams. That is why the migration keeps `numeric(12, 3)`
+ * rather than widening the scale.
  */
 export const WEIGHT_DECIMALS = 3;
 
@@ -138,9 +258,10 @@ const WEIGHT_ROUNDING_FACTOR = 10 ** WEIGHT_DECIMALS;
 
 /**
  * The two things a number has to be to mean anything as a weight, mirroring
- * `gear_items.weight`'s own `check (weight >= 0 and weight < 'Infinity'::numeric)`
- * clause for clause — see "THROW, NOT RETURN" above for why either failure is treated
- * as a defect at the boundary rather than quietly repaired or passed through.
+ * `gear_items.weight_grams`'s own `check (weight_grams >= 0 and weight_grams <
+ * 'Infinity'::numeric)` clause for clause — see "THROW, NOT RETURN" above for why either
+ * failure is treated as a defect at the boundary rather than quietly repaired or passed
+ * through.
  *
  * `Number.isFinite` covers the constraint's upper half on its own: it is `false` for
  * `NaN` and for both signed infinities, so one check does the work of two — and the
@@ -224,18 +345,116 @@ export function convertWeight(value: number, from: WeightUnit, to: WeightUnit): 
  * in another unit, and converted back must reproduce what the database would have
  * stored, not merely something close to it at the seventeenth decimal digit.
  *
- * IT ROUNDS WHATEVER UNIT IT IS HANDED, and the unit is the caller's business, because
- * `numeric(12, 3)` is three decimals OF THE ENTERED UNIT — `gear_items.weight` is stored
- * as entered, not canonicalised (see "GRAMS IS THE CANONICAL UNIT"). Three decimals of a
- * gram figure is not three decimals of a pound: 0.001 lb is 0.454 g, so rounding the gram
- * figure keeps roughly four hundred and fifty times more precision than the column would
- * for that row. Neither number is wrong; they are answers to different questions. A caller
- * reproducing what the database stores rounds in the entered unit —
- * `roundWeight(fromGrams(grams, unit))`, which is the order tests/units.test.ts's
- * round-trip uses — while a caller rounding a gram figure for display is rounding grams
- * and should not read this scale as the column's.
+ * IT ROUNDS WHATEVER UNIT IT IS HANDED, and since PK-67 the unit that matters is grams.
+ * `numeric(12, 3)` is now three decimals OF A GRAM — `gear_items.weight_grams` is
+ * canonicalised at rest (see "GRAMS IS THE CANONICAL UNIT") — so `roundWeight(grams)` is
+ * the call that reproduces what the database stores, and it is the strictest of the four:
+ * 0.001 g is finer than 0.001 of any other unit in `GRAMS_PER_UNIT`, so a value that
+ * survives this round-trip in grams survives it in every unit.
+ *
+ * This reverses the guidance that used to live here. While weight was stored as entered,
+ * the column's scale applied to whatever unit the row was in, and a caller reproducing the
+ * stored value had to round in THAT unit — `roundWeight(fromGrams(grams, unit))`. There is
+ * no longer an entered unit for that ordering to be about. The function still rounds
+ * whatever it is handed, and a caller rounding a converted figure for display
+ * (`roundWeight(fromGrams(grams, 'lb'))`) is rounding pounds to three places for
+ * presentation, which is a display decision of its own and no longer a claim about the
+ * column.
  */
 export function roundWeight(value: number): number {
   assertWeight(value, 'value');
   return Math.round(value * WEIGHT_ROUNDING_FACTOR) / WEIGHT_ROUNDING_FACTOR;
+}
+
+/**
+ * How many decimal places each unit is SHOWN to. Display precision, and deliberately not
+ * `WEIGHT_DECIMALS` — that is the column's scale, a storage fact, and three decimals of a
+ * kilogram on a closet list is `1.850 kg`, which is noise pretending to be precision.
+ *
+ * The four numbers are chosen so that one step of the last shown digit is roughly a gram
+ * in every unit: 1 g exactly, 0.01 kg is 10 g, 0.1 oz is 2.8 g, 0.01 lb is 4.5 g. A gear
+ * list is compared by eye, and a column where one row resolves to the gram and the next to
+ * ten grams reads as though the finer row were measured more carefully.
+ */
+const WEIGHT_DISPLAY_DECIMALS: Readonly<Record<WeightUnit, number>> = {
+  g: 0,
+  kg: 2,
+  oz: 1,
+  lb: 2,
+};
+
+/**
+ * The unit a gram figure should be SHOWN in for an account's system: the largest unit of
+ * that system the weight fills at least one of.
+ *
+ * THE THRESHOLD IS THE FACTOR, which is why there is no table of thresholds here. "Show
+ * kg at or above 1000 g" and "show lb at or above 453.59237 g" are both just "at or above
+ * one of the larger unit", and one of the larger unit is exactly its entry in
+ * `GRAMS_PER_UNIT`. Writing the thresholds out separately would be a second copy of the
+ * conversion factors — the precise duplication `convertWeight` declines to make for
+ * cross-unit conversion, and the one where `453.59` instead of `453.59237` would put the
+ * boundary in the wrong place for weights within a rounding error of exactly one pound.
+ *
+ * Walks `WEIGHT_SYSTEM_UNITS` smallest-first and keeps the last unit that fits, so adding
+ * a third unit to a system needs a `GRAMS_PER_UNIT` factor and a place in that array and
+ * nothing here.
+ */
+function displayUnit(grams: number, system: WeightSystem): WeightUnit {
+  let chosen = WEIGHT_SYSTEM_UNITS[system][0];
+  for (const unit of WEIGHT_SYSTEM_UNITS[system]) {
+    if (grams >= GRAMS_PER_UNIT[unit]) chosen = unit;
+  }
+  return chosen;
+}
+
+/**
+ * Renders a canonical gram figure as the string a visitor reads, scaled to their account's
+ * system: `1850` is `'1.85 kg'` under metric and `'4.08 lb'` under imperial, and `124.738`
+ * is `'125 g'` or `'4.4 oz'`.
+ *
+ * WHY THIS EXISTS AT ALL, since `src/lib/gear/format.ts` argued the opposite. That module
+ * said weight got no formatter because `` `${item.weight} ${item.weight_unit}` `` "has no
+ * decision in it for a function to make". That was true of a row that stored its own unit
+ * and was rendered as entered. It is false now: choosing between `g` and `kg` from the
+ * magnitude, and between metric and imperial from the account, are two real decisions, and
+ * a branch written in Astro frontmatter is a branch `vitest.config.ts:64` excludes from the
+ * test suite. So the reasoning inverts and the function lands here rather than there —
+ * in `units.ts` specifically, because everything it needs (`GRAMS_PER_UNIT`, the system
+ * vocabulary, `fromGrams`) already lives here and splitting unit knowledge across two
+ * files is what this module's own comment exists to prevent.
+ *
+ * TRAILING ZEROS ARE TRIMMED, so 2 kg is `'2 kg'` and not `'2.00 kg'`, and 4.4 lb is
+ * `'4.4 lb'` and not `'4.40 lb'`. `toFixed` is what does the rounding — it is the only
+ * option here that rounds and formats in one step without reintroducing floating-point
+ * error between the two — and the trim afterwards is a string operation on a string
+ * `toFixed` has already made well-formed, so it cannot produce `'2.'` or eat a significant
+ * digit.
+ *
+ * IT THROWS on a negative or non-finite input rather than rendering a placeholder, which
+ * is the opposite of what `formatGearPrice` does for a malformed currency and is a
+ * deliberate difference rather than an inconsistency. That function degrades because its
+ * input is a `text` column whose CHECK constraint is not proven to still hold by the time a
+ * row is read back, so a single bad row would otherwise crash a list that is rendering
+ * fine. This function's input is `numeric not null check (weight_grams >= 0 and
+ * weight_grams < 'Infinity')` — a bad value cannot arrive from the column, and one that
+ * arrives from anywhere else is the in-memory defect the "THROW, NOT RETURN" section above
+ * exists to stop, at the boundary, loudly. Rendering `'—'` for it would hide a poisoned
+ * number in a list of honest ones.
+ *
+ * THE ROUNDING BOUNDARY IS NOT SMOOTHED, and it is worth naming so it is not read as an
+ * oversight: 999.6 g under metric is below the 1000 g threshold, so it is shown in grams,
+ * and rounding to whole grams then renders it `'1000 g'` rather than `'1 kg'`. The rule
+ * PK-67 specifies is a threshold on the stored figure, and applying it before rounding is
+ * the reading that keeps `displayUnit` a pure function of the weight. Re-scaling after
+ * rounding would make the chosen unit depend on the display precision of the unit not yet
+ * chosen, which is a loop worth more than the one gram of tidiness it buys.
+ */
+export function formatWeight(grams: number, system: WeightSystem): string {
+  assertWeight(grams, 'grams');
+  const unit = displayUnit(grams, system);
+  const value = fromGrams(grams, unit).toFixed(WEIGHT_DISPLAY_DECIMALS[unit]);
+  // Only touches a string that has a decimal point, so an integer rendering like '1000'
+  // is returned untouched rather than having its trailing zeros stripped to '1'.
+  const trimmed = value.includes('.') ? value.replace(/\.?0+$/, '') : value;
+  return `${trimmed} ${unit}`;
 }

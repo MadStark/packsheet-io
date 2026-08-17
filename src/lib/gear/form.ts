@@ -27,29 +27,33 @@
  * whatsoever, CHECK or otherwise.
  *
  * REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS, NOT A GUESS, WITH ONE DELIBERATE EXCEPTION.
- * `name`, `weight_unit` and `status` are `not null` columns on `gear_items` with no
- * honest default this form can fall back on: there is no such thing as a sensible
- * default name. `weight_unit` is always chosen from a fixed list by a `<select>` that
- * never leaves blank, so an empty submission for it can only mean a stale or tampered
- * request. `status` is chosen from the same fixed list, but by a RADIO GROUP, not a
- * `<select>` — see GearItemForm.astro's own comment on that field — and a radio group
- * with nothing checked posts NOTHING, which is a submission this form's own visitor can
- * genuinely produce (a JavaScript-disabled browser, a stale form from before this PR, a
- * tampered request). That blank submission is still rejected, by design: `STATUS_MESSAGE`
- * below is what tells the visitor to pick one, not evidence that the case cannot happen.
- * So all three of `name`, `weight_unit` and `status` still require the visitor to supply
- * a real value, for two different reasons rather than one shared one. `quantity` and
+ * `name` and `status` are `not null` columns on `gear_items` with no honest default this
+ * form can fall back on: there is no such thing as a sensible default name. `status` is
+ * chosen from a fixed list by a RADIO GROUP rather than a `<select>` — see
+ * GearItemForm.astro's own comment on that field — and a radio group with nothing checked
+ * posts NOTHING, which is a submission this form's own visitor can genuinely produce (a
+ * JavaScript-disabled browser, a stale form from before this PR, a tampered request). That
+ * blank submission is still rejected, by design: `STATUS_MESSAGE` below is what tells the
+ * visitor to pick one, not evidence that the case cannot happen. `quantity` and
  * `weight` are also `not null` columns,
  * but PK-63 deliberately relaxes them: both carry a real column default (`1` and `0`
  * respectively) that direct-SQL and other write paths already rely on, so a blank
  * submission for either is no longer an error — it resolves to that same default
- * instead. `name`, `weight_unit` and `status` remain the three fields whose ABSENCE
+ * instead. `name` and `status` remain the two fields whose ABSENCE
  * blocks a save; `quantity` and `weight` now block only on a non-blank value that fails
  * to parse. "Name is the only field that can block a save" is the ticket's own shorthand
  * and it is not literally true — it describes the form as a visitor meets it, where the
- * unit and status controls always post something, not the parser's actual contract. See
+ * status control always posts something, not the parser's actual contract. See
  * the comments at the `parseQuantity`/`parseNonNegativeDecimal` call sites inside
- * `parseGearItemForm` for exactly where that default is applied. `price`, `currency`,
+ * `parseGearItemForm` for exactly where that default is applied.
+ *
+ * `weight_unit` WAS A THIRD SUCH FIELD UNTIL PK-67, required because it was a `not null`
+ * column always posted by a `<select>` that never left blank. Both halves of that are gone:
+ * the column no longer exists, weights are stored in grams, and the form has no unit
+ * control at all. What replaces it is not a field but a PARAMETER — `parseGearItemForm`
+ * takes the account's `WeightSystem` and converts the typed number from that system's base
+ * unit exactly once. A unit can therefore no longer be missing, malformed or tampered with
+ * in a submission, because it is never in one. `price`, `currency`,
  * `acquired_on`, `url`, `brand`, `category`, `description` and `notes` are all nullable
  * columns, so an empty submission is treated as "not provided" and becomes `null` rather
  * than an error. (`volume_litres` was in that list until PK-61 dropped the column from
@@ -62,7 +66,15 @@
 
 import type { Database } from '../database.types';
 import { type CurrencyCode, isCurrencyCode } from '../money';
-import { type WeightUnit, WEIGHT_DECIMALS, isWeightUnit } from '../units';
+import {
+  GRAMS_PER_UNIT,
+  WEIGHT_DECIMALS,
+  WEIGHT_ENTRY_UNIT,
+  fromGrams,
+  roundWeight,
+  toGrams,
+  type WeightSystem,
+} from '../units';
 import { type GearStatus, isGearStatus } from './fields';
 
 // ---------------------------------------------------------------------------
@@ -78,7 +90,6 @@ export const GEAR_FORM_FIELD = {
   name: 'name',
   quantity: 'quantity',
   weight: 'weight',
-  weightUnit: 'weight_unit',
   price: 'price',
   currency: 'currency',
   acquiredOn: 'acquired_on',
@@ -97,7 +108,6 @@ export const GEAR_FORM_FIELD = {
 const NAME_MESSAGE = 'Enter a name for this item.';
 const QUANTITY_MESSAGE = 'Enter a whole number greater than zero for quantity.';
 const WEIGHT_MESSAGE = 'Enter a weight of zero or more, with up to three decimal places.';
-const WEIGHT_UNIT_MESSAGE = 'Choose a weight unit.';
 const STATUS_MESSAGE = 'Choose a status.';
 const PRICE_MISSING_MESSAGE = 'Enter a price for this currency, or clear the currency.';
 const CURRENCY_MISSING_MESSAGE = 'Select a currency for this price.';
@@ -121,8 +131,9 @@ const ACQUIRED_ON_FUTURE_MESSAGE = 'An acquired date cannot be in the future.';
 export interface GearItemInput {
   name: string;
   quantity: number;
-  weight: number;
-  weight_unit: WeightUnit;
+  /** Grams. The visitor typed a figure in their account's base unit and
+   *  `parseGearItemForm` converted it exactly once — see its own comment. */
+  weight_grams: number;
   price: number | null;
   currency: CurrencyCode | null;
   acquired_on: string | null;
@@ -142,7 +153,6 @@ export interface GearFormValues {
   name: string;
   quantity: string;
   weight: string;
-  weight_unit: string;
   price: string;
   currency: string;
   acquired_on: string;
@@ -175,8 +185,7 @@ export type GearItemRow = Pick<
   | 'brand'
   | 'category'
   | 'description'
-  | 'weight'
-  | 'weight_unit'
+  | 'weight_grams'
   | 'price'
   | 'currency'
   | 'acquired_on'
@@ -191,12 +200,17 @@ export type GearItemRow = Pick<
 // ---------------------------------------------------------------------------
 
 /** `numeric(12, 3)`'s exclusive upper bound: 12 total digits, 3 of them after the
- *  point, leaves 9 before it — `10**9`. Used by `weight`, the one `numeric(12, 3)`
+ *  point, leaves 9 before it — `10**9`. Used by `weight_grams`, the one `numeric(12, 3)`
  *  column this form still writes (PK-61 dropped the other, `volume_litres`; this
- *  constant is kept because `weight` still needs it, not out of caution). Kept here
+ *  constant is kept because the weight still needs it, not out of caution). Kept here
  *  rather than trusting Postgres to enforce it, because an overflow there is a raw
  *  `numeric field overflow` error — exactly the kind of string this module exists to
- *  never let a visitor see. */
+ *  never let a visitor see.
+ *
+ *  IT BOUNDS THE STORED GRAM FIGURE, so since PK-67 the weight call site divides it by
+ *  the account's entry-unit factor before handing it to `parseNonNegativeDecimal` — the
+ *  typed number and the written number are no longer the same number for an imperial
+ *  account. See that call site for the worked example. */
 const NUMERIC_12_3_MAX = 10 ** 9;
 
 /** Same reasoning as `NUMERIC_12_3_MAX`, for `price numeric(12, 2)`: 12 digits, 2
@@ -493,7 +507,6 @@ export function rawGearFormValues(form: FormData): GearFormValues {
     name: getFormString(form, GEAR_FORM_FIELD.name),
     quantity: getFormString(form, GEAR_FORM_FIELD.quantity),
     weight: getFormString(form, GEAR_FORM_FIELD.weight),
-    weight_unit: getFormString(form, GEAR_FORM_FIELD.weightUnit),
     price: getFormString(form, GEAR_FORM_FIELD.price),
     currency: getFormString(form, GEAR_FORM_FIELD.currency),
     acquired_on: getFormString(form, GEAR_FORM_FIELD.acquiredOn),
@@ -537,7 +550,7 @@ export function rawGearFormValues(form: FormData): GearFormValues {
  * price typed with an invalid currency reports the currency's own message rather than
  * "you must provide a currency" for a currency that was, in fact, provided but wrong.
  */
-export function parseGearItemForm(form: FormData): GearFormResult {
+export function parseGearItemForm(form: FormData, system: WeightSystem): GearFormResult {
   const values: GearFormValues = rawGearFormValues(form);
 
   const errors: Record<string, string> = {};
@@ -579,8 +592,8 @@ export function parseGearItemForm(form: FormData): GearFormResult {
     }
   }
 
-  // pairs with: weight numeric(12, 3) not null default 0
-  //             check (weight >= 0 and weight < 'Infinity'::numeric)
+  // pairs with: weight_grams numeric(12, 3) not null default 0
+  //             check (weight_grams >= 0 and weight_grams < 'Infinity'::numeric)
   //
   // PK-63: same treatment as quantity immediately above, and for the same reason — 0 is
   // the column's own default, not a value this parser invents on the visitor's behalf.
@@ -591,25 +604,41 @@ export function parseGearItemForm(form: FormData): GearFormResult {
   // Weight writes a literal `0` over a stored 2400 via `.update(values)` — "the column's
   // own default" describes why 0 is the right value to write, not a guarantee that
   // nothing gets overwritten.
+  //
+  // PK-67: THE TYPED NUMBER IS IN THE ACCOUNT'S BASE UNIT, AND IS CONVERTED HERE, ONCE.
+  // There is no unit field to read — `WEIGHT_ENTRY_UNIT[system]` is `g` for a metric
+  // account and `oz` for an imperial one, and the form renders that as a suffix beside the
+  // input so the visitor knows which they are typing. This is the single conversion
+  // `units.ts` describes every weight passing through at entry; nothing downstream of this
+  // line holds a non-gram number.
+  //
+  // THE UPPER BOUND FOLLOWS THE UNIT, which is why `NUMERIC_12_3_MAX` is divided rather
+  // than passed straight through. The bound exists so an over-large value gets this
+  // module's own sentence instead of a raw `numeric field overflow` from Postgres, and it
+  // has to be applied to the number that reaches the COLUMN, not to the one the visitor
+  // typed: 100,000,000 oz is comfortably under 1e9 as typed and is 2.8e9 g once converted,
+  // which the column cannot hold. Dividing the limit by the entry unit's factor moves the
+  // check back onto the typed value, where `parseNonNegativeDecimal` can report it with
+  // WEIGHT_MESSAGE, and keeps the metric case at exactly the 1e9 it has always been.
+  //
+  // `roundWeight` AFTER CONVERTING, not before: three decimals of an ounce is 0.0283 g, so
+  // an entered `4.4` becomes `124.73790175` and has to be rounded to the column's own gram
+  // scale before it is written. Rounding the typed value instead would round it in ounces,
+  // which is a different and coarser question — see `roundWeight`'s own comment.
   const weightRaw = values.weight.trim();
-  let weight = 0;
+  const entryUnit = WEIGHT_ENTRY_UNIT[system];
+  let weightGrams = 0;
   if (weightRaw !== '') {
-    const parsedWeight = parseNonNegativeDecimal(weightRaw, WEIGHT_DECIMALS, NUMERIC_12_3_MAX);
+    const parsedWeight = parseNonNegativeDecimal(
+      weightRaw,
+      WEIGHT_DECIMALS,
+      NUMERIC_12_3_MAX / GRAMS_PER_UNIT[entryUnit],
+    );
     if (parsedWeight === null) {
       errors.weight = WEIGHT_MESSAGE;
     } else {
-      weight = parsedWeight;
+      weightGrams = roundWeight(toGrams(parsedWeight, entryUnit));
     }
-  }
-
-  // pairs with: weight_unit text not null default 'g'
-  //             check (weight_unit in ('g', 'kg', 'oz', 'lb'))
-  const weightUnitRaw = values.weight_unit.trim();
-  let weightUnit: WeightUnit | null = null;
-  if (isWeightUnit(weightUnitRaw)) {
-    weightUnit = weightUnitRaw;
-  } else {
-    errors.weight_unit = WEIGHT_UNIT_MESSAGE;
   }
 
   // pairs with: status text not null default 'owned'
@@ -707,15 +736,16 @@ export function parseGearItemForm(form: FormData): GearFormResult {
   const description = parseOptionalText(values.description);
   const notes = parseOptionalText(values.notes);
 
-  // weightUnit and status are the only fields left that can be `null` here — quantity
-  // and weight no longer can, PK-63 made both always resolve to a real number, either
-  // parsed from a non-blank field or the column's own default for a blank one, see the
-  // comments at their parse sites above. Folding the `=== null` checks into this same
-  // guard, rather than asserting `weightUnit!`/`status!` below, lets TypeScript itself
-  // narrow both to their non-null type in the `ok: true` branch: the invariant that
-  // "errors empty implies weightUnit and status are set" is now enforced by the
-  // compiler, not merely asserted in a comment next to two `!`s.
-  if (weightUnit === null || status === null || Object.keys(errors).length > 0) {
+  // `status` is the only field left that can be `null` here — quantity and weight cannot,
+  // PK-63 made both always resolve to a real number, either parsed from a non-blank field
+  // or the column's own default for a blank one, see the comments at their parse sites
+  // above. `weightUnit` used to stand beside `status` in this guard and is gone with the
+  // field: PK-67 takes the unit as a parameter rather than reading it from the submission,
+  // so it cannot be absent. Folding the `=== null` check into this same guard, rather than
+  // asserting `status!` below, lets TypeScript itself narrow it to its non-null type in
+  // the `ok: true` branch: the invariant that "errors empty implies status is set" is
+  // enforced by the compiler, not merely asserted in a comment next to a `!`.
+  if (status === null || Object.keys(errors).length > 0) {
     return { ok: false, errors, values };
   }
 
@@ -724,8 +754,7 @@ export function parseGearItemForm(form: FormData): GearFormResult {
     values: {
       name,
       quantity,
-      weight,
-      weight_unit: weightUnit,
+      weight_grams: weightGrams,
       price,
       currency,
       acquired_on: acquiredOn,
@@ -749,17 +778,30 @@ export function parseGearItemForm(form: FormData): GearFormResult {
  * new-item page share one form-rendering code path regardless of whether the values
  * came from the database or from a rejected submission.
  *
- * Numbers are rendered with `String()` rather than a fixed number of decimals: `weight`
+ * Numbers are rendered with `String()` rather than a fixed number of decimals: `price`
  * arrives from `Database` typed as `number` (PostgREST serialises `numeric` as a JSON
  * number here, not a string — see `src/lib/database.types.ts`), and `String(4.4)` is
  * `'4.4'`, exactly what a user who entered `4.4` should see back, not `'4.400'`.
+ *
+ * WEIGHT COMES BACK IN THE ACCOUNT'S BASE UNIT, NOT THE SCALED ONE (PK-67). The stored
+ * figure is grams, and this converts it to whatever `parseGearItemForm` will read it back
+ * as — `g` for metric, `oz` for imperial — so the two are exact inverses and a save that
+ * changes nothing else cannot drift the weight. `roundWeight` after `fromGrams` is what
+ * makes that true in floating point: dividing 124.738 by 28.349523125 does not land
+ * exactly on 4.4, and `String()` of the unrounded quotient would put `4.400000000000001`
+ * in the visitor's field.
+ *
+ * IT IS THE BASE UNIT AND NOT THE DISPLAYED ONE, deliberately, and PK-67 calls this out
+ * so it is not later filed as a bug: an item the closet lists as `1.85 kg` opens its edit
+ * form with `1850` in the weight field and a `g` suffix. Entry has no magnitude guessing
+ * in it — there is one unit to type in, always the same one for a given account — and
+ * that is the whole reason the form needs no unit control.
  */
-export function gearItemToFormValues(row: GearItemRow): GearFormValues {
+export function gearItemToFormValues(row: GearItemRow, system: WeightSystem): GearFormValues {
   return {
     name: row.name,
     quantity: String(row.quantity),
-    weight: String(row.weight),
-    weight_unit: row.weight_unit,
+    weight: String(roundWeight(fromGrams(row.weight_grams, WEIGHT_ENTRY_UNIT[system]))),
     price: row.price === null ? '' : String(row.price),
     currency: row.currency ?? '',
     acquired_on: row.acquired_on ?? '',
@@ -778,13 +820,16 @@ export function gearItemToFormValues(row: GearItemRow): GearFormValues {
 
 /**
  * The blank state `src/pages/gear/new.astro` renders on a plain GET, before the visitor
- * has typed anything. Not all-empty-strings: `quantity`, `weight`, `weight_unit` and
- * `status` are `not null` columns with a database default (`1`, `0`, `'g'`, `'owned'`).
- * For `weight_unit` that pre-fill is still load-bearing exactly as before — see the
- * module comment's "REQUIRED VS OPTIONAL FOLLOWS THE COLUMNS" section — because a
- * `<select>` has no honest blank state of its own, so an empty submission can only mean
- * a stale or tampered request. `status` is still load-bearing too, but for a DIFFERENT
- * reason now that PK-63 renders it as a radio group rather than a `<select>`: `'owned'`
+ * has typed anything. Not all-empty-strings: `quantity`, `weight` and `status` are
+ * `not null` columns with a database default (`1`, `0`, `'owned'`).
+ *
+ * `weight_unit` WAS A FOURTH ENTRY HERE and is gone with the column (PK-67). Its pre-fill
+ * of `'g'` was load-bearing for a reason that no longer applies: a `<select>` has no
+ * honest blank state, so it had to start on something. There is no unit control to seed —
+ * the entry unit is a property of the account, and the form renders it as a suffix rather
+ * than as a value the visitor can post. `status` is still load-bearing, but for a
+ * DIFFERENT reason now that PK-63 renders it as a radio group rather than a `<select>`:
+ * `'owned'`
  * here is what makes one radio checked on the very first render — a radio group starts
  * with none checked unless some option's `value` matches `values.status`, so without
  * this default the first-ever render of the form would show no status selected at all.
@@ -810,7 +855,6 @@ export const EMPTY_GEAR_FORM_VALUES: GearFormValues = {
   name: '',
   quantity: '1',
   weight: '0',
-  weight_unit: 'g',
   price: '',
   currency: '',
   acquired_on: '',

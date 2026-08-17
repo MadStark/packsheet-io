@@ -9,6 +9,8 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import GearStatusIcon from '../../components/GearStatusIcon.astro';
 import { createAuthClient } from '../../lib/auth';
+import { readWeightSystem } from '../../lib/profile';
+import { formatWeight } from '../../lib/units';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
 import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import {
@@ -227,6 +229,11 @@ const query: GearQuery = parseGearQuery(Astro.url.searchParams);
 // that could never resolve.
 const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
 const { items: rows, error: listError, count, page } = await loadGearCloset(client, user.id, query);
+
+// PK-67: the account's system, applied to every weight cell below. Read once per request
+// rather than per row — it is one value for the whole list, and forty identical queries to
+// render one column would be forty round trips for a display preference.
+const { system: weightSystem } = await readWeightSystem(client, user.id);
 
 const loadError = optionsError || listError ? GENERIC_LOAD_ERROR : null;
 const items = rows ?? [];
@@ -658,8 +665,13 @@ const currentView = `${Astro.url.pathname}${Astro.url.search}`;
                           <td class="px-3 py-2">{item.brand ?? '—'}</td>
                           <td class="px-3 py-2">{item.category ?? '—'}</td>
                           <td class="numeric px-3 py-2">{item.quantity}</td>
+                          {/* PK-67: through the formatter, not `{weight} {unit}`. Every
+                              row is a gram figure now, so this cell is the one place the
+                              account's system turns it back into something to read — which
+                              is what makes the column comparable by eye, the complaint the
+                              ticket opens with. */}
                           <td class="numeric px-3 py-2">
-                            {item.weight} {item.weight_unit}
+                            {formatWeight(item.weight_grams, weightSystem)}
                           </td>
                           <td class="numeric px-3 py-2">
                             {formatGearPrice(item.price, item.currency)}

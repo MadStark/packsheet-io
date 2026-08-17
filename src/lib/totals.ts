@@ -142,8 +142,16 @@
  *     unpriced item, which contributes nothing to the price rollup rather than
  *     contributing zero of some assumed currency.
  *   - A field that is PRESENT and MALFORMED — a `weight` of `"heavy"` or `null` or an
- *     array, a `weight_unit` of `'lbs'`, a price without its currency — throws, naming
- *     the item.
+ *     array, a negative `weight`, a price without its currency — throws, naming the item.
+ *
+ * That list used to include `a weight_unit of 'lbs'`, and losing it narrowed what this
+ * module can catch rather than what it must. A misspelled unit was a malformed value the
+ * engine could REFUSE; grams at rest (PK-67) means there is no unit to misspell, but it
+ * also means a number that is simply in the wrong unit — an override of `4.4` intended as
+ * ounces — is now indistinguishable from an honest 4.4 g and cannot be refused by anything
+ * downstream. Nothing here can close that: it is closed at entry, by the item form
+ * converting from the account's base unit exactly once, and by the migration having
+ * converted every value that predates the rule.
  *
  * The alternative for the malformed case was to fall back to the underlying gear value
  * and carry on. It loses for the reason `units.ts` gives under "THROW, NOT RETURN": a
@@ -249,7 +257,9 @@ import {
   type CurrencyCode,
   type Money,
 } from './money';
-import { isWeightUnit, toGrams } from './units';
+// No import from './units' since PK-67. This module used to convert every weight through
+// `toGrams`, narrowing a per-row `weight_unit` with `isWeightUnit` first; weights are
+// stored in grams now, so there is nothing left here to convert. See `resolveWeightGrams`.
 
 // ---------------------------------------------------------------------------
 // Input: the pack tree, as PACK_TREE_SELECT returns it
@@ -270,8 +280,10 @@ import { isWeightUnit, toGrams } from './units';
  */
 export interface PackTreeGearItem {
   readonly name: string;
-  readonly weight: number;
-  readonly weight_unit: string;
+  // Grams, since PK-67 — the column's name says so, which is most of why it was renamed.
+  // There is no sibling `weight_unit`: the unit is one account-level setting now, applied
+  // at render time and never at rest.
+  readonly weight_grams: number;
   readonly price: number | null;
   readonly currency: string | null;
 }
@@ -494,12 +506,19 @@ function describeValue(value: unknown): string {
  *
  * The merge is SHALLOW, and deliberately so — the same shallow merge PostgREST callers
  * would get from `||` on the two jsonb values. It means `{ "weight": 450 }` overrides the
- * weight and leaves the unit alone, taking `weight_unit` from the base, which is the
- * behaviour a form that edits one field has to have. The snapshot uses the gear row's own
- * column names for every field an override can touch — `name`, `weight`, `weight_unit`,
- * `price`, `currency` — because `private.gear_item_snapshot()` builds it that way, so one
- * set of field names covers both bases — and an override written against a live item
- * keeps working unchanged after that item is frozen.
+ * weight and leaves every other field alone, which is the behaviour a form that edits one
+ * field has to have. The snapshot uses the gear row's own field names for everything an
+ * override can touch — `name`, `weight`, `price`, `currency` — because
+ * `private.gear_item_snapshot()` builds it that way, so one set of field names covers both
+ * bases, and an override written against a live item keeps working unchanged after that
+ * item is frozen.
+ *
+ * `{ "weight": 450 }` MEANS 450 GRAMS SINCE PK-67, where it used to mean 450 of whatever
+ * unit the base row was in. That is a change in meaning to a value users had already
+ * written, which is why `20260817120000_gear_weight_in_grams.sql` converts existing
+ * overrides of exactly this shape by their base row's frozen unit rather than leaving them
+ * to be reinterpreted — an override of `8.8` against an ounces item is 249.476 g, not
+ * 8.8 g, and nothing at runtime could have worked out which was meant.
  *
  * It is NOT a whole-row copy, and nothing above should be read as saying it is: that
  * function renames `id` to `gear_item_id`, adds `captured_at`, and leaves out `notes`,
@@ -544,8 +563,13 @@ export function resolvePackItem(item: PackTreeItem): ResolvedPackItem {
     (gear
       ? {
           name: gear.name,
-          weight: gear.weight,
-          weight_unit: gear.weight_unit,
+          // The KEY stays `weight` while the column is now `weight_grams`, and the
+          // mismatch is deliberate. `private.gear_item_snapshot()` writes `'weight'`, and
+          // an override written against a live item has to keep working unchanged after
+          // that item is frozen — so the merged record's field names are the SNAPSHOT's
+          // vocabulary, which the migration left alone, not the table's. Renaming this key
+          // would silently orphan every existing `{"weight": ...}` override.
+          weight: gear.weight_grams,
           price: gear.price,
           currency: gear.currency,
         }
@@ -576,51 +600,56 @@ export function resolvePackItem(item: PackTreeItem): ResolvedPackItem {
 }
 
 /**
- * The merged `weight` and `weight_unit`, converted to grams once — the single conversion
- * every weight in a pack passes through, per `units.ts`'s "GRAMS IS THE CANONICAL UNIT".
- * Nothing downstream of this line holds a non-gram number.
+ * The merged `weight`, which since PK-67 is ALREADY GRAMS and needs no conversion.
  *
- * The finiteness and non-negativity checks duplicate `assertWeight` inside `toGrams`, and
- * that repetition is on purpose rather than an oversight: `toGrams` correctly reports
- * "value must be a finite number, got NaN", and this one can say which of the forty rows
- * on the page it came from. The item id is worth two redundant comparisons.
+ * THIS FUNCTION USED TO CONVERT, and the deleted step is worth describing because its
+ * absence is the change. It read a `weight_unit` off the merged record, narrowed it with
+ * `isWeightUnit`, and called `toGrams(weight, unit)` — the single conversion every weight
+ * in a pack passed through. There is no unit to read now: `gear_items.weight_grams` is
+ * grams at rest, `private.gear_item_snapshot()` freezes a gram figure and writes no
+ * `weight_unit` key, and the migration that made both true rewrote every pre-existing
+ * snapshot and override so there is exactly one shape in the database rather than two.
  *
- * Both halves of `gear_items.weight`'s CHECK constraint are mirrored, not just the upper
- * one. A negative weight is reachable through an ordinary PATCH of `pack_items.overrides`
- * (whose contents no constraint touches) and it is the more dangerous of the two, because
- * it does not announce itself downstream: two 1000 g items, one overridden to -400 g,
- * total 600 g — a plausible number, in a partition that still adds up, on a page with no
- * way to tell it from the truth. See "THROW, NOT RETURN" in units.ts.
+ * That rewrite is what makes deleting the conversion safe rather than merely tidy. Absence
+ * of `weight_unit` is ambiguous on its own — it could mean "grams" or "a row written
+ * before the change" — and this module has no way to tell those apart, which is precisely
+ * why `20260817120000_gear_weight_in_grams.sql` converts the old rows in place instead of
+ * leaving them for a runtime branch that cannot exist.
+ *
+ * THE GUARDS BELOW STAY, and are the reason this is still a function rather than a field
+ * read. They no longer duplicate `assertWeight` inside `toGrams` — nothing calls `toGrams`
+ * here any more — so they are now the ONLY thing standing between a malformed override and
+ * a pack total, not a second opinion on one. They also still say which of the forty rows on
+ * the page the bad value came from, which `units.ts` cannot.
+ *
+ * Both halves of `gear_items.weight_grams`'s CHECK constraint are mirrored, not just the
+ * upper one. A negative weight is reachable through an ordinary PATCH of
+ * `pack_items.overrides` (whose contents no constraint touches) and it is the more
+ * dangerous of the two, because it does not announce itself downstream: two 1000 g items,
+ * one overridden to -400 g, total 600 g — a plausible number, in a partition that still
+ * adds up, on a page with no way to tell it from the truth. See "THROW, NOT RETURN" in
+ * units.ts.
  */
 function resolveWeightGrams(id: string, name: string | null, merged: JsonObject): number {
   const weight = merged.weight;
   if (typeof weight !== 'number' || !Number.isFinite(weight)) {
     throw new TypeError(
       `${describeItem(id, name)} resolved to a weight of ${describeValue(weight)}, which is ` +
-        `not a finite number. gear_items.weight is numeric and non-null, so this came from an ` +
-        `override or a snapshot; fix the value rather than the total it breaks.`,
+        `not a finite number. gear_items.weight_grams is numeric and non-null, so this came ` +
+        `from an override or a snapshot; fix the value rather than the total it breaks.`,
     );
   }
 
   if (weight < 0) {
     throw new TypeError(
       `${describeItem(id, name)} resolved to a weight of ${describeValue(weight)}, which is ` +
-        `negative. gear_items.weight carries check (weight >= 0), so this came from an override ` +
-        `or a snapshot; a negative line subtracts from the pack total while leaving it a ` +
-        `perfectly ordinary number, so nothing downstream can catch it.`,
+        `negative. gear_items.weight_grams carries check (weight_grams >= 0), so this came from ` +
+        `an override or a snapshot; a negative line subtracts from the pack total while leaving ` +
+        `it a perfectly ordinary number, so nothing downstream can catch it.`,
     );
   }
 
-  const unit = merged.weight_unit;
-  if (!isWeightUnit(unit)) {
-    throw new TypeError(
-      `${describeItem(id, name)} resolved to a weight unit of ${describeValue(unit)}, which is ` +
-        `not one of the four gear_items.weight_unit accepts (g, kg, oz, lb). A weight with an ` +
-        `unknown unit cannot be converted, and guessing grams would be a specific wrong answer.`,
-    );
-  }
-
-  return toGrams(weight, unit);
+  return weight;
 }
 
 /**
@@ -714,8 +743,9 @@ function classifyPackItem(item: PackTreeItem, name: string | null): WeightBucket
  * for weight and price alike, in every bucket without exception.
  *
  * `quantity` is validated against its own CHECK constraint (`quantity integer not null
- * check (quantity > 0)`) rather than trusted, for the same reason `isWeightUnit` mirrors
- * its constraint instead of assuming the column: the value arrives typed merely as
+ * check (quantity > 0)`) rather than trusted, for the same reason `resolveWeightGrams`
+ * mirrors both halves of `weight_grams`'s constraint instead of assuming the column: the
+ * value arrives typed merely as
  * `number`, and a zero, a negative or a fractional quantity would sail through the
  * multiplication and produce a total that is wrong without ever looking wrong. Zero is the
  * dangerous one — it silently removes an item from a pack that still lists it.

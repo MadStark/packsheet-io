@@ -13,11 +13,23 @@
  * the kind of branch that is easy to get wrong silently in frontmatter and impossible
  * to pin with a test there.
  *
- * Weight is deliberately NOT given a formatter here. `gear_items.weight` is rendered
- * "as entered, with its unit" per the ticket — never converted, never re-derived —
- * which is simply `` `${item.weight} ${item.weight_unit}` `` with no decision in it
- * for a function to make; adding one here would be a wrapper with nothing behind it,
- * the same reason `src/lib/gear/options.ts` does not wrap its own options query.
+ * WEIGHT HAS A FORMATTER SINCE PK-67, AND IT IS NOT HERE — it is `formatWeight` in
+ * `src/lib/units.ts`. This comment used to argue that weight got no formatter at all,
+ * because `gear_items.weight` was rendered "as entered, with its unit" — never converted,
+ * never re-derived — which was simply `` `${item.weight} ${item.weight_unit}` `` with no
+ * decision in it for a function to make.
+ *
+ * Both halves of that stopped being true at once. There is no per-row unit to render
+ * beside the number, and the stored figure is grams, so rendering a closet row now means
+ * choosing a unit from the account's system and a scale from the magnitude — `1850` is
+ * `1.85 kg` to one visitor and `4.08 lb` to another. Those are real decisions, which is
+ * exactly the test this module applies to `formatGearAcquiredOn` below.
+ *
+ * It lives in `units.ts` rather than in this file because everything it needs is already
+ * there — the conversion factors, the system vocabulary, `fromGrams` — and that module's
+ * own comment exists to keep unit knowledge in one place. A wrapper here would put half a
+ * unit decision in a second file, which is the drift this directory's comments keep
+ * warning about.
  */
 
 import { formatMoney, fromDecimal, isCurrencyCode } from '../money';
@@ -141,12 +153,15 @@ export function gearStatusMarker(status: string): GearStatusMarker | null {
  * WHY THIS TINY FUNCTION LIVES IN src/lib/ RATHER THAN INLINE IN THE PAGE. Same
  * reasoning as this module's own top comment gives for `formatGearPrice`:
  * `vitest.config.ts:64` excludes `src/pages/`, so a branch written in frontmatter is
- * code no test in this repository can reach. And unlike `weight` — which that comment
- * explains gets no formatter here because `` `${item.weight} ${item.weight_unit}` ``
- * has no decision in it — "what does a visitor see when there is no date" IS a
- * decision: it could have been a blank cell, "N/A", or "Unknown", and this module picks
- * the em dash deliberately, the same choice `formatGearPrice` makes for its own
- * no-value case.
+ * code no test in this repository can reach. "What does a visitor see when there is no
+ * date" IS a decision: it could have been a blank cell, "N/A", or "Unknown", and this
+ * module picks the em dash deliberately, the same choice `formatGearPrice` makes for its
+ * own no-value case.
+ *
+ * This paragraph used to contrast the date with `weight`, as the field that needed no
+ * formatter because printing it beside its stored unit had no decision in it. PK-67 made
+ * that contrast false — see this module's own top comment — so the example is gone rather
+ * than left standing as the one claim here a reader could check and find wrong.
  */
 export function formatGearAcquiredOn(acquiredOn: string | null): string {
   return acquiredOn === null ? NO_VALUE_LABEL : acquiredOn;

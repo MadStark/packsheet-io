@@ -9,6 +9,7 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import GearItemForm from '../../components/GearItemForm.astro';
 import { createAuthClient } from '../../lib/auth';
+import { readWeightSystem } from '../../lib/profile';
 import { SIGN_IN_PATH, NEXT_PARAM } from '../../lib/auth-routes';
 import { GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
 import { loadGearItem } from '../../lib/gear/query';
@@ -74,6 +75,11 @@ const GENERIC_WRITE_ERROR = 'Something went wrong updating this item. Please try
 // autocomplete, and refusing to render the edit form over that would turn a minor
 // inconvenience into a hard block on editing an item the visitor already owns.
 const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
+
+// PK-67: needed on both paths for the same reason new.astro states — the unit the Weight
+// field is typed in must be the unit the parser converts from, and the edit page renders
+// the form on the GET path as well as after a failed POST.
+const { system: weightSystem } = await readWeightSystem(client, user.id);
 const categories = optionsError ? [] : extractGearOptions(optionRows ?? []).categories;
 
 // This page answers two different POSTs from two different forms — save the edit, or
@@ -154,7 +160,7 @@ if (Astro.request.method === 'POST') {
       }
     }
   } else if (intent === GEAR_ITEM_INTENT.edit) {
-    const result = parseGearItemForm(form);
+    const result = parseGearItemForm(form, weightSystem);
     if (!result.ok) {
       formErrors = result.errors;
       formValuesOverride = result.values;
@@ -225,7 +231,7 @@ if (loadError || item === null) {
 }
 
 const row: GearItemRow = item;
-const values: GearFormValues = formValuesOverride ?? gearItemToFormValues(row);
+const values: GearFormValues = formValuesOverride ?? gearItemToFormValues(row, weightSystem);
 const updated = Astro.url.searchParams.get('updated') === '1';
 ---
 
@@ -261,6 +267,7 @@ const updated = Astro.url.searchParams.get('updated') === '1';
 
     <div class="mt-6">
       <GearItemForm
+        weightSystem={weightSystem}
         values={values}
         errors={formErrors}
         submitLabel="Save changes"

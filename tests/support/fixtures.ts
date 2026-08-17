@@ -98,8 +98,7 @@ export async function createPack(
         Array.from({ length: itemCount }, (_, index) => ({
           name: `Gear ${index + 1}`,
           brand: 'Testbrand',
-          weight: 100 + index,
-          weight_unit: 'g',
+          weight_grams: 100 + index,
         })),
       )
       .select('id'),
