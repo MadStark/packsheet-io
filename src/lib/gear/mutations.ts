@@ -39,6 +39,7 @@
 
 import type { PostgrestError } from '@supabase/supabase-js';
 import type { PacksheetClient } from '../supabase';
+import type { Database } from '../database.types';
 import { MAX_BULK_IDS } from './bulk';
 import type { GearStatus } from './fields';
 import type { GearItemInput } from './form';
@@ -234,9 +235,28 @@ export async function importGearItems(
 
   const { data, error } = await client
     .from('gear_items')
-    .insert(items.map((values) => ({ ...values, user_id: userId })))
+    .insert(items.map((values) => gearItemInsert(values, userId)))
     .select('id');
   return { error, count: data?.length ?? 0 };
+}
+
+/**
+ * One validated item as an insertable row, with `weight_grams` made unwritable.
+ *
+ * `weight_grams` IS `GENERATED ALWAYS ... STORED` AND POSTGRES REFUSES A DIRECT WRITE TO
+ * IT — but nothing in TypeScript did. The generated `Insert` type lists every column
+ * including that one, so `.insert([{ …, weight_grams: 999 }])` compiled cleanly and failed
+ * only at runtime, as a raw Postgres error, on a path whose whole point is that the file
+ * carries grams and the database derives them. This ticket makes that mistake unusually
+ * easy to make: `PacksheetGearItem` HAS a `weight_grams` field, so spreading a file item
+ * into an insert is the obvious wrong thing to reach for. `Omit` turns it into a compile
+ * error instead of a 500.
+ */
+function gearItemInsert(
+  values: GearItemInput,
+  userId: string,
+): Omit<Database['public']['Tables']['gear_items']['Insert'], 'weight_grams'> {
+  return { ...values, user_id: userId };
 }
 
 /** Saves an edit to exactly one item. `.eq('id', id)` alone would not be enough to make

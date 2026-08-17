@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { createUser, type TestUser } from './support/local-database';
+import { createPack } from './support/fixtures';
 import type { TablesInsert } from '../src/lib/database.types';
 import {
   GEAR_EXPORT_SELECT,
@@ -8,6 +9,7 @@ import {
   type GearExportRow,
 } from '../src/lib/gear/json-schema';
 import { importableGearItems, parseGearItemsFile } from '../src/lib/gear/json-import';
+import type { GearItemInput } from '../src/lib/gear/form';
 import { importGearItems } from '../src/lib/gear/mutations';
 import { loadGearItemsForExport } from '../src/lib/gear/query';
 import { MAX_IMPORT_ITEMS } from '../src/lib/gear/json-import';
@@ -172,7 +174,7 @@ describe('export → import → identical values', () => {
     expect(JSON.parse(second).data.items).toEqual(JSON.parse(first).data.items);
   });
 
-  it('brings back an item that is nothing but a name', async () => {
+  it('brings back an item that is nothing but a name, with every column default intact', async () => {
     const ids = await seed(owner, [{ name: 'Just a name' }]);
     const text = await exportToText(owner, ids);
     const items = importableGearItems(parseGearItemsFile(text));
@@ -181,6 +183,33 @@ describe('export → import → identical values', () => {
     const { error, count } = await importGearItems(stranger.client, stranger.id, items ?? []);
     expect(error).toBeNull();
     expect(count).toBe(1);
+
+    // READ THE ROW BACK. Asserting only `error === null` and `count === 1` proves an insert
+    // happened, not that it inserted the right thing — the defaults this format applies to
+    // an almost-empty item (quantity 1, weight 0 g, status owned, everything else null) are
+    // exactly what a reader of this test wants pinned, and they are what a future change to
+    // the defaulting rules would break silently.
+    const { data } = await stranger.client
+      .from('gear_items')
+      .select(GEAR_EXPORT_SELECT)
+      .eq('user_id', stranger.id)
+      .eq('name', 'Just a name')
+      .single();
+
+    expect(data).toMatchObject({
+      name: 'Just a name',
+      brand: null,
+      category: null,
+      description: null,
+      notes: null,
+      url: null,
+      price: null,
+      currency: null,
+      acquired_on: null,
+      quantity: 1,
+      status: 'owned',
+    });
+    expect(Number(data?.weight_grams)).toBe(0);
   });
 });
 
@@ -211,18 +240,67 @@ describe('the file carries no identity', () => {
 });
 
 describe('the export read is owner-scoped', () => {
+  /**
+   * THE ITEM HAS TO BE ON A PUBLIC PACK OR THIS WHOLE BLOCK IS VACUOUS, and getting that
+   * wrong is the defect this comment exists to stop coming back. An earlier version of
+   * these tests seeded a gear item on NO pack at all and asserted a stranger could not
+   * read it — which is true, and proves nothing: with no pack, no SELECT policy matches
+   * for a stranger, so the assertion passed with `loadGearItemsForExport`'s
+   * `.eq('user_id', …)` DELETED. The guard it exists to protect could be removed and the
+   * suite stayed green.
+   *
+   * `gear_items` carries TWO permissive SELECT policies and RLS UNIONs them.
+   * `gear_items_select_via_public_pack` is granted to `anon` AND `authenticated`, so a
+   * gear item sitting on anybody's public pack is readable by every visitor, signed in or
+   * not. That is correct and deliberate — it is how a shared pack page renders. It also
+   * means the owner filter is the ONLY thing standing between this export and a working
+   * data-exfiltration endpoint that hands a stranger `notes`, `price` and `url` as a tidy
+   * JSON download. The pair of tests below pins that: the second one proves the row IS
+   * reachable without the filter, so the first one cannot pass by accident.
+   */
+  let exposedGearItemId: string;
+
+  beforeAll(async () => {
+    const pack = await createPack(owner, { visibility: 'public', itemCount: 1 });
+    exposedGearItemId = pack.gearItemIds[0]!;
+    await owner.client
+      .from('gear_items')
+      .update({ notes: 'Private note that must not travel', price: 99.99, currency: 'GBP' })
+      .eq('id', exposedGearItemId);
+  });
+
+  it('is reachable by a stranger WITHOUT the owner filter — the premise of the next test', async () => {
+    // Deliberately reproduces the unguarded query. If this ever returns [], the fixture
+    // has stopped exercising the policy and the test below has stopped meaning anything.
+    const { data, error } = await stranger.client
+      .from('gear_items')
+      .select(GEAR_EXPORT_SELECT)
+      .in('id', [exposedGearItemId]);
+    expect(error).toBeNull();
+    expect(data).toHaveLength(1);
+    // And it is the whole row, not a redacted one — which is what makes the filter matter.
+    expect(data?.[0]?.notes).toBe('Private note that must not travel');
+    expect(data?.[0]?.price).toBe(99.99);
+  });
+
   it('returns nothing for another visitor’s ids', async () => {
-    // Without the explicit .eq('user_id', …), gear_items_select_via_public_pack — which
-    // is granted to `authenticated` and unioned with the owner policy — would make this a
-    // working data-exfiltration endpoint for every item on every public pack, delivered
-    // as a tidy JSON document. See loadGearItemsForExport's own comment.
-    const ids = await seed(owner, [{ name: 'Not yours', status: 'owned' }]);
-    const { items, error } = await loadGearItemsForExport(stranger.client, stranger.id, ids);
+    const { items, error } = await loadGearItemsForExport(stranger.client, stranger.id, [
+      exposedGearItemId,
+    ]);
     expect(error).toBeNull();
     expect(items).toEqual([]);
   });
 
-  it('returns nothing for an empty selection without issuing a query', async () => {
+  it('still returns the row to its own owner', async () => {
+    // The filter refuses strangers without also breaking the feature.
+    const { items, error } = await loadGearItemsForExport(owner.client, owner.id, [
+      exposedGearItemId,
+    ]);
+    expect(error).toBeNull();
+    expect(items).toHaveLength(1);
+  });
+
+  it('returns nothing for an empty selection', async () => {
     const { items, error } = await loadGearItemsForExport(owner.client, owner.id, []);
     expect(error).toBeNull();
     expect(items).toEqual([]);
@@ -230,30 +308,56 @@ describe('the export read is owner-scoped', () => {
 });
 
 describe('the import write', () => {
-  it('is transactional — one bad row writes none of them', async () => {
-    // The whole "no partial imports" promise, exercised against the database rather than
-    // asserted about the parser. A single multi-row INSERT is one statement, so a
-    // constraint violation anywhere in it rolls the whole statement back.
+  it('is transactional — one bad row anywhere writes none of them', async () => {
+    // THE WHOLE "NO PARTIAL IMPORTS" PROMISE, and it has to go THROUGH `importGearItems`
+    // to be worth anything. An earlier version of this test hand-rolled its own
+    // `.insert()` and never called the function it was named after — so it asserted a
+    // property of PostgREST, not of this codebase, and re-implementing `importGearItems`
+    // as a per-row loop (the obvious "fix" if it ever looked too slow) would have left a
+    // partial write in the database with this test still green. Verified: it does.
     //
-    // The bad row is built by hand rather than parsed, because parseGearItemsFile would
-    // refuse it long before a query — which is the point: this asserts the SECOND line of
-    // defence, the one that holds if a future caller skips the first.
-    const good = { name: 'Transaction A', quantity: 1, weight: 1, weight_unit: 'g' };
-    const bad = { name: 'Transaction B', quantity: 1, weight: 1, weight_unit: 'g', price: 10 };
-
-    const { error } = await stranger.client
-      .from('gear_items')
-      .insert([good, bad].map((values) => ({ ...values, user_id: stranger.id })))
-      .select('id');
+    // The bad row is built by hand rather than parsed, because `parseGearItemsFile` would
+    // refuse it long before a query — which is the point. This asserts the SECOND line of
+    // defence, the one that has to hold if a future caller skips the first. The type
+    // system permits it: `GearItemInput` models price and currency as two independent
+    // nullable fields rather than one both-or-neither value, so `price` with a null
+    // `currency` compiles and only the database says no.
+    const good: GearItemInput = {
+      name: 'Transaction A',
+      quantity: 1,
+      weight: 1,
+      weight_unit: 'g',
+      price: null,
+      currency: null,
+      acquired_on: null,
+      status: 'owned',
+      url: null,
+      brand: null,
+      category: null,
+      description: null,
+      notes: null,
+    };
     // `price` without `currency` violates gear_items_price_has_currency.
-    expect(error).not.toBeNull();
+    const bad: GearItemInput = { ...good, name: 'Transaction B', price: 10 };
 
-    const { data } = await stranger.client
-      .from('gear_items')
-      .select('id')
-      .eq('user_id', stranger.id)
-      .in('name', ['Transaction A', 'Transaction B']);
-    expect(data).toEqual([]);
+    // The bad row LAST and, in the second pass, FIRST — a loop implementation would write
+    // the good row in one of those orders and not the other, so testing one order only
+    // would half-detect the defect.
+    for (const batch of [
+      [good, bad],
+      [bad, good],
+    ]) {
+      const { error, count } = await importGearItems(stranger.client, stranger.id, batch);
+      expect(error).not.toBeNull();
+      expect(count).toBe(0);
+
+      const { data } = await stranger.client
+        .from('gear_items')
+        .select('id')
+        .eq('user_id', stranger.id)
+        .in('name', ['Transaction A', 'Transaction B']);
+      expect(data).toEqual([]);
+    }
   });
 
   it('reports the number of rows it actually wrote', async () => {
@@ -317,7 +421,7 @@ describe('the import write', () => {
 });
 
 describe('scale', () => {
-  it('imports a 200-item file in one statement', async () => {
+  it('imports a 200-item file without timing out', async () => {
     // PK-65's own acceptance names 200 items as the size that must not time out.
     const bulkOwner = await createUser('json-bulk');
     const text = JSON.stringify(

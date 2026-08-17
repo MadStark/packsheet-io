@@ -51,9 +51,15 @@ describe('the envelope', () => {
   it('takes the export time as an argument rather than reading the clock', () => {
     // Purity is what lets this file assert on exact bytes at all, and it is what lets the
     // page thread ONE timestamp into both the document and the filename.
-    const a = buildGearItemsDocument([ROW], EXPORTED_AT);
-    const b = buildGearItemsDocument([ROW], EXPORTED_AT);
-    expect(a).toEqual(b);
+    //
+    // ASSERTED AGAINST A FIXED PAST DATE, not by calling the function twice and comparing.
+    // Two adjacent calls land in the same millisecond, so `a.toEqual(b)` would pass just as
+    // happily if this function called `new Date()` internally — a test that cannot fail for
+    // the reason it was written. Naming the expected string is what makes it fail.
+    expect(buildGearItemsDocument([ROW], EXPORTED_AT).exported_at).toBe('2026-08-16T12:34:56.000Z');
+    expect(buildGearItemsDocument([ROW], new Date('2001-01-01T00:00:00.000Z')).exported_at).toBe(
+      '2001-01-01T00:00:00.000Z',
+    );
   });
 });
 

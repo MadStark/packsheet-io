@@ -846,8 +846,9 @@ export async function loadGearItem(client: PacksheetClient, userId: string, id: 
  * `.eq('user_id', userId)` IS LOAD-BEARING HERE FOR A SHARPER REASON THAN ON THE OTHER
  * TWO LOADS ON THIS PAGE. `gear_items` carries two permissive SELECT policies and RLS
  * UNIONS them, so `gear_items_select_via_public_pack` makes any item sitting on anybody's
- * public pack readable by any signed-in visitor — see `loadGearCloset`'s own comment for
- * the general shape of that trap. What makes it worse in this particular query is the
+ * public pack readable by EVERY visitor — that policy is granted to `anon` as well as
+ * `authenticated` (core_schema.sql), which is how a shared pack page renders for a
+ * stranger at all. See `loadGearCloset`'s own comment for the general shape of that trap. What makes it worse in this particular query is the
  * OUTPUT: the other two loads render a page, where a stranger's row would at least be
  * visible as something odd on screen. This one serialises whatever it gets into a file
  * and hands it over as a download, including `notes`, `price` and `url` — the fields a

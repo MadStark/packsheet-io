@@ -114,7 +114,12 @@ import {
   type GearItemInput,
   EMPTY_GEAR_FORM_VALUES,
 } from './form';
-import { GEAR_ITEMS_KIND, PACKSHEET_SCHEMA_VERSION, PACK_KIND } from './json-schema';
+import {
+  GEAR_ITEMS_KIND,
+  PACKSHEET_SCHEMA_VERSION,
+  PACK_KIND,
+  type PacksheetGearItem,
+} from './json-schema';
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -189,6 +194,11 @@ function jsonlLineMessage(line: number): string {
 
 const TYPE_MESSAGE = 'This field needs to be text, a number, or empty.';
 
+/** Names the characters rather than the encoding rule, because "unpaired UTF-16
+ *  surrogate" is not a sentence anybody can act on. See `isStorableText`. */
+const UNSTORABLE_TEXT_MESSAGE =
+  'This field contains a character we cannot store. Remove any unusual invisible characters and try again.';
+
 /** The one unknown-key case that gets its own sentence rather than the generic one. See
  *  this module's "UNKNOWN KEYS ARE REFUSED" section: a file written from PK-65's ticket
  *  text, or from an older export, carries `weight` and `weight_unit`, and the generic
@@ -212,10 +222,13 @@ function unknownKeyMessage(keys: readonly string[]): string {
  *  something about their file before importing it, not after. */
 export type GearImportFormat = 'envelope' | 'array' | 'object' | 'jsonl';
 
-/** One row of the file, validated. `position` is ONE-BASED and is what the preview shows:
- *  it is the item's place in the file, which for JSONL is also its line number. `label`
- *  is the item's own name where it has a usable one, so a problem reads "Katadyn BeFree"
- *  rather than "row 7" wherever it can. */
+/** One row of the file, validated. `position` is ONE-BASED and is the item's place among
+ *  the ITEMS — deliberately not a line number, even for JSONL, because blank lines are
+ *  skipped and a file with one would report numbers that do not match the lines they came
+ *  from. (`jsonlLineMessage` DOES name a real line, because a parse failure is genuinely
+ *  about a line rather than about an item; the two numbers can differ, and each is the
+ *  right one for the thing it describes.) `label` is the item's own name where it has a
+ *  usable one, so a problem reads "Katadyn BeFree" rather than "row 7" wherever it can. */
 interface GearImportRowBase {
   readonly position: number;
   readonly label: string;
@@ -234,27 +247,46 @@ export interface GearImportRowProblem extends GearImportRowBase {
 export type GearImportRow = GearImportRowOk | GearImportRowProblem;
 
 /**
- * What a file turned out to be. `fileError` and `rows` are mutually exclusive in
- * practice: a whole-file refusal (unreadable, wrong version, wrong kind, empty, over the
- * cap) reports the reason and NO rows, because there was never a list of items to report
- * on; anything else reports every row, good and bad.
+ * What a file turned out to be.
  *
- * BOTH GOOD AND BAD ROWS ARE RETURNED, rather than the first failure or only the
- * failures. A preview that shows a visitor only what is wrong makes them import blind;
- * one that stops at the first bad row makes fixing a file an n-round-trip exercise. This
- * is the same reasoning `parseGearFormValues` gives for validating all thirteen fields
- * rather than returning at the first bad one, applied one level up.
+ * A DISCRIMINATED UNION ON `fileError`, NOT A RECORD WITH THREE INDEPENDENT FIELDS. An
+ * earlier shape had `fileError: string | null` alongside `rows`, and described them as
+ * mutually exclusive "in practice" — which is another way of saying the type permitted a
+ * state the producer promised never to build, and left every consumer to take that promise
+ * on trust. `{fileError: '…', rows: [aCleanRow]}` type-checked. Splitting the union means
+ * a whole-file refusal HAS no `rows` field to read, so the impossible state cannot be
+ * written down, and `importableGearItems` below narrows instead of casting.
+ *
+ * BOTH GOOD AND BAD ROWS ARE RETURNED on the readable branch, rather than the first
+ * failure or only the failures. A preview that shows a visitor only what is wrong makes
+ * them import blind; one that stops at the first bad row makes fixing a file an
+ * n-round-trip exercise. This is the same reasoning `parseGearFormValues` gives for
+ * validating all thirteen fields rather than returning at the first bad one, one level up.
  */
-export interface GearImportReport {
-  readonly fileError: string | null;
-  readonly format: GearImportFormat | null;
-  readonly rows: readonly GearImportRow[];
+export type GearImportReport =
+  | {
+      readonly fileError: string;
+      readonly format: GearImportFormat | null;
+      readonly rows?: undefined;
+    }
+  | {
+      readonly fileError: null;
+      readonly format: GearImportFormat;
+      readonly rows: readonly GearImportRow[];
+    };
+
+/** Every row the file yielded, or `[]` for a whole-file refusal. A helper rather than a
+ *  field so that callers which only want to iterate do not each have to narrow first. */
+export function gearImportRows(report: GearImportReport): readonly GearImportRow[] {
+  return report.fileError === null ? report.rows : [];
 }
 
-/** Whether every row validated. An empty `rows` is NOT clean — that case always carries a
- *  `fileError`, and a "clean" report with nothing to write would let a caller issue an
+/** Whether every row validated. A whole-file refusal is never clean, and neither is a
+ *  readable file with no rows in it — a "clean" empty report would let a caller issue an
  *  empty import and report success. */
-export function gearImportIsClean(report: GearImportReport): boolean {
+export function gearImportIsClean(
+  report: GearImportReport,
+): report is Extract<GearImportReport, { fileError: null }> {
   return report.fileError === null && report.rows.length > 0 && report.rows.every((row) => row.ok);
 }
 
@@ -267,16 +299,27 @@ export function gearImportIsClean(report: GearImportReport): boolean {
  * caller would be one forgotten check away from a partial import that reports success,
  * and the type system would not have an opinion. There is deliberately no exported way to
  * get at the good rows of a bad file.
+ *
+ * NO CAST. `gearImportIsClean` is a type PREDICATE, so after it returns true the compiler
+ * knows `report.rows` exists — and `everyRowOk` below narrows each row to the `ok: true`
+ * member. The previous version asserted `row as GearImportRowOk` on the strength of a
+ * `boolean` the compiler could not connect to the rows, which meant the guarantee this
+ * comment calls "structural" rested on an unchecked assertion. It does not any more.
  */
 export function importableGearItems(report: GearImportReport): readonly GearItemInput[] | null {
   if (!gearImportIsClean(report)) return null;
-  return report.rows.map((row) => (row as GearImportRowOk).values);
+  const items: GearItemInput[] = [];
+  for (const row of report.rows) {
+    if (!row.ok) return null;
+    items.push(row.values);
+  }
+  return items;
 }
 
 /** How many rows failed. For the preview's summary line; counts rows, not errors, since a
  *  row with three bad fields is one row to fix. */
 export function gearImportProblemCount(report: GearImportReport): number {
-  return report.rows.reduce((count, row) => count + (row.ok ? 0 : 1), 0);
+  return gearImportRows(report).reduce((count, row) => count + (row.ok ? 0 : 1), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +341,7 @@ export function gearImportProblemCount(report: GearImportReport): number {
  * it is what keeps "what you exported is what you get back" a true statement instead of
  * an approximate one.
  */
-const FILE_FIELDS: Readonly<Record<string, keyof GearFormValues>> = {
+const FILE_FIELDS: Readonly<Record<keyof PacksheetGearItem, keyof GearFormValues>> = {
   name: 'name',
   brand: 'brand',
   category: 'category',
@@ -313,13 +356,53 @@ const FILE_FIELDS: Readonly<Record<string, keyof GearFormValues>> = {
   notes: 'notes',
 };
 
-/** The keys `FILE_FIELDS` knows, as a Set for the unknown-key sweep. */
-const KNOWN_KEYS = new Set(Object.keys(FILE_FIELDS));
+/**
+ * The keys `FILE_FIELDS` knows, as a Set for the unknown-key sweep.
+ *
+ * A `Set`, NOT `key in FILE_FIELDS` OR A TRUTHY LOOKUP, and that is load-bearing rather
+ * than stylistic. `JSON.parse` makes `__proto__` an ORDINARY OWN PROPERTY (unlike an
+ * object literal, where it sets the prototype), so `{"__proto__": …}`, `{"constructor":
+ * …}` and `{"toString": …}` all arrive as real keys this loop will see. A `Set` answers
+ * `has` for exactly the twelve strings put into it and nothing else. `'toString' in
+ * FILE_FIELDS` answers TRUE, and `FILE_FIELDS['toString']` is a Function — truthy — so
+ * the obvious future tidy-up (one loop, `const formKey = FILE_FIELDS[key]; if (!formKey)
+ * continue;`) type-checks, reads as equivalent, and silently reopens the hole. The
+ * `Record<keyof PacksheetGearItem, …>` annotation above is the other half of that guard:
+ * it makes `FILE_FIELDS['toString']` a type error rather than a plausible expression.
+ */
+const KNOWN_KEYS = new Set<string>(Object.keys(FILE_FIELDS));
 
-/** The keys that get `WEIGHT_KEY_MESSAGE` instead of the generic unknown-key sentence.
- *  `volume_litres` is here too: PK-61 removed it from the product, so a file carrying one
- *  is an OLD file rather than a mistyped one, and its author is better served by being
- *  told the field is gone than by being told we do not recognise it. */
+/** Maps a `GearFormValues` key back to the FILE key that fills it, so an error raised by
+ *  the shared validator is reported against the field name the file actually uses. Built
+ *  by inverting `FILE_FIELDS` rather than written out, so the two cannot disagree — see
+ *  `fileFieldFor` for why the translation is needed at all. */
+const FORM_TO_FILE_FIELD: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(FILE_FIELDS).map(([fileKey, formKey]) => [formKey, fileKey]),
+);
+
+/**
+ * The name to report a problem under.
+ *
+ * WITHOUT THIS, THE PREVIEW CONTRADICTS ITSELF IN ONE TABLE. `parseGearFormValues` is the
+ * add/edit FORM's validator and raises its errors under the FORM's field names, so a bad
+ * weight comes back keyed `weight` — the exact field name this file format refuses, and
+ * whose refusal message (`WEIGHT_KEY_MESSAGE`) tells the reader to use `weight_grams`
+ * instead. Reported untranslated, a file with a too-precise weight and a leftover
+ * `weight` key showed one row saying "weight: enter a weight with up to three decimal
+ * places" directly above another saying "weight is not a field, use weight_grams" — both
+ * true of different things, and together unactionable. Anything with no file-side name
+ * (`item`, which is this module's own) is passed through unchanged.
+ */
+function fileFieldFor(formKey: string): string {
+  return FORM_TO_FILE_FIELD[formKey] ?? formKey;
+}
+
+/** The keys that get `WEIGHT_KEY_MESSAGE` instead of the generic unknown-key sentence:
+ *  the two a file written from PK-65's own ticket text, or from an older export, carries.
+ *  `volume_litres` is deliberately NOT here — PK-61 removed it from the product, so it is
+ *  neither a weight field to redirect nor something this schema has an alternative for,
+ *  and telling its author "use weight_grams instead" would be advice about the wrong
+ *  field. It earns the generic unknown-key sentence, which is the true one. */
 const RETIRED_WEIGHT_KEYS = new Set(['weight', 'weight_unit']);
 
 /**
@@ -327,17 +410,50 @@ const RETIRED_WEIGHT_KEYS = new Set(['weight', 'weight_unit']);
  * type has no honest reading. See the module header's "A FIELD MAY BE TEXT, A NUMBER, OR
  * NULL" section for why the line falls exactly here.
  *
- * A NON-FINITE NUMBER CANNOT ARRIVE THROUGH `JSON.parse` — JSON has no literal for NaN or
- * Infinity — so it is not special-cased. It could only arrive from a caller synthesising
- * a value by hand, and `String(NaN)` is `'NaN'`, which `parseGearFormValues` rejects with
- * its own weight/price message rather than accepting. That is the correct outcome by a
- * different route, not an unguarded path.
+ * A NON-FINITE NUMBER CAN ARRIVE THROUGH `JSON.parse`, WHICH IS NOT OBVIOUS AND IS WHY IT
+ * IS GUARDED. JSON has no literal for `NaN` or `Infinity`, so the natural conclusion is
+ * that neither can reach this function — but a finite literal that OVERFLOWS a double
+ * does: `JSON.parse('1e400')` is `Infinity`, and `-1e400` is `-Infinity`. For the numeric
+ * fields that would merely fail validation downstream. For a TEXT field it would not:
+ * `String(Infinity)` is `'Infinity'`, so `{"name": 1e400}` would import as an item
+ * genuinely named "Infinity" — the confident-wrong-`String()` coercion this module's
+ * header refuses for arrays and objects, arriving by the one route the guard-free version
+ * assumed was closed. Refused here instead, with the same type message, because a number
+ * too large to represent is not a value with an honest reading either.
  */
 function fieldToString(value: unknown): string | null {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return value;
-  if (typeof value === 'number') return String(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null;
   return null;
+}
+
+/**
+ * Whether a string is one Postgres will accept into a `text` column.
+ *
+ * MIRRORS A LIMIT THAT IS NOT A CHECK CONSTRAINT, which is why it is easy to miss.
+ * Postgres `text` cannot hold a NUL byte (`U+0000`) at all, and PostgREST cannot transport
+ * an unpaired UTF-16 surrogate — the first fails with `22P05 unsupported Unicode escape
+ * sequence`, the second with `22P02 invalid input syntax for type json`. Neither is
+ * expressible as a CHECK constraint, so neither has a mirror in `src/lib/gear/form.ts`,
+ * and a form cannot produce either (a browser will not submit a lone surrogate). A FILE
+ * can: `{"name": "a\u0000b"}` is well-formed JSON that `JSON.parse` accepts happily.
+ *
+ * Without this, such a file previewed as CLEAN — "Ready to import 1 item" — and then died
+ * at the INSERT, where the only thing the page can say is that it could not confirm
+ * whether the write went through. That is the worst possible place for it to fail: the
+ * whole point of the preview is that a file which will not import is refused BEFORE
+ * anything is attempted, with the row and the reason named. This moves the refusal back
+ * to where every other refusal lives.
+ */
+function isStorableText(value: string): boolean {
+  if (value.includes('\u0000')) return false;
+  // Well-formed surrogate PAIRS are fine — they are ordinary astral characters, and gear
+  // names carry emoji routinely. Removing every valid pair first leaves only unpaired
+  // halves, so what still matches the surrogate range is exactly what PostgREST cannot
+  // transport. `String.prototype.isWellFormed` says this in one call but is too recent to
+  // rely on across every runtime this ships to.
+  return !/[\uD800-\uDFFF]/.test(value.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''));
 }
 
 /**
@@ -353,8 +469,12 @@ function fieldToString(value: unknown): string | null {
  * direct-SQL writes already rely on. This is the identical judgement PK-63 made for
  * `quantity` and `weight` — a real column default means blank is "did not say, use the
  * default" rather than an error — applied to the one field whose form control made it
- * look mandatory. An explicitly WRONG status ('Owned', 'active', '') still fails, through
- * the shared validator, exactly as it does on the form.
+ * look mandatory. An explicitly WRONG status ('Owned', 'active') still fails, through the
+ * shared validator, exactly as it does on the form — but note that an EMPTY one ('', or
+ * whitespace) does NOT: it is indistinguishable from "did not say" after trimming, and is
+ * defaulted rather than refused. That is the intended reading for a document, where a
+ * blank value and an absent key mean the same thing, and it is the opposite of the form's
+ * reading, where a blank status can only mean a tampered submission.
  */
 function itemToFormValues(item: Record<string, unknown>): {
   readonly values: GearFormValues;
@@ -375,10 +495,22 @@ function itemToFormValues(item: Record<string, unknown>): {
   if (unknown.length > 0) errors.item = unknownKeyMessage(unknown);
 
   for (const [fileKey, formKey] of Object.entries(FILE_FIELDS)) {
-    if (!(fileKey in item)) continue;
+    // `Object.prototype.hasOwnProperty.call`, not `fileKey in item`: `in` walks the
+    // prototype chain, so it answers true for any field name that collides with an
+    // `Object.prototype` member. None of the twelve does today, which is the only reason
+    // the `in` form was not already a bug — add a field called `constructor` or
+    // `toString` and every item in every file would silently inherit a value from the
+    // prototype. An own-property test cannot acquire that failure mode later.
+    if (!Object.prototype.hasOwnProperty.call(item, fileKey)) continue;
     const flattened = fieldToString(item[fileKey]);
     if (flattened === null) {
       errors[fileKey] = TYPE_MESSAGE;
+      continue;
+    }
+    // Refused HERE rather than left to the database — see `isStorableText` for why this
+    // one limit has no CHECK constraint to mirror and so no mirror in `form.ts` either.
+    if (!isStorableText(flattened)) {
+      errors[fileKey] = UNSTORABLE_TEXT_MESSAGE;
       continue;
     }
     values[formKey] = flattened;
@@ -426,11 +558,23 @@ function validateItem(value: unknown, position: number): GearImportRow {
     return { ok: true, position, label, values: parsed.values };
   }
 
+  // The shared validator raises its errors under the FORM's field names; this report is
+  // about a FILE, so they are translated back before being merged. See `fileFieldFor` for
+  // the contradiction that appears in the preview when they are not. This module's own
+  // errors are already keyed by file name and are spread last, so a specific complaint
+  // (a stray `weight` key) wins over a generic one about the same field.
+  const translated: Record<string, string> = {};
+  if (!parsed.ok) {
+    for (const [formKey, message] of Object.entries(parsed.errors)) {
+      translated[fileFieldFor(formKey)] = message;
+    }
+  }
+
   return {
     ok: false,
     position,
     label,
-    errors: { ...(parsed.ok ? {} : parsed.errors), ...errors },
+    errors: { ...translated, ...errors },
   };
 }
 
@@ -520,9 +664,20 @@ function parseJsonl(
  * and reporting row problems underneath one of them would bury it. Only once the file is
  * known to be a list of gear items of a readable version does anything look at a row.
  */
-export function parseGearItemsFile(text: string): GearImportReport {
+export function parseGearItemsFile(input: string): GearImportReport {
+  // A LEADING BYTE-ORDER MARK IS STRIPPED, NOT REFUSED. Several Windows editors — Notepad
+  // among them — write one when saving UTF-8, so a visitor who exported their closet,
+  // opened the file to edit one line and saved it has a file whose first character is
+  // U+FEFF rather than `{`. That is not valid JSON and `JSON.parse` refuses it, which
+  // would tell the author their
+  // Packsheet export is not a Packsheet file and leave them no way forward. The BOM
+  // carries no information here (the string has already been decoded as UTF-8 by the time
+  // it reaches this function), so dropping it loses nothing. Only a LEADING one: a U+FEFF
+  // in the middle of a gear name is that name's business.
+  const text = input.startsWith('\uFEFF') ? input.slice(1) : input;
+
   if (text.trim() === '') {
-    return { fileError: EMPTY_FILE_MESSAGE, format: null, rows: [] };
+    return { fileError: EMPTY_FILE_MESSAGE, format: null };
   }
 
   let format: GearImportFormat;
@@ -534,7 +689,7 @@ export function parseGearItemsFile(text: string): GearImportReport {
     // the only remaining shape, because a JSONL file of one line would have parsed above
     // and produced the identical single item.
     const jsonl = parseJsonl(text);
-    if ('fileError' in jsonl) return { fileError: jsonl.fileError, format: null, rows: [] };
+    if ('fileError' in jsonl) return { fileError: jsonl.fileError, format: null };
     format = 'jsonl';
     raw = jsonl.items;
   } else if (Array.isArray(whole.value)) {
@@ -544,8 +699,7 @@ export function parseGearItemsFile(text: string): GearImportReport {
     const object = whole.value as Record<string, unknown>;
     if (looksLikeEnvelope(object)) {
       const unwrapped = unwrapEnvelope(object);
-      if ('fileError' in unwrapped)
-        return { fileError: unwrapped.fileError, format: null, rows: [] };
+      if ('fileError' in unwrapped) return { fileError: unwrapped.fileError, format: null };
       format = 'envelope';
       raw = unwrapped.items;
     } else {
@@ -555,12 +709,12 @@ export function parseGearItemsFile(text: string): GearImportReport {
   } else {
     // Valid JSON, but a number, a string, a boolean or null — none of which is a gear
     // item or a list of them, however well-formed it is.
-    return { fileError: NOT_A_GEAR_FILE_MESSAGE, format: null, rows: [] };
+    return { fileError: NOT_A_GEAR_FILE_MESSAGE, format: null };
   }
 
-  if (raw.length === 0) return { fileError: NO_ITEMS_MESSAGE, format, rows: [] };
+  if (raw.length === 0) return { fileError: NO_ITEMS_MESSAGE, format };
   if (raw.length > MAX_IMPORT_ITEMS) {
-    return { fileError: TOO_MANY_ITEMS_MESSAGE, format, rows: [] };
+    return { fileError: TOO_MANY_ITEMS_MESSAGE, format };
   }
 
   return {

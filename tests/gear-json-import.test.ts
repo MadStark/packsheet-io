@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   MAX_IMPORT_ITEMS,
   gearImportIsClean,
+  gearImportRows as rows,
   gearImportProblemCount,
   importableGearItems,
   parseGearItemsFile,
@@ -44,7 +45,7 @@ describe('the four accepted shapes', () => {
     const report = parse(envelope([VALID, { ...VALID, name: 'Katadyn BeFree' }]));
     expect(report.fileError).toBeNull();
     expect(report.format).toBe('envelope');
-    expect(report.rows).toHaveLength(2);
+    expect(rows(report)).toHaveLength(2);
     expect(gearImportIsClean(report)).toBe(true);
   });
 
@@ -52,30 +53,30 @@ describe('the four accepted shapes', () => {
     const report = parse([VALID, VALID]);
     expect(report.format).toBe('array');
     expect(gearImportIsClean(report)).toBe(true);
-    expect(report.rows).toHaveLength(2);
+    expect(rows(report)).toHaveLength(2);
   });
 
   it('reads a single bare item object', () => {
     const report = parse(VALID);
     expect(report.format).toBe('object');
     expect(gearImportIsClean(report)).toBe(true);
-    expect(report.rows).toHaveLength(1);
+    expect(rows(report)).toHaveLength(1);
   });
 
   it('reads JSONL, one item per line', () => {
     const report = parse(`${JSON.stringify(VALID)}\n${JSON.stringify(VALID)}\n`);
     expect(report.format).toBe('jsonl');
     expect(gearImportIsClean(report)).toBe(true);
-    expect(report.rows).toHaveLength(2);
+    expect(rows(report)).toHaveLength(2);
   });
 
   it('skips blank lines in JSONL rather than failing on the trailing newline every editor writes', () => {
     const report = parse(`\n${JSON.stringify(VALID)}\n\n${JSON.stringify(VALID)}\n\n`);
     expect(gearImportIsClean(report)).toBe(true);
-    expect(report.rows).toHaveLength(2);
+    expect(rows(report)).toHaveLength(2);
     // Positions count ITEMS, not lines, so a blank line in the middle does not shift the
     // numbering against the items a person can count.
-    expect(report.rows.map((row) => row.position)).toEqual([1, 2]);
+    expect(rows(report).map((row) => row.position)).toEqual([1, 2]);
   });
 
   it('reads a one-line JSONL file identically to the same single object as JSON', () => {
@@ -83,13 +84,13 @@ describe('the four accepted shapes', () => {
     // because these two readings agree. This is that claim, asserted rather than argued.
     const asJson = parse(VALID);
     const asJsonl = parse(`${JSON.stringify(VALID)}\n`);
-    expect(asJsonl.rows).toEqual(asJson.rows);
+    expect(rows(asJsonl)).toEqual(rows(asJson));
   });
 
   it('reports a truncated JSONL file by the line it broke on', () => {
     const report = parse(`${JSON.stringify(VALID)}\n${JSON.stringify(VALID)}\n{"name": "cut`);
     expect(report.fileError).toContain('line 3');
-    expect(report.rows).toEqual([]);
+    expect(rows(report)).toEqual([]);
   });
 
   it('reports a file that never looked like JSONL as a file problem, not a line problem', () => {
@@ -116,7 +117,7 @@ describe('whole-file refusals write nothing', () => {
     );
     expect(report.fileError).toContain('version 2');
     expect(report.fileError).toContain(`version ${PACKSHEET_SCHEMA_VERSION}`);
-    expect(report.rows).toEqual([]);
+    expect(rows(report)).toEqual([]);
   });
 
   it('checks the version before the kind, so a newer file is reported as newer', () => {
@@ -167,7 +168,7 @@ describe('whole-file refusals write nothing', () => {
   it('refuses a file over the item cap whole, rather than importing the first of it', () => {
     const report = parse(Array.from({ length: MAX_IMPORT_ITEMS + 1 }, () => VALID));
     expect(report.fileError).toContain(String(MAX_IMPORT_ITEMS));
-    expect(report.rows).toEqual([]);
+    expect(rows(report)).toEqual([]);
     expect(importableGearItems(report)).toBeNull();
   });
 
@@ -182,19 +183,19 @@ describe('per-row validation is the add/edit form’s validation', () => {
   it('reports a missing name with the form’s own message', () => {
     const report = parse([{ weight_grams: 100 }]);
     expect(gearImportIsClean(report)).toBe(false);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(false);
     if (row && !row.ok) expect(row.errors.name).toBe('Enter a name for this item.');
   });
 
   it('enforces the price/currency both-or-neither constraint', () => {
     const withPriceOnly = parse([{ ...VALID, price: 42 }]);
-    const row = withPriceOnly.rows[0];
+    const row = rows(withPriceOnly)[0];
     expect(row?.ok).toBe(false);
     if (row && !row.ok) expect(row.errors.currency).toBe('Select a currency for this price.');
 
     const withCurrencyOnly = parse([{ ...VALID, currency: 'GBP' }]);
-    const other = withCurrencyOnly.rows[0];
+    const other = rows(withCurrencyOnly)[0];
     expect(other?.ok).toBe(false);
     if (other && !other.ok) {
       expect(other.errors.price).toBe('Enter a price for this currency, or clear the currency.');
@@ -237,7 +238,7 @@ describe('per-row validation is the add/edit form’s validation', () => {
 
   it('reports every problem in a row at once rather than the first', () => {
     const report = parse([{ name: '', status: 'nope', url: 'ftp://x' }]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(false);
     if (row && !row.ok) expect(Object.keys(row.errors).length).toBeGreaterThanOrEqual(3);
   });
@@ -246,21 +247,21 @@ describe('per-row validation is the add/edit form’s validation', () => {
 describe('defaults a file may leave out', () => {
   it('defaults status to owned when the file does not say, unlike the form', () => {
     const report = parse([VALID]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(true);
     if (row?.ok) expect(row.values.status).toBe('owned');
   });
 
   it('treats an explicit null status the same as an absent one', () => {
     const report = parse([{ ...VALID, status: null }]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(true);
     if (row?.ok) expect(row.values.status).toBe('owned');
   });
 
   it('defaults quantity and weight to the column defaults when absent', () => {
     const report = parse([{ name: 'A bag' }]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(true);
     if (row?.ok) {
       expect(row.values.quantity).toBe(1);
@@ -270,7 +271,7 @@ describe('defaults a file may leave out', () => {
 
   it('always stores grams, since the file has no unit to carry', () => {
     const report = parse([{ ...VALID, weight_grams: 907 }]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(true);
     if (row?.ok) {
       expect(row.values.weight).toBe(907);
@@ -282,7 +283,7 @@ describe('defaults a file may leave out', () => {
 describe('unknown keys are refused', () => {
   it('names the weight/weight_unit pair specifically, because that is the mistake the ticket text invites', () => {
     const report = parse([{ name: 'A tent', weight: 4.4, weight_unit: 'oz' }]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(false);
     if (row && !row.ok) {
       expect(row.errors.weight_grams).toContain('weight_grams');
@@ -297,7 +298,7 @@ describe('unknown keys are refused', () => {
 
   it('refuses a misspelled field rather than silently dropping it', () => {
     const report = parse([{ ...VALID, catagory: 'Shelter' }]);
-    const row = report.rows[0];
+    const row = rows(report)[0];
     expect(row?.ok).toBe(false);
     if (row && !row.ok) expect(row.errors.item).toContain('"catagory"');
   });
@@ -315,7 +316,7 @@ describe('field types', () => {
     expect(gearImportIsClean(numericName)).toBe(true);
 
     const stringQuantity = parse([{ ...VALID, quantity: '2' }]);
-    const row = stringQuantity.rows[0];
+    const row = rows(stringQuantity)[0];
     expect(row?.ok).toBe(true);
     if (row?.ok) expect(row.values.quantity).toBe(2);
   });
@@ -337,9 +338,9 @@ describe('field types', () => {
 
 describe('all or nothing', () => {
   it('returns no items at all when a single row of many is bad', () => {
-    const rows = [VALID, VALID, { name: '' }, VALID];
-    const report = parse(rows);
-    expect(report.rows).toHaveLength(4);
+    const file = [VALID, VALID, { name: '' }, VALID];
+    const report = parse(file);
+    expect(rows(report)).toHaveLength(4);
     expect(gearImportProblemCount(report)).toBe(1);
     expect(gearImportIsClean(report)).toBe(false);
     // The whole point: there is no exported way to reach the three good rows.
@@ -348,13 +349,13 @@ describe('all or nothing', () => {
 
   it('reports good rows alongside bad ones so a file can be fixed in one pass', () => {
     const report = parse([VALID, { name: '' }, VALID]);
-    expect(report.rows.map((row) => row.ok)).toEqual([true, false, true]);
+    expect(rows(report).map((row) => row.ok)).toEqual([true, false, true]);
   });
 
   it('labels a row by its own name where it has one, and by its position where it does not', () => {
     const report = parse([{ ...VALID, name: 'Katadyn BeFree' }, { weight_grams: 1 }]);
-    expect(report.rows[0]?.label).toBe('Katadyn BeFree');
-    expect(report.rows[1]?.label).toBe('Item 2');
+    expect(rows(report)[0]?.label).toBe('Katadyn BeFree');
+    expect(rows(report)[1]?.label).toBe('Item 2');
   });
 
   it('never reports a file with no rows as clean', () => {
@@ -362,6 +363,103 @@ describe('all or nothing', () => {
     const report = parse([]);
     expect(gearImportIsClean(report)).toBe(false);
     expect(importableGearItems(report)).toBeNull();
+  });
+});
+
+describe('text Postgres cannot store is refused at the preview, not at the insert', () => {
+  // Neither of these is expressible as a CHECK constraint, so neither has a mirror in
+  // form.ts — and a browser cannot produce either, so the form path never meets them. A
+  // FILE can. Before this guard they previewed as CLEAN and then died at the INSERT, where
+  // the only thing the page can honestly say is that it could not confirm what happened.
+  it('refuses a NUL byte in any text field', () => {
+    expect(gearImportIsClean(parse([{ name: 'a\u0000b', weight_grams: 1 }]))).toBe(false);
+    expect(gearImportIsClean(parse([{ ...VALID, notes: 'x\u0000' }]))).toBe(false);
+  });
+
+  it('refuses an unpaired surrogate', () => {
+    expect(gearImportIsClean(parse([{ name: '\ud800', weight_grams: 1 }]))).toBe(false);
+    expect(gearImportIsClean(parse([{ ...VALID, brand: 'a\udc00b' }]))).toBe(false);
+  });
+
+  it('still accepts ordinary astral characters, which are well-formed pairs', () => {
+    // Emoji are surrogate PAIRS. Refusing those would refuse a great many real gear names.
+    const report = parse([{ name: '🏕 Tent 帳篷 čäé', weight_grams: 1 }]);
+    expect(gearImportIsClean(report)).toBe(true);
+    const row = rows(report)[0];
+    if (row?.ok) expect(row.values.name).toBe('🏕 Tent 帳篷 čäé');
+  });
+
+  it('names the field the file uses, not the form field behind it', () => {
+    // The shared validator raises `weight`; this format has no `weight` field and refuses
+    // one by name, so reporting under it would contradict the refusal two rows above.
+    const report = parse([{ ...VALID, weight_grams: 124.7381 }]);
+    const row = rows(report)[0];
+    expect(row?.ok).toBe(false);
+    if (row && !row.ok) {
+      expect(Object.keys(row.errors)).toEqual(['weight_grams']);
+      expect(row.errors.weight).toBeUndefined();
+    }
+  });
+});
+
+describe('a leading byte-order mark is stripped', () => {
+  it('reads an export saved by an editor that writes a BOM', () => {
+    // Notepad does this. Without the strip, a visitor who opened their own export to fix
+    // one line is told it is not a Packsheet file.
+    const report = parse(`\uFEFF${envelope([VALID])}`);
+    expect(report.fileError).toBeNull();
+    expect(gearImportIsClean(report)).toBe(true);
+  });
+
+  it('leaves a U+FEFF inside a value alone', () => {
+    const report = parse([{ name: `Tent\uFEFFwith mark`, weight_grams: 1 }]);
+    const row = rows(report)[0];
+    expect(row?.ok).toBe(true);
+    if (row?.ok) expect(row.values.name).toContain('\uFEFF');
+  });
+});
+
+describe('numbers that overflow a double', () => {
+  // WRITTEN AS RAW TEXT, NOT THROUGH `parse([...])`. `JSON.stringify(Infinity)` is the
+  // literal `null`, so building these through an object would never put `1e400` in the
+  // file at all — the assertions would pass for the wrong reason (a null name is refused
+  // as a MISSING name) and would keep passing with the guard removed. Verified: they do.
+  // The overflow has to happen inside `JSON.parse`, which means it has to be in the bytes.
+  it('refuses 1e400 in a text field rather than importing an item named Infinity', () => {
+    expect(JSON.parse('1e400')).toBe(Infinity);
+    const report = parseGearItemsFile('[{"name": 1e400, "weight_grams": 1}]');
+    expect(gearImportIsClean(report)).toBe(false);
+    const row = rows(report)[0];
+    if (row && !row.ok) expect(row.errors.name).toBeDefined();
+  });
+
+  it('refuses it in a numeric field too', () => {
+    expect(gearImportIsClean(parseGearItemsFile('[{"name":"A tent","weight_grams": 1e400}]'))).toBe(
+      false,
+    );
+    expect(
+      gearImportIsClean(
+        parseGearItemsFile('[{"name":"A tent","price": -1e400, "currency": "GBP"}]'),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('prototype keys reach the unknown-key refusal, not the prototype', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty'])(
+    'refuses %s as an unknown field',
+    (key) => {
+      // JSON.parse makes __proto__ an ORDINARY OWN property, so Object.keys sees it and
+      // the Set-backed KNOWN_KEYS refuses it. A truthy lookup against FILE_FIELDS would
+      // not — see KNOWN_KEYS' own comment.
+      const report = parseGearItemsFile(`[{"name":"A tent","weight_grams":1,"${key}":"x"}]`);
+      expect(gearImportIsClean(report)).toBe(false);
+    },
+  );
+
+  it('does not pollute Object.prototype', () => {
+    parseGearItemsFile('[{"__proto__":{"polluted":true}}]');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
 
@@ -379,7 +477,7 @@ describe('totality — no input may throw', () => {
     '{"packsheet":1}',
     '{"kind":"gear_items"}',
     '{"packsheet":"1","kind":"gear_items","data":{"items":[]}}',
-    '﻿{"name":"bom"}',
+    '\uFEFF{"name":"bom"}',
     '[{"name":"\\u0000"}]',
     '{"name":"x","weight_grams":1e400}',
     '[]\n[]',

@@ -3,12 +3,14 @@ import {
   IMPORT_FORM_FIELD,
   IMPORT_INTENT,
   MAX_IMPORT_BYTES,
+  importedBannerMessage,
   isImportIntent,
   itemCount,
   problemHeading,
   readImportSubmission,
   readyHeading,
 } from '../src/lib/gear/import-form';
+import { MAX_IMPORT_ITEMS } from '../src/lib/gear/json-import';
 
 /**
  * The import page's submission (PK-65): which step a POST is, and where its bytes came
@@ -96,6 +98,41 @@ describe('where the bytes come from', () => {
     if (result.ok) expect(result.text).toContain('from the file');
   });
 
+  it('reports the source, so the page knows whether it can echo the text back', async () => {
+    const fromFile = await readImportSubmission(
+      form({
+        [IMPORT_FORM_FIELD.intent]: IMPORT_INTENT.preview,
+        [IMPORT_FORM_FIELD.file]: jsonFile('{"name":"x"}'),
+      }),
+    );
+    expect(fromFile.ok && fromFile.source).toBe('file');
+
+    const fromBox = await readImportSubmission(
+      form({
+        [IMPORT_FORM_FIELD.intent]: IMPORT_INTENT.preview,
+        [IMPORT_FORM_FIELD.text]: '{"name":"x"}',
+      }),
+    );
+    expect(fromBox.ok && fromBox.source).toBe('text');
+  });
+
+  it('says the file could not be READ, not that none was chosen', async () => {
+    // A visitor who has just picked a file and is told to pick a file has been given the
+    // one instruction that cannot help them.
+    const broken = new File(['x'], 'gear.json');
+    Object.defineProperty(broken, 'text', {
+      value: () => Promise.reject(new Error('stream died')),
+    });
+    const result = await readImportSubmission(
+      form({ [IMPORT_FORM_FIELD.intent]: IMPORT_INTENT.preview, [IMPORT_FORM_FIELD.file]: broken }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('could not read');
+      expect(result.error).not.toBe('Choose a file to import, or paste one in.');
+    }
+  });
+
   it('refuses a submission with neither', async () => {
     const result = await readImportSubmission(
       form({ [IMPORT_FORM_FIELD.intent]: IMPORT_INTENT.preview }),
@@ -124,7 +161,10 @@ describe('the size cap', () => {
       }),
     );
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain('1 MB');
+    // "MiB", not "MB": the cap is 1024 * 1024, which is 4.9% larger than a megabyte, and
+    // a message naming the wrong unit is a message that will not match a file somebody
+    // measured in their file manager.
+    if (!result.ok) expect(result.error).toContain('1 MiB');
   });
 
   it('accepts a file exactly at the cap', async () => {
@@ -169,6 +209,36 @@ describe('counting things out loud', () => {
   it('reads correctly for a single clean item', () => {
     expect(readyHeading(1)).toBe('Ready to import 1 item');
     expect(readyHeading(6)).toBe('Ready to import 6 items');
+  });
+});
+
+describe('the imported banner', () => {
+  it('renders a count this application could have written', () => {
+    expect(importedBannerMessage('1')).toBe('Imported 1 item into your closet.');
+    expect(importedBannerMessage('200')).toBe('Imported 200 items into your closet.');
+    expect(importedBannerMessage(String(MAX_IMPORT_ITEMS))).toContain(String(MAX_IMPORT_ITEMS));
+  });
+
+  it('renders nothing when the parameter is absent', () => {
+    expect(importedBannerMessage(null)).toBeNull();
+  });
+
+  it('refuses anything a hand-edited URL can carry', () => {
+    // The parameter is in a URL a visitor can type, so every one of these has to mean "no
+    // banner" rather than a rendered NaN or a sentence about a negative number of items.
+    for (const raw of ['', ' ', 'abc', '-4', '1.5', '1e3', '0x10', '٣', 'null', 'Infinity']) {
+      expect(importedBannerMessage(raw)).toBeNull();
+    }
+  });
+
+  it('refuses zero, which no successful import can produce', () => {
+    // importableGearItems refuses an empty file, so a real import always writes ≥ 1.
+    expect(importedBannerMessage('0')).toBeNull();
+  });
+
+  it('refuses a count larger than one import could write', () => {
+    expect(importedBannerMessage(String(MAX_IMPORT_ITEMS + 1))).toBeNull();
+    expect(importedBannerMessage('999999999')).toBeNull();
   });
 });
 

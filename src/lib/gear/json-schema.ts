@@ -11,9 +11,9 @@
  * load-bearing rather than incidental: a pack file names categories and per-pack
  * overrides that have no UI to come back to yet (PK-37 is still Backlog), so importing
  * one would write rows nothing can display or correct. `GEAR_ITEMS_KIND` is therefore
- * the only kind this build ACCEPTS, and `json-import.ts` refuses a `'pack'` file BY NAME
- * — "this build cannot import a pack file yet" — rather than with the same message it
- * gives a file whose kind is gibberish. Those are different facts about a file and a
+ * the only kind this build ACCEPTS, and `json-import.ts` refuses a `'pack'` file BY NAME —
+ * see `PACK_FILE_MESSAGE` there for the exact wording — rather than with the message it
+ * gives a file whose kind is gibberish. Those are different facts about a file, and a
  * visitor holding a real, valid pack export deserves to be told which one they hit.
  *
  * ---------------------------------------------------------------------------
@@ -41,15 +41,33 @@
  * should be revisited with it rather than left standing on its own.
  *
  * THE PRECISION ARGUMENT, WHICH IS THE PART THAT IS EASY TO GET WRONG. `weight_grams` is
- * `numeric` with no declared scale (it is `weight * <factor>`, and the oz/lb factors
- * carry nine and five decimal places respectively), while `weight` is `numeric(12, 3)`.
- * Exporting the raw generated value and importing it back into `weight` would let
- * Postgres round it — silently, at the column — so an export of the re-import would not
- * be byte-identical to the first export, and "export → import → export" would never
- * settle. `gearItemToJson` therefore rounds to `WEIGHT_DECIMALS` (3) itself, in the same
- * unit the value will be stored in, so the number in the file is already a number the
- * column can hold exactly. The second export equals the first. That is what makes a
- * round-trip TESTABLE rather than approximately true.
+ * `numeric` with no declared scale (it is `weight * <factor>`, and the oz/lb factors carry
+ * nine and five decimal places respectively), while `weight` is `numeric(12, 3)`. So
+ * `2.3 oz` is stored as `2.3` and generates `65.2039031875` grams — a figure with more
+ * precision than the column it would have to be imported back INTO can hold.
+ *
+ * Exporting that raw value would not silently round on the way back in — the importer
+ * refuses more than three decimal places outright, through `parseGearFormValues`, exactly
+ * as the add-item form does (see `FILE_FIELDS`' comment in `json-import.ts`). It would do
+ * something worse: **our own export would not re-import at all.** Every ounce- or
+ * pound-entered item in the file would come back as "enter a weight with up to three
+ * decimal places", and the product's headline promise — export your closet, import it
+ * again — would fail on the first file it produced.
+ *
+ * `gearItemToJson` therefore rounds to three decimals itself, in the unit the value will
+ * be stored in, so the number in the file is one the column holds exactly and the importer
+ * accepts. The re-imported row then generates the identical gram figure (`weight * 1`),
+ * and a second export equals the first. That is what makes the round trip TESTABLE rather
+ * than approximately true — `tests/gear-json-round-trip.test.ts` asserts the two documents
+ * are equal, across all four units.
+ *
+ * THE ONE PLACE IT STILL BREAKS, recorded rather than left to be discovered: `weight` is
+ * `numeric(12, 3)` in the ENTERED unit, so a legal row of `1 000 000 kg` generates
+ * 1e9 grams — past the bound the importer enforces on `weight` — and that export will not
+ * re-import. The threshold is a thousand tonnes. Nothing anybody carries is anywhere near
+ * it, and refusing the row on export instead would be the worse trade (an unexportable
+ * closet, to protect against a weight no closet holds), so it is left as a documented
+ * edge rather than defended against.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS NOT IN THE FILE, AND WHY EACH ONE IS ABSENT
@@ -75,7 +93,7 @@
  * - `volume_litres`: dropped from the product by PK-61. Not absent by accident.
  */
 
-import { roundWeight, WEIGHT_DECIMALS } from '../units';
+import { roundWeight } from '../units';
 import type { Database } from '../database.types';
 
 // ---------------------------------------------------------------------------
@@ -89,9 +107,10 @@ import type { Database } from '../database.types';
  * a version number has to be added, because the release that needs one and does not have
  * one can never acquire it: a file with no `packsheet` key is indistinguishable from a
  * file written by a future version that renamed it, and every later reader has to guess.
- * `json-import.ts` refuses any value other than this one BY NAME AND NUMBER, so the
- * first incompatible change produces "this file was written by a newer version of
- * Packsheet" rather than a partially-understood import.
+ * `json-import.ts` refuses any value other than this one, naming BOTH the version found
+ * and the version understood (`unsupportedVersionMessage`), so the first incompatible
+ * change tells its reader the FILE is ahead rather than that their data is broken — and
+ * never produces a partially-understood import.
  */
 export const PACKSHEET_SCHEMA_VERSION = 1;
 
@@ -190,6 +209,33 @@ export const GEAR_EXPORT_SELECT =
  * happen. `gear_items.weight` itself defaults to `0`, so `0` is a value this schema
  * already means "no weight recorded" by.
  */
+/**
+ * `weight_grams` as a number this schema can write, for any value the column hands back.
+ *
+ * WHY THIS IS NOT JUST `roundWeight(grams ?? 0)`. `roundWeight` ASSERTS: it throws a
+ * `RangeError` for `NaN`, `Infinity`, a negative, or anything that is not a number (see
+ * `src/lib/units.ts`'s "THROW, NOT RETURN" section, which argues for that at length and is
+ * right to). Every one of those is unreachable for a row that is actually in the table —
+ * the CHECK constraints see to it. But this value does not come from the table directly,
+ * it comes from PostgREST's JSON, the generated type for it is `number | null`, and the
+ * export path has no try/catch anywhere above it: one such value and the visitor gets an
+ * unhandled 500 instead of the page's own load error, on a route whose entire promise is
+ * "your data is always exportable".
+ *
+ * The realistic way that happens is not corrupt data — it is a serialisation change.
+ * PostgREST can be configured to send `numeric` as a STRING to preserve precision, and the
+ * round-trip tests already hedge against it with `Number(data?.weight_grams)`. Under that
+ * setting `roundWeight('907')` throws and EVERY export in the product fails at once. So
+ * this coerces first and falls back to `0` — the same value the column itself defaults to,
+ * and the same value a null already maps to — rather than letting a formatting decision
+ * taken elsewhere become an outage here.
+ */
+function gramsForExport(grams: unknown): number {
+  const value = typeof grams === 'string' ? Number(grams) : grams;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 0;
+  return roundWeight(value);
+}
+
 export function gearItemToJson(row: GearExportRow): PacksheetGearItem {
   return {
     name: row.name,
@@ -197,7 +243,7 @@ export function gearItemToJson(row: GearExportRow): PacksheetGearItem {
     category: row.category,
     description: row.description,
     quantity: row.quantity,
-    weight_grams: roundWeight(row.weight_grams ?? 0),
+    weight_grams: gramsForExport(row.weight_grams),
     price: row.price,
     currency: row.currency,
     acquired_on: row.acquired_on,
@@ -249,7 +295,8 @@ export function gearItemsFilename(exportedAt: Date): string {
   return `packsheet-gear-${exportedAt.toISOString().slice(0, 10)}.json`;
 }
 
-/** Re-exported so a caller rounding a gram figure for this schema uses the schema's own
- *  scale rather than reaching for a literal `3`. See the header's precision argument for
- *  why the rounding has to happen before the number is written, not after it is read. */
-export const GEAR_JSON_WEIGHT_DECIMALS = WEIGHT_DECIMALS;
+// (An earlier draft re-exported `WEIGHT_DECIMALS` from here as
+// `GEAR_JSON_WEIGHT_DECIMALS`, "so a caller rounds at the schema's own scale". Nothing
+// ever called it: `gearItemToJson` rounds on every caller's behalf, so there is no caller
+// left with a gram figure to round. Deleted rather than kept for symmetry — an export with
+// no consumer is a claim about the module's surface that nothing keeps true.)

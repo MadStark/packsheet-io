@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   gearImportIsClean,
   gearImportProblemCount,
+  gearImportRows as rows,
   importableGearItems,
   parseGearItemsFile,
 } from '../src/lib/gear/json-import';
@@ -85,24 +86,50 @@ describe('the deliberately broken example earns the refusals it demonstrates', (
   });
 
   it('accepts the first row and refuses the other seven', () => {
-    expect(report.rows).toHaveLength(8);
-    expect(report.rows[0]?.ok).toBe(true);
+    expect(rows(report)).toHaveLength(8);
+    expect(rows(report)[0]?.ok).toBe(true);
     expect(gearImportProblemCount(report)).toBe(7);
   });
 
   it('names the reason for each row, one demonstrated refusal at a time', () => {
-    const reasons = report.rows.map((row) => (row.ok ? null : Object.keys(row.errors).sort()));
+    const reasons = rows(report).map((row) => (row.ok ? null : Object.keys(row.errors).sort()));
     expect(reasons[1]).toEqual(['currency']); // a price with no currency
     expect(reasons[2]).toEqual(['weight_grams']); // weight + weight_unit from the ticket text
     expect(reasons[3]).toEqual(['acquired_on']); // a date in the future
     expect(reasons[4]).toEqual(['item']); // "catagory"
     expect(reasons[5]).toEqual(['name']); // no name at all
     expect(reasons[6]).toEqual(['status']); // not one of the three
-    expect(reasons[7]).toEqual(['weight']); // more precision than numeric(12,3) holds
+    // `weight_grams`, NOT `weight` — the shared validator raises this under the FORM's
+    // field name and it is translated back to the file's. Row 3 above tells its reader
+    // that `weight` is not a field of this format; a row blaming `weight` three lines
+    // later would contradict it in the same table.
+    expect(reasons[7]).toEqual(['weight_grams']);
+  });
+
+  it('reports every problem against a field name the format actually has', () => {
+    const fields = new Set(rows(report).flatMap((row) => (row.ok ? [] : Object.keys(row.errors))));
+    // `item` is this module's own key for a whole-row problem; everything else must be a
+    // field a reader can find in their file.
+    const known = new Set([
+      'item',
+      'name',
+      'brand',
+      'category',
+      'description',
+      'quantity',
+      'weight_grams',
+      'price',
+      'currency',
+      'acquired_on',
+      'status',
+      'url',
+      'notes',
+    ]);
+    for (const field of fields) expect(known).toContain(field);
   });
 
   it('points the ticket-text mistake at the field to use instead', () => {
-    const row = report.rows[2];
+    const row = rows(report)[2];
     expect(row?.ok).toBe(false);
     if (row && !row.ok) expect(row.errors.weight_grams).toContain('weight_grams');
   });
