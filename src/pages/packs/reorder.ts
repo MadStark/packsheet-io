@@ -189,7 +189,17 @@ export const POST: APIRoute = async ({ locals, cookies, request, url, redirect }
 
   const { error, locked } =
     intent.target === REORDER_TARGET.item
-      ? await movePackItem(client, intent.packId, intent.itemId, intent.toCategoryId, plan.runs)
+      ? await movePackItem(
+          client,
+          // Named rather than positional, because all three are `string` and a transposition
+          // used to compile — see `PackItemMoveIds` in src/lib/packs/mutations.ts.
+          {
+            packId: intent.packId,
+            itemId: intent.itemId,
+            toCategoryId: intent.toCategoryId,
+          },
+          plan.runs,
+        )
       : await movePackCategory(client, intent.packId, plan.runs);
 
   // Checked before `error`, not instead of it: `locked` is only ever true when `error` is

@@ -315,9 +315,7 @@ describe('loadPackForEdit: an order written by a reorder comes back', () => {
     const itemPlan = planItemMove(itemRun, itemRun, lowestItem, itemOrder.length - 1);
     const itemMove = await movePackItem(
       owner.client,
-      packId,
-      lowestItem,
-      reorderedCategoryId,
+      { packId, itemId: lowestItem, toCategoryId: reorderedCategoryId },
       itemPlan.runs,
     );
     if (itemMove.error) {
@@ -483,14 +481,38 @@ describe('loadPackList', () => {
  * could only catch the second, which is why a select that had never fetched `consumable`
  * or `price` compiled happily for as long as it did.
  *
+ * "No optional properties left" only became literally true at PK-37's independent review.
+ * `snapshot` and `gear_items` stayed optional through that first correction, and a reviewer
+ * demonstrated the gap by deleting both from `PACK_TREE_SELECT` and watching `tsc --noEmit`
+ * pass — a select that fetches no snapshots resolves every item of a LOCKED pack from live
+ * gear instead of from the frozen copy, which is a wrong pack rather than a missing one.
+ * Both are required-and-nullable now, and removing either from the select string is a
+ * compile error in this block.
+ *
  * The runtime half is a literal in the exact shape PostgREST returns — a to-one
  * `gear_items` embed as an OBJECT (`tests/core-schema.test.ts` pins that against the wire
  * format), embedded arrays for the to-many ones, and every column the select names,
  * including the four whose absence used to be the interesting case.
  */
 describe('the shape PACK_TREE_SELECT returns', () => {
-  // If this ever resolves to `never` or to a PostgREST parser error, the assignment below
-  // would pass vacuously; naming the property keeps that honest.
+  // THE VACUITY GUARD, AND IT IS NOT WHAT USED TO BE HERE. `never` is assignable to
+  // everything, so if `PackTreeRow` ever resolved to `never` — a PostgREST select string
+  // the type-level parser cannot read resolves its row type that way — the assignment
+  // below would compile whatever `computeTotals` demanded, and this whole block would be
+  // asserting nothing at all. What stood here was `type _CategoriesAreEmbedded =
+  // PackTreeRow['pack_categories']`, with a comment claiming that naming the property
+  // "keeps that honest". It does not: an indexed access on `never` is `never`, so that
+  // alias compiles happily for exactly the case it was written to catch.
+  //
+  // This is the test that actually fires. `[T] extends [never]` is the tuple-wrapped form,
+  // which is what stops the conditional distributing over a union and answering the wrong
+  // question; on the `never` branch the required type has no `true` in it, so the
+  // initialiser below fails to compile and names the reason.
+  type _Inhabited<T> = [T] extends [never] ? 'PackTreeRow resolved to never' : true;
+  const _packTreeRowIsInhabited: _Inhabited<PackTreeRow> = true;
+
+  // Still worth naming: this fails if the row type has no `pack_categories` at all, which
+  // is a differently-shaped mistake from the row type collapsing to `never`.
   type _CategoriesAreEmbedded = PackTreeRow['pack_categories'];
 
   // The assertion itself: a function accepting the query's row type, satisfied by

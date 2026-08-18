@@ -307,11 +307,53 @@ export const PACK_ITEM_CARRIAGE_MEANINGS: Record<PackItemCarriage, string> = {
   consumable: 'Used up during the trip, like food or fuel.',
 };
 
-/** The two `pack_items` columns this vocabulary is a spelling of. */
+/**
+ * The two `pack_items` columns this vocabulary is a spelling of, READ WIDE: two independent
+ * booleans, all four combinations representable, including the one the database refuses.
+ *
+ * THAT WIDTH IS DELIBERATE AND MUST NOT BE NARROWED TO `PackItemCarriageColumns` BELOW.
+ * `packItemCarriage` takes this type and THROWS on both-true, and the throw is only
+ * reachable because the parameter can express it. The function is written to be handed
+ * objects that never came from `pack_items` — a fixture, a hand-built preview row, a decoded
+ * request body — exactly as `classifyPackItem` in `src/lib/totals.ts` is; see its own
+ * comment. Typing the parameter as the three-arm union would move that refusal from a
+ * runtime error naming the problem to a compile error at the one call site that CAN prove
+ * the state is impossible, and would leave every call site that cannot with a cast.
+ *
+ * So: a READ site (this type) admits the illegal row and refuses it out loud. A WRITE site
+ * (`PackItemCarriageColumns`) cannot spell it at all.
+ */
 export interface PackItemCarriageFlags {
   readonly worn: boolean;
   readonly consumable: boolean;
 }
+
+/**
+ * The same two columns, WRITE-SHAPED: the three legal combinations and no others.
+ *
+ * THE EXCLUSIVITY IS REPRESENTABLE, SO IT IS REPRESENTED — a finding from PK-37's
+ * independent review, and the argument is the one this file already makes about a radio
+ * group. `worn` and `consumable` are not two independent facts, they are one three-way
+ * answer, and `pack_items_worn_consumable_exclusive`
+ * (`supabase/migrations/20260812000000_worn_consumable_exclusive.sql:36`) plus
+ * `packItemCarriage` plus `classifyPackItem` each refuse the fourth combination at run time.
+ * Three runtime validations of a rule the type system can state is two too many: with this
+ * union, `{ worn: true, consumable: true }` is not a value that can be constructed and
+ * handed to a write, so the three runtime refusals go back to being what they are for —
+ * defence against a row written by psql, by a restore, or by an import path that never met
+ * this module.
+ *
+ * EACH ARM STILL SPREADS INTO `.update()` UNCHANGED, which is the constraint that shaped it.
+ * The columns are `worn boolean not null default false` and `consumable boolean not null
+ * default false`, and `updatePackItem`/`setPackItemCarriage` in `src/lib/packs/mutations.ts`
+ * pass their value to PostgREST verbatim. A union of three complete objects is assignable to
+ * the generated Update type member by member, so nothing translates and nothing is rebuilt —
+ * which was the whole argument for `PackItemInput` matching the columns in the first place.
+ */
+export type PackItemCarriageColumns =
+  | { readonly worn: false; readonly consumable: false }
+  | { readonly worn: true; readonly consumable: false }
+  | { readonly worn: false; readonly consumable: true };
 
 /**
  * The WRITE direction: the two columns a carriage choice means.
@@ -324,16 +366,23 @@ export interface PackItemCarriageFlags {
  * is no intermediate state to pass through, because there is only ever one write.
  *
  * The function is total and its result can never have both flags set: three inputs, three
- * outputs, and `'carried'` is the only one that sets neither. That is not a property this
- * comment asserts on the code's behalf — `tests/packs-form.test.ts` enumerates
- * `PACK_ITEM_CARRIAGES` and asserts it for every member, so adding a fourth value without
- * deciding its flags fails the suite as well as the compiler.
+ * outputs, and `'carried'` is the only one that sets neither. Since PK-37's review that is
+ * checked by the compiler as well — the return type is the three-arm union, so a body that
+ * could produce both-true does not compile — and it is still asserted at run time:
+ * `tests/packs-form.test.ts` enumerates `PACK_ITEM_CARRIAGES` and pins the pair for every
+ * member, so adding a fourth value without deciding its flags fails the suite too.
+ *
+ * THE BODY IS A CONDITIONAL RATHER THAN THE TWO COMPARISONS IT REPLACES, and that is forced
+ * by the return type rather than a preference. `{ worn: c === 'worn', consumable: c ===
+ * 'consumable' }` infers `{ worn: boolean; consumable: boolean }`, which is not assignable
+ * to a union of literal-typed arms: TypeScript relates the two comparisons independently and
+ * has no way to know they cannot both be true. Returning one arm per branch states the same
+ * fact in a form the compiler can check.
  */
-export function carriageFlags(carriage: PackItemCarriage): PackItemCarriageFlags {
-  return {
-    worn: carriage === 'worn',
-    consumable: carriage === 'consumable',
-  };
+export function carriageFlags(carriage: PackItemCarriage): PackItemCarriageColumns {
+  if (carriage === 'worn') return { worn: true, consumable: false };
+  if (carriage === 'consumable') return { worn: false, consumable: true };
+  return { worn: false, consumable: false };
 }
 
 /**

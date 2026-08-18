@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createSSRApp } from 'vue';
-import { applyReorderPlan, dropTargetIndex } from '../src/lib/packs/drag';
+import { applyReorderPlan, dropTargetIndex, unknownPlanRows } from '../src/lib/packs/drag';
 import { planCategoryMove, planItemMove, type ReorderPlan } from '../src/lib/packs/reorder';
 // The names the island's forms are written with, asserted through the same constants the
 // page's POST handler reads them back through: the point of these assertions is that the
@@ -20,25 +20,32 @@ import {
 /**
  * `src/lib/packs/drag.ts` is the decision-making half of PK-37's drag island, and this file
  * is where it is held in place. Read that module's header first; a good half of what follows
- * exists to pin its two arguments rather than to restate what the code plainly does.
+ * exists to pin its arguments rather than to restate what the code plainly does.
  *
  * WHAT CAN AND CANNOT BE REACHED HERE, precisely, because the distinction is what put those
- * two functions in a module instead of in the SFC. `src/components/PackContents.vue` can be
+ * three functions in a module instead of in the SFC. `src/components/PackContents.vue` can be
  * SERVER-RENDERED in this suite — Vue's own `renderToString` needs no DOM, and
  * `vitest.config.ts` keeps Astro's `.vue` transform — and the last describe block does
  * exactly that, because the island's degradation claim is a claim about its server-rendered
  * markup. What cannot be reached is any INTERACTION: `environment: 'node'` means there is no
  * `DragEvent`, no `dataTransfer`, no `getBoundingClientRect`, and neither `@vue/test-utils`
  * nor `jsdom` is a dependency to supply them. So a decision written inside a drag handler is
- * a decision nothing can execute, and `dropTargetIndex`/`applyReorderPlan` are the decisions
- * that were taken out of those handlers.
+ * a decision nothing can execute, and `dropTargetIndex`/`applyReorderPlan`/`unknownPlanRows`
+ * are the decisions that were taken out of those handlers.
+ *
+ * THAT ARGUMENT IS NARROWER THAN IT LOOKS, and PK-37's independent review was right to say
+ * so. It covers what a POINTER handler decides and nothing else — reading a response body
+ * and deciding what a status code means touch neither a pointer nor a DOM, and those left
+ * the SFC too. They live in `src/lib/packs/reorder-response.ts`, tested branch by branch in
+ * `tests/packs-reorder-response.test.ts`.
  *
  * The position arithmetic is NOT retested here. `tests/packs-reorder.test.ts` owns it, and
  * duplicating a few of its cases under a different heading is how two suites end up
- * disagreeing about which one is authoritative. What this file pins is the two things that
+ * disagreeing about which one is authoritative. What this file pins is the three things that
  * are true only of the island: that the slot a pointer chose becomes the index the engine
- * means, and that a plan projected onto the rendered tree produces the tree the next reload
- * will produce.
+ * means, that a plan projected onto the rendered tree produces the tree the next reload will
+ * produce, and that a plan naming rows this tree does not have is detected rather than
+ * half-applied.
  *
  * ---------------------------------------------------------------------------
  * THE ACCEPTANCE MEASUREMENT LIVES AT THE BOTTOM OF THIS FILE
@@ -89,6 +96,10 @@ function item(id: string, position: number, overrides: Partial<TreeItem> = {}): 
     consumable: false,
     packed: false,
     overrides: {},
+    // Required and nullable since PK-37's review — see `PackTreeItem` in src/lib/totals.ts.
+    // An island row is a `PACK_TREE_SELECT` row, and that select fetches `snapshot`, so a
+    // fixture that omitted it would be modelling a tree this island can never be handed.
+    snapshot: null,
     gear_items: gear(),
     ...overrides,
   };
@@ -361,6 +372,139 @@ describe('applyReorderPlan: a plan projected onto the tree on screen', () => {
       'a',
       'b',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unknownPlanRows
+// ---------------------------------------------------------------------------
+
+/**
+ * The guard on `applyReorderPlan`'s one asymmetry, added at PK-37's independent review.
+ *
+ * A plan that OMITS a row is a plan saying that row's position already agrees with the
+ * database — `denseUpdates` pushes nothing for a row whose index is unchanged — and
+ * `applyReorderPlan` keeping it is exactly right. A plan that NAMES a row this tree lacks is
+ * the reverse case, and it used to be absorbed just as silently: the id went into the
+ * positions map, matched nothing, and the island reported "Saved" over a tree it had
+ * applied half a plan to. `src/lib/packs/reorder-response.ts` turns a non-empty answer here
+ * into its `stale` outcome; what THIS block pins is which ids count.
+ */
+describe('unknownPlanRows: a plan naming rows this tree does not have', () => {
+  const tree = [
+    category(
+      'c1',
+      0,
+      items([
+        ['a', 0],
+        ['b', 1],
+      ]),
+    ),
+    category('c2', 1, []),
+  ];
+
+  it('finds nothing in a plan every id of which is in the tree', () => {
+    expect(
+      unknownPlanRows(tree, {
+        runs: [{ parentId: 'c1', updates: [{ id: 'b', position: 0 }] }],
+        reparent: null,
+      }),
+    ).toEqual([]);
+  });
+
+  it('finds nothing in an empty plan', () => {
+    expect(unknownPlanRows(tree, { runs: [], reparent: null })).toEqual([]);
+  });
+
+  it('names an item the tree has never seen', () => {
+    expect(
+      unknownPlanRows(tree, {
+        runs: [
+          {
+            parentId: 'c1',
+            updates: [
+              { id: 'a', position: 0 },
+              { id: 'ghost', position: 1 },
+            ],
+          },
+        ],
+        reparent: null,
+      }),
+    ).toEqual(['ghost']);
+  });
+
+  /** A category plan's updates name CATEGORIES, and `applyReorderPlan` flattens both levels
+   *  into one id-keyed map — so both levels are known ids here, and neither is unknown. */
+  it('accepts category ids in updates, because the plan for a category move names those', () => {
+    expect(
+      unknownPlanRows(tree, {
+        runs: [
+          {
+            parentId: 'pack-1',
+            updates: [
+              { id: 'c2', position: 0 },
+              { id: 'c1', position: 1 },
+            ],
+          },
+        ],
+        reparent: null,
+      }),
+    ).toEqual([]);
+  });
+
+  /**
+   * `runs[].parentId` IS NOT AN ID IN THE TREE for a category move — it is the PACK's id —
+   * and checking it would fail every category drag. Asserted rather than left to the
+   * function's comment, because "it looks like an id, check it" is the obvious wrong fix.
+   */
+  it('never treats a run parentId as an unknown row', () => {
+    expect(
+      unknownPlanRows(tree, {
+        runs: [{ parentId: 'a-pack-id-that-is-not-in-this-tree', updates: [] }],
+        reparent: null,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names a reparented item the tree does not hold', () => {
+    expect(unknownPlanRows(tree, { runs: [], reparent: { id: 'ghost', parentId: 'c2' } })).toEqual([
+      'ghost',
+    ]);
+  });
+
+  /**
+   * The destructive one. `applyReorderPlan` filters the moved row out of every category and
+   * adds it back only to the category whose id matches `reparent.parentId`, so a parent that
+   * matches nothing does not merely fail to move the row — it deletes it from the rendered
+   * tree.
+   */
+  it('names a reparent destination that is not a category in this tree', () => {
+    expect(unknownPlanRows(tree, { runs: [], reparent: { id: 'a', parentId: 'c9' } })).toEqual([
+      'c9',
+    ]);
+    // And the row really would vanish, which is what makes the check worth having.
+    const applied = applyReorderPlan(tree, { runs: [], reparent: { id: 'a', parentId: 'c9' } });
+    expect(applied.flatMap((entry) => idsOf(entry.pack_items))).toEqual(['b']);
+  });
+
+  /** An ITEM id is not a legal reparent DESTINATION, even though it is an id the tree holds:
+   *  `applyReorderPlan` compares it against `category.id` only. */
+  it('names a reparent destination that names an item rather than a category', () => {
+    expect(unknownPlanRows(tree, { runs: [], reparent: { id: 'a', parentId: 'b' } })).toEqual([
+      'b',
+    ]);
+  });
+
+  it('reports each unknown id once, sorted', () => {
+    expect(
+      unknownPlanRows(tree, {
+        runs: [
+          { parentId: 'c1', updates: [{ id: 'zeta', position: 0 }] },
+          { parentId: 'c2', updates: [{ id: 'zeta', position: 0 }] },
+        ],
+        reparent: { id: 'alpha', parentId: 'c2' },
+      }),
+    ).toEqual(['alpha', 'zeta']);
   });
 });
 

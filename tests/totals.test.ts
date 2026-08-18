@@ -96,6 +96,11 @@ function gear(overrides: Partial<PackTreeGearItem> = {}): PackTreeGearItem {
  * false, because `worn`, `consumable` and `packed` are all `boolean not null default
  * false` columns and that select fetches all three. There is no "absent flag" case
  * to default here any more — the type has no room for one.
+ *
+ * `snapshot: null` IS SPELLED OUT FOR THE SAME REASON, since PK-37's independent review
+ * made it required-and-nullable: an unfrozen item says "no frozen copy" rather than
+ * leaving the key out, so no fixture in this file can stand in for a query that forgot to
+ * fetch the column. See `PackTreeItem`'s own comment in src/lib/totals.ts.
  */
 function packItem(overrides: Partial<PackTreeItem> = {}): PackTreeItem {
   return {
@@ -105,6 +110,7 @@ function packItem(overrides: Partial<PackTreeItem> = {}): PackTreeItem {
     consumable: false,
     packed: false,
     overrides: {},
+    snapshot: null,
     gear_items: gear(),
     ...overrides,
   };

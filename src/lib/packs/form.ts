@@ -143,6 +143,7 @@ import {
   isPackItemCarriage,
   packItemCarriage,
   type PackItemCarriage,
+  type PackItemCarriageColumns,
   type PackItemCarriageFlags,
 } from './fields';
 
@@ -236,20 +237,24 @@ export interface PackCategoryInput {
 /**
  * A validated pack item's per-list settings.
  *
- * `worn` and `consumable` appear here as the two SEPARATE booleans the columns are, even
- * though nothing upstream of this type can set them independently — they arrive together
- * out of one `carriageFlags` call. That is deliberate: this is the shape a write takes, and
- * making it match `pack_items`' columns means `mutations.ts` can pass it to `.update()`
- * unchanged with no field-by-field translation step in between for a bug to live in. The
- * invariant "at most one of these is true" is established by `carriageFlags`, in one place,
- * rather than restated by a union type here that every writer would then have to unpack.
+ * `worn` and `consumable` STILL APPEAR AS THE TWO SEPARATE COLUMNS THEY ARE, so `mutations.ts`
+ * can pass this to `.update()` unchanged with no field-by-field translation step in between
+ * for a bug to live in — but as `PackItemCarriageColumns`, the three-arm union, rather than
+ * as two independent booleans. PK-37's independent review was right that the version this
+ * replaces gave the invariant away: the type could spell `{ worn: true, consumable: true }`,
+ * and the only things standing between that value and a write were three runtime checks
+ * (`carriageFlags` producing the pair, `packItemCarriage`, `classifyPackItem`). The rule is
+ * representable, so it is represented; the three checks remain, now as backstops against
+ * rows this module never wrote. See `PackItemCarriageColumns` in `./fields` for the argument
+ * in full, including why each arm still spreads into `.update()` unchanged.
+ *
+ * A TYPE ALIAS INTERSECTION RATHER THAN AN INTERFACE, mechanically: an interface cannot
+ * extend a union.
  */
-export interface PackItemInput {
+export type PackItemInput = {
   quantity: number;
-  worn: boolean;
-  consumable: boolean;
   packed: boolean;
-}
+} & PackItemCarriageColumns;
 
 /**
  * A validated one-off custom item: its per-list settings, plus the display fields that
@@ -261,8 +266,13 @@ export interface PackItemInput {
  * column `weight_grams`. Naming it `weight_grams` here says what the NUMBER is (grams,
  * already converted) rather than where it is about to be written, which is the fact a
  * caller can get wrong. `buildCustomItemSnapshot` performs the one rename, in one place.
+ *
+ * AN INTERSECTION RATHER THAN `extends PackItemInput`, and the reason is mechanical rather
+ * than a change of intent: `PackItemInput` is a union now (see its own comment), and an
+ * interface cannot extend one. The resulting type is the same set of values it would have
+ * been — the three carriage arms, each carrying the display fields below.
  */
-export interface CustomPackItemInput extends PackItemInput {
+export type CustomPackItemInput = PackItemInput & {
   name: string;
   brand: string | null;
   category: string | null;
@@ -270,7 +280,7 @@ export interface CustomPackItemInput extends PackItemInput {
   weight_grams: number;
   price: number | null;
   currency: CurrencyCode | null;
-}
+};
 
 /** The pack form's raw strings — what a re-render needs whether or not the submission
  *  validated, one per `PACK_FORM_FIELD` entry, so a failed parse and a stored row produce

@@ -1,5 +1,5 @@
 /**
- * The pure half of PK-37's drag surface: the two decisions `src/components/PackContents.vue`
+ * The pure half of PK-37's drag surface: the three decisions `src/components/PackContents.vue`
  * would otherwise have to make inside a `.vue` file, where nothing in this repository can
  * execute them.
  *
@@ -16,10 +16,12 @@
  * no DOM. What cannot be reached is any INTERACTION: `environment: 'node'` means no
  * `DragEvent`, no `dataTransfer` and no `getBoundingClientRect`, and neither
  * `@vue/test-utils` nor `jsdom` is a dependency to supply them. So a decision taken inside
- * a drag handler is a decision nothing can execute. Both functions below were taken out of
- * such a handler, and a wrong answer to either is SILENT: an off-by-one in
- * `dropTargetIndex` is invisible in the middle of a list and shows up only at its ends, and
- * a plan applied wrongly in `applyReorderPlan` renders an order the next reload contradicts.
+ * a drag handler is a decision nothing can execute. All three functions below were taken out
+ * of such a handler, and a wrong answer to any of them is SILENT: an off-by-one in
+ * `dropTargetIndex` is invisible in the middle of a list and shows up only at its ends, a
+ * plan applied wrongly in `applyReorderPlan` renders an order the next reload contradicts,
+ * and a plan `unknownPlanRows` fails to flag is a plan applied to half a tree under the word
+ * "Saved".
  *
  * ---------------------------------------------------------------------------
  * WHAT IS DELIBERATELY NOT HERE
@@ -30,11 +32,15 @@
  * prevent. Nothing below computes a position: `dropTargetIndex` converts one index into
  * another index, and `applyReorderPlan` copies positions a `ReorderPlan` already decided.
  *
- * ANY NOTION OF WHAT A ROW CONTAINS. Both functions are generic over rows that carry an
- * `id` and a `position` — the same `Positioned` contract `reorder.ts` defines — so the
- * island hands in the tree it actually renders, names and weights and `overrides` and gear
- * embeds and all, and gets those same rows back rearranged. That is what lets the island
- * pass the result straight to `computeTotals` instead of rebuilding a tree for it.
+ * ANY NOTION OF WHAT A ROW CONTAINS. The two tree functions are generic over rows that
+ * carry an `id` and a `position` — the same `Positioned` contract `reorder.ts` defines — so
+ * the island hands in the tree it actually renders, names and weights and `overrides` and
+ * gear embeds and all, and gets those same rows back rearranged. That is what lets the
+ * island pass the result straight to `computeTotals` instead of rebuilding a tree for it.
+ *
+ * THE ROUND TRIP. Reading the response body and deciding what each outcome MEANS is
+ * `src/lib/packs/reorder-response.ts`'s, which calls `unknownPlanRows` below for one of its
+ * seven branches. This module knows nothing about `fetch`, a `Response` or a status code.
  *
  * ---------------------------------------------------------------------------
  * NOT importing src/lib/auth/
@@ -181,4 +187,75 @@ export function applyReorderPlan<C extends PositionedCategory>(
   });
 
   return sortByPosition(next);
+}
+
+// ---------------------------------------------------------------------------
+// unknownPlanRows
+// ---------------------------------------------------------------------------
+
+/**
+ * The ids a plan names that this tree does not have — empty for a plan the tree can apply
+ * in full.
+ *
+ * WHY THIS EXISTS: `applyReorderPlan` ABOVE IS DELIBERATELY FORGIVING IN ONE DIRECTION AND
+ * ACCIDENTALLY FORGIVING IN THE OTHER. `repositioned` keeps a row the plan does not
+ * mention, which is right and is the whole of `denseUpdates`' contract — a row whose
+ * position did not change is genuinely untouched rather than merely omitted. The reverse is
+ * not symmetrical and was silently absorbed until PK-37's independent review: an update
+ * naming an id that is nowhere in `categories` is written into the `positions` map, matched
+ * by nothing, and dropped without a trace.
+ *
+ * That case is not noise. The plan the endpoint returns is a RESULT computed from the rows
+ * the SERVER read under the caller's own session moments earlier (see "BOTH SIDES CALL
+ * THIS, ONLY ONE SIDE IS BELIEVED" in `src/lib/packs/reorder.ts`), so an id in it that this
+ * tree lacks is proof the two disagree about what is in the pack — two tabs open on one
+ * pack is the ordinary way to produce it, not an exotic one. The move itself landed
+ * correctly in the database; what cannot be trusted afterwards is the tree on screen, and
+ * the honest answer is to say so rather than to render a partially applied plan under the
+ * word "Saved".
+ *
+ * WHAT IS CHECKED IS EXACTLY WHAT `applyReorderPlan` LOOKS UP, no more:
+ *
+ *   - every `updates[].id`, against category ids AND item ids together, because
+ *     `applyReorderPlan` flattens both levels into one map keyed on id alone and a category
+ *     plan and an item plan are indistinguishable once flattened;
+ *   - `reparent.id`, which must be an ITEM — it is searched for across every category's
+ *     `pack_items`, and an id found nowhere means the row simply never arrives anywhere;
+ *   - `reparent.parentId`, which must be a CATEGORY — `applyReorderPlan` matches it against
+ *     `category.id` to decide where the moved row lands, so an id matching no category
+ *     removes the item from its old parent and adds it to no new one. That is the one case
+ *     in this list that LOSES a row from the rendered tree rather than merely failing to
+ *     move it.
+ *
+ * `runs[].parentId` IS NOT CHECKED, and its absence from the list above is a decision
+ * rather than an oversight. `applyReorderPlan` never looks it up — it flattens the runs and
+ * keys on row id — and for a category move it is the PACK's id, which is not a row in this
+ * tree at all and never could be. Checking it would fail every category drag.
+ *
+ * The result is sorted and de-duplicated so a caller logging it gets a stable string; no
+ * caller branches on WHICH ids came back, only on whether any did.
+ */
+export function unknownPlanRows<C extends PositionedCategory>(
+  categories: readonly C[],
+  plan: ReorderPlan,
+): string[] {
+  const categoryIds = new Set(categories.map((category) => category.id));
+  const itemIds = new Set(
+    categories.flatMap((category) => category.pack_items.map((item) => item.id)),
+  );
+
+  const unknown = new Set<string>();
+  for (const run of plan.runs) {
+    for (const update of run.updates) {
+      if (!categoryIds.has(update.id) && !itemIds.has(update.id)) unknown.add(update.id);
+    }
+  }
+
+  const reparent = plan.reparent;
+  if (reparent !== null) {
+    if (!itemIds.has(reparent.id)) unknown.add(reparent.id);
+    if (!categoryIds.has(reparent.parentId)) unknown.add(reparent.parentId);
+  }
+
+  return [...unknown].sort();
 }

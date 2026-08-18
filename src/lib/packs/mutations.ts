@@ -132,6 +132,9 @@
 
 import type { PostgrestError } from '@supabase/supabase-js';
 import type { Json } from '../database.types';
+// The snapshot's `currency` is the same narrowed code `parseCustomPackItemForm` produces —
+// see `CustomItemSnapshot` below on why the shape is declared rather than left as `Json`.
+import type { CurrencyCode } from '../money';
 import type { PacksheetClient } from '../supabase';
 import { carriageFlags, type PackItemCarriage } from './fields';
 import type { CustomPackItemInput, PackCategoryInput, PackInput, PackItemInput } from './form';
@@ -680,10 +683,65 @@ export async function addGearItemsToCategory(
  * `tests/packs-mutations.test.ts` can assert the exact object this produces without racing
  * a clock.
  */
+/**
+ * The shape of `pack_items.snapshot`, written down once.
+ *
+ * WHAT THIS BUYS, EXACTLY, AND WHAT IT DOES NOT — stated precisely because overstating it
+ * would be worse than the bare `Json` this replaces. The contract has three parties:
+ * `buildCustomItemSnapshot` below, `private.gear_item_snapshot()` in
+ * `supabase/migrations/20260817120000_gear_weight_in_grams.sql:104-115`, and
+ * `resolvePackItem` in `src/lib/totals.ts`, which merges whichever of the two wrote the row
+ * with the item's `overrides` and reads `name`, `weight`, `price` and `currency` back out.
+ * TypeScript can see two of those three. So:
+ *
+ *   IT PINS THE TYPESCRIPT HALF. A dropped key, a renamed key, or a re-added `weight_unit`
+ *   in `buildCustomItemSnapshot` is now a compile error instead of a `Json` that typechecks
+ *   whatever it holds. That is the failure this closes, and it is a real one: `weight` vs
+ *   `weight_grams` is a rename the rest of the codebase has already made once (PK-67), and
+ *   a custom item written under the wrong key resolves to no weight at all and throws
+ *   inside `computeTotals` on the next read of the pack.
+ *
+ *   IT CHECKS NO SQL WHATSOEVER. Nothing here reads the migration, and no test compares
+ *   this declaration to `jsonb_build_object`'s key list. What it gives review is a NAMED
+ *   ARTEFACT to diff that function against by eye — ten keys in one place, in the
+ *   migration's own order — rather than a shape that has to be reconstructed from an object
+ *   literal's properties. A comment claiming the compiler enforces agreement with Postgres
+ *   would be false, and false in the direction that stops people checking.
+ *
+ * The runtime agreement is asserted where it can be: `tests/packs-mutations.test.ts` writes
+ * a custom item through this function and reads the row back, and `tests/core-schema.test.ts`
+ * exercises both freeze paths against the real database.
+ *
+ * A TYPE ALIAS RATHER THAN AN INTERFACE, which is load-bearing rather than stylistic. `Json`
+ * includes `{ [key: string]: Json | undefined }`, and TypeScript grants an implicit index
+ * signature to a type alias's object type but not to an interface — so an `interface` here
+ * would not be assignable to `Json` and `createCustomPackItem`'s insert would not compile.
+ *
+ * `photo_path` AND `gear_item_id` ARE `string | null` BECAUSE THIS DESCRIBES THE COLUMN,
+ * not just this function's output. The freeze paths put a real storage path and a real gear
+ * uuid in both; `buildCustomItemSnapshot` writes null to both, and the second of those nulls
+ * is a discriminator rather than an absence — see its own comment.
+ */
+export type CustomItemSnapshot = {
+  readonly name: string;
+  readonly brand: string | null;
+  readonly category: string | null;
+  readonly description: string | null;
+  /** Grams. The KEY is `weight` while the gear column is `weight_grams`; see
+   *  `CustomPackItemInput` in `./form` and `resolvePackItem` in `src/lib/totals.ts` for why
+   *  the snapshot's vocabulary is the one an override is written against. */
+  readonly weight: number;
+  readonly price: number | null;
+  readonly currency: CurrencyCode | null;
+  readonly photo_path: string | null;
+  readonly gear_item_id: string | null;
+  readonly captured_at: string;
+};
+
 export function buildCustomItemSnapshot(
   values: CustomPackItemInput,
   capturedAt: Date = new Date(),
-): Json {
+): CustomItemSnapshot {
   return {
     name: values.name,
     brand: values.brand,
@@ -934,6 +992,32 @@ export async function deletePackItem(
  */
 
 /**
+ * The three ids one item move names, as an object rather than as three adjacent parameters.
+ *
+ * THE POSITIONAL VERSION COMPILED WHEN TRANSPOSED, which is the whole reason this type
+ * exists and is a finding from PK-37's independent review. `movePackItem(client, packId,
+ * itemId, toCategoryId, runs)` put three `string`s in a row, and `database.types.ts` types
+ * every id in this schema as a plain `string` — so swapping any two of them typechecked
+ * perfectly and produced a call the RPC would refuse at runtime with a message naming the
+ * wrong thing (`item % is not in pack %`). At a keyword-argument call site the same
+ * transposition is a compile error, because the names are on the arguments rather than in
+ * the reader's head.
+ *
+ * NO BRANDED ID TYPES, deliberately, and the alternative is named so it is not proposed
+ * again as an improvement. Branding (`type PackId = string & { readonly __brand: 'pack' }`)
+ * would catch the same mistake at every call site in the codebase rather than at this one —
+ * and would require every id crossing the PostgREST boundary to be cast, because
+ * `database.types.ts` is generated and types all of them as `string`. That is a change to
+ * every query module and every fixture in the project, which is far past what this ticket
+ * owns. An object parameter fixes the one signature the review flagged and costs nothing.
+ */
+export interface PackItemMoveIds {
+  readonly packId: string;
+  readonly itemId: string;
+  readonly toCategoryId: string;
+}
+
+/**
  * Applies one item move — the re-parent and the recomputed positions — in one transaction.
  *
  * `toCategoryId` IS REQUIRED, AND A SAME-CATEGORY MOVE PASSES THE CATEGORY THE ITEM IS
@@ -960,15 +1044,13 @@ export async function deletePackItem(
  */
 export async function movePackItem(
   client: PacksheetClient,
-  packId: string,
-  itemId: string,
-  toCategoryId: string,
+  ids: PackItemMoveIds,
   runs: readonly RunUpdate[],
 ): Promise<PackMoveResult> {
   const { error } = await client.rpc('move_pack_item', {
-    p_pack_id: packId,
-    p_item_id: itemId,
-    p_to_category_id: toCategoryId,
+    p_pack_id: ids.packId,
+    p_item_id: ids.itemId,
+    p_to_category_id: ids.toCategoryId,
     // The plan's own array, cast rather than rebuilt. `Json` is the generated argument type
     // and `RunUpdate[]` is structurally a JSON value already — an object of a string and an
     // array of `{ id, position }` — so this asserts a fact TypeScript cannot check across

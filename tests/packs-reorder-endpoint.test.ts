@@ -218,16 +218,20 @@ describe('the body', () => {
     await POST(contextFor(itemBody({ runs: hostilePlan, positions: hostilePlan, position: 0 })));
 
     expect(movePackItem).toHaveBeenCalledTimes(1);
-    expect(movePackItem).toHaveBeenCalledWith(CLIENT, PACK_ID, ITEM_1, CATEGORY_A, [
-      {
-        parentId: CATEGORY_A,
-        updates: [
-          { id: ITEM_2, position: 0 },
-          { id: ITEM_3, position: 1 },
-          { id: ITEM_1, position: 2 },
-        ],
-      },
-    ]);
+    expect(movePackItem).toHaveBeenCalledWith(
+      CLIENT,
+      { packId: PACK_ID, itemId: ITEM_1, toCategoryId: CATEGORY_A },
+      [
+        {
+          parentId: CATEGORY_A,
+          updates: [
+            { id: ITEM_2, position: 0 },
+            { id: ITEM_3, position: 1 },
+            { id: ITEM_1, position: 2 },
+          ],
+        },
+      ],
+    );
   });
 });
 
@@ -240,9 +244,7 @@ describe('applying a move', () => {
 
     expect(movePackItem).toHaveBeenCalledWith(
       CLIENT,
-      PACK_ID,
-      ITEM_1,
-      CATEGORY_A,
+      { packId: PACK_ID, itemId: ITEM_1, toCategoryId: CATEGORY_A },
       expect.anything(),
     );
   });
@@ -254,16 +256,20 @@ describe('applying a move', () => {
       ),
     );
 
-    expect(movePackItem).toHaveBeenCalledWith(CLIENT, PACK_ID, ITEM_1, CATEGORY_B, [
-      {
-        parentId: CATEGORY_A,
-        updates: [
-          { id: ITEM_2, position: 0 },
-          { id: ITEM_3, position: 1 },
-        ],
-      },
-      { parentId: CATEGORY_B, updates: [{ id: ITEM_4, position: 1 }] },
-    ]);
+    expect(movePackItem).toHaveBeenCalledWith(
+      CLIENT,
+      { packId: PACK_ID, itemId: ITEM_1, toCategoryId: CATEGORY_B },
+      [
+        {
+          parentId: CATEGORY_A,
+          updates: [
+            { id: ITEM_2, position: 0 },
+            { id: ITEM_3, position: 1 },
+          ],
+        },
+        { parentId: CATEGORY_B, updates: [{ id: ITEM_4, position: 1 }] },
+      ],
+    );
 
     // The applied plan comes back, because that is what the island re-renders from when its
     // own prediction and the server's answer disagree.

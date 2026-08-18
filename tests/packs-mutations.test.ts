@@ -1079,7 +1079,11 @@ describe('the RPC wrappers', () => {
     // The plan comes from the real planner. A hand-written [{id, position}] here would be a
     // third implementation of the ordering rules, in the test meant to prove there are two.
     const plan = planItemMove(run, run, before[1], 0);
-    const result = await movePackItem(user.client, packId, before[1], categoryIds[0], plan.runs);
+    const result = await movePackItem(
+      user.client,
+      { packId, itemId: before[1], toCategoryId: categoryIds[0] },
+      plan.runs,
+    );
 
     expect(result.error).toBeNull();
     expect(result.locked).toBe(false);
@@ -1093,7 +1097,11 @@ describe('the RPC wrappers', () => {
     const moving = (await orderedItemIds(categoryIds[0]))[0];
 
     const plan = planItemMove(from, to, moving, 0);
-    const result = await movePackItem(user.client, packId, moving, categoryIds[1], plan.runs);
+    const result = await movePackItem(
+      user.client,
+      { packId, itemId: moving, toCategoryId: categoryIds[1] },
+      plan.runs,
+    );
 
     expect(result.error).toBeNull();
     expect(await orderedItemIds(categoryIds[0])).not.toContain(moving);
@@ -1123,7 +1131,11 @@ describe('the RPC wrappers', () => {
     const stranger = await createUser('packs-rpc-stranger');
     const [itemId] = await orderedItemIds(categoryIds[0]);
 
-    const result = await movePackItem(stranger.client, packId, itemId, categoryIds[0], []);
+    const result = await movePackItem(
+      stranger.client,
+      { packId, itemId, toCategoryId: categoryIds[0] },
+      [],
+    );
 
     // The `for update` on `packs` inside the function is both the lock and the
     // authorisation check — a pack that is someone else's is simply not found there.
@@ -1160,7 +1172,11 @@ describe('the RPC wrappers', () => {
       throw new Error(`Fixture failed to lock pack: ${locked.error?.message ?? 'not locked'}`);
     }
 
-    const item = await movePackItem(user.client, packId, before[1], categoryIds[0], plan.runs);
+    const item = await movePackItem(
+      user.client,
+      { packId, itemId: before[1], toCategoryId: categoryIds[0] },
+      plan.runs,
+    );
     const category = await movePackCategory(user.client, packId, [
       { parentId: packId, updates: [{ id: categoryIds[1], position: 0 }] },
     ]);

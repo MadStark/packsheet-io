@@ -61,16 +61,34 @@
  * ---------------------------------------------------------------------------
  *
  * The position arithmetic is `src/lib/packs/reorder.ts`'s, the drop-slot conversion and the
- * projection of a plan onto the tree are `src/lib/packs/drag.ts`'s, the wire field names are
- * `src/lib/packs/reorder-request.ts`'s, the form field names, the intents and the delete
- * gate's value are `src/lib/packs/{form,editor}.ts`'s and `src/lib/gear/bulk.ts`'s, the URL
- * is `src/lib/packs/routes.ts`'s, and the figures are `src/lib/totals.ts`'s. That is
+ * projection of a plan onto the tree are `src/lib/packs/drag.ts`'s, the wire field names and
+ * the request shape are `src/lib/packs/reorder-request.ts`'s, the round trip and every
+ * decision about what its answer MEANS are `src/lib/packs/reorder-response.ts`'s, the form
+ * field names, the intents and the delete gate's value are `src/lib/packs/{form,editor}.ts`'s
+ * and `src/lib/gear/bulk.ts`'s, and the figures are `src/lib/totals.ts`'s. That is
  * deliberate to the point of being the design: everything below is event plumbing and
  * markup, because a decision taken inside a drag handler in this repository is a decision
  * nothing can execute. `tests/packs-drag.test.ts` can server-render this component —
  * `renderToString` needs no DOM — but `vitest.config.ts` sets `environment: 'node'` and
  * neither `@vue/test-utils` nor `jsdom` is a dependency, so there is no `DragEvent`, no
  * `dataTransfer` and no `getBoundingClientRect` to drive one with.
+ *
+ * THAT ARGUMENT COVERS THE POINTER HANDLERS AND NOTHING ELSE, which PK-37's independent
+ * review had to point out because this file had quietly stretched it. Reading a response
+ * body, deciding whether a 200 confirmed anything, and choosing the sentence to show all
+ * happened here, none of them touching a pointer or a DOM, and therefore none of them
+ * covered by "there is no `DragEvent`". They live in `reorder-response.ts` now and are
+ * tested branch by branch. What remains below genuinely needs a pointer: `slotFor` reads a
+ * `getBoundingClientRect`, and every handler around it reads a `DragEvent`.
+ *
+ * AND THE TYPES IN THIS BLOCK ARE NOT CHECKED EITHER, which is a second, independent reason
+ * to keep it thin and was verified rather than assumed: `npm run check` runs `astro check`,
+ * `tsc --noEmit`, ESLint and Prettier, and none of the four reads the `<script setup>` of a
+ * `.vue` file — a bare `const n: number = 'no'` here exits 0. So an annotation below is a
+ * statement of intent, correct and waiting for `vue-tsc`, while the same annotation on a
+ * function in `src/lib/packs/` is enforced today. Move code out of here to have either the
+ * compiler or a test look at it; adding `vue-tsc` to that script is worth doing and is not
+ * this ticket's to do.
  *
  * IT SENDS AN INTENT AND NEVER A POSITION. The reorder body carries which row moved, which
  * category it landed in and at which index; the endpoint re-reads the pack under the
@@ -98,17 +116,25 @@
  */
 import { computed, onMounted, shallowRef } from 'vue';
 import { GripVertical } from 'lucide-vue-next';
-import { PACK_REORDER_PATH } from '../lib/packs/routes';
-import { REORDER_FIELD, REORDER_TARGET, planChangesAnything } from '../lib/packs/reorder-request';
+import {
+  REORDER_FIELD,
+  REORDER_TARGET,
+  planChangesAnything,
+  type ReorderIntent,
+} from '../lib/packs/reorder-request';
 import {
   planCategoryMove,
   planItemMove,
   sortByPosition,
-  type PositionUpdate,
   type ReorderPlan,
-  type RunUpdate,
 } from '../lib/packs/reorder';
 import { applyReorderPlan, dropTargetIndex } from '../lib/packs/drag';
+import {
+  reorderNotice,
+  reorderRevertsTree,
+  sendReorder,
+  type ReorderNotice,
+} from '../lib/packs/reorder-response';
 import { PACK_EDITOR_FIELD, PACK_INTENT } from '../lib/packs/editor';
 import {
   PACK_CATEGORY_FORM_FIELD,
@@ -197,23 +223,16 @@ const props = defineProps<{
 
 // ---------------------------------------------------------------------------
 // Copy. Never a raw PostgREST/Postgres string — the endpoint already collapses those into
-// sentences (see its REORDER_FAILED_MESSAGE); these cover the cases it never gets to
-// answer at all.
+// sentences (see its REORDER_FAILED_MESSAGE), and everything a ROUND TRIP can produce is
+// `src/lib/packs/reorder-response.ts`'s, alongside the branch that produces it. The one
+// sentence left here belongs to a failure that never reaches a round trip at all.
 // ---------------------------------------------------------------------------
 
-const SAVE_FAILED_MESSAGE = 'That move could not be saved. Reload the pack and try again.';
-const OFFLINE_MESSAGE =
-  'That move did not reach the server, so the pack is unchanged. Check your connection and try again.';
-const SIGNED_OUT_MESSAGE = 'Your session has expired, so that move was not saved. Sign in again.';
 /** What the shared engine's own refusals become. `planItemMove` throws on an unknown or
  *  duplicated row id — a tree that has drifted from the database — and none of its messages,
  *  which name row ids, is worth showing to anybody. Same collapse, same reason, as
  *  REORDER_UNPLANNABLE_MESSAGE in `src/lib/packs/reorder-request.ts`. */
 const UNPLANNABLE_MESSAGE = 'That move no longer fits this pack. Reload the pack and try again.';
-/** The confirmation for the request itself, and that is ALL it claims. There is no longer a
- *  line telling the visitor to reload to see the real order: the list they are looking at IS
- *  the order, and there is no second copy of it left on the page to disagree with it. */
-const SAVED_MESSAGE = 'Order saved.';
 
 const BUCKET_LABELS: Record<WeightBucket, string> = {
   base: 'Base weight',
@@ -274,9 +293,11 @@ const enabled = shallowRef(false);
  *  this document rather than racing it. */
 const pending = shallowRef(false);
 
-const notice = shallowRef<{ readonly text: string; readonly kind: 'error' | 'status' } | null>(
-  null,
-);
+/** The one status line under the list. `ReorderNotice` is imported rather than re-spelled as
+ *  an inline object type: every value this ever holds comes out of `reorderNotice`, and two
+ *  declarations of one shape is how the `'status'` arm ends up spelled `'success'` on one
+ *  side. `UNPLANNABLE_MESSAGE` above is written into the same shape by `fail`. */
+const notice = shallowRef<ReorderNotice | null>(null);
 
 type Drag =
   | { readonly kind: 'item'; readonly id: string; readonly categoryId: string }
@@ -646,127 +667,39 @@ function fail(text: string): void {
   notice.value = { text, kind: 'error' };
 }
 
-function revert(before: readonly ListCategory[], text: string): void {
-  tree.value = before;
-  fail(text);
-}
-
 /**
- * The round trip. `before` is the tree the plan was computed against, and it is what both
- * outcomes are expressed in terms of: a failure restores it exactly, and a success replays
- * the SERVER's plan on top of it rather than on top of the optimistic render — the positions
- * in that plan describe the rows as the endpoint read them, so applying them to a tree that
- * has already moved would apply the move twice.
+ * The round trip, which this component no longer takes any decision inside.
  *
- * WHAT THIS CANNOT REPAIR, said plainly: if the endpoint's read differed from this tree
- * because the pack changed in another tab, its plan is correct about rows this island does
- * not have. The reorder still lands correctly in the database — the endpoint recomputes
- * everything from its own rows — but the tree on screen stays as stale as it was. The
- * endpoint answers that case with a 409 and a sentence telling the visitor to reload, and
- * that sentence is shown rather than second-guessed.
+ * `sendReorder` PERFORMS IT AND SAYS WHAT IT ESTABLISHED; the three lines below are the
+ * whole of what is left here, because they are the only three that touch a Vue ref. Read
+ * `src/lib/packs/reorder-response.ts`'s branch table for what each outcome means and why
+ * six of the seven are errors — including two that keep the optimistic order on screen.
+ * Every one of those branches is executed by `tests/packs-reorder-response.test.ts`; none
+ * of them was reachable by any test while it lived in this file, and the "no pointer in
+ * `environment: 'node'`" argument that kept the drag handlers here never covered it.
+ *
+ * `before` IS THE TREE THE PLAN WAS COMPUTED AGAINST, and it is what every outcome is
+ * expressed in terms of: a revert restores it exactly, and the server's plan is replayed on
+ * top of it rather than on top of the optimistic render — the positions in that plan
+ * describe the rows as the endpoint read them, so applying them to a tree that has already
+ * moved would apply the move twice.
+ *
+ * `pending` IS CLEARED IN A `finally` AND THAT NOW MEANS SOMETHING. `sendReorder` is total
+ * and carries its own deadline, so this always settles; before it did not, and a stalled
+ * request left every row in the pack undraggable (`draggable` is gated on `!pending`) with
+ * no notice on screen, for as long as the connection stayed open.
  */
-async function send(
-  before: readonly ListCategory[],
-  body: Record<string, string | number>,
-): Promise<void> {
+async function send(before: readonly ListCategory[], body: ReorderIntent): Promise<void> {
   pending.value = true;
   notice.value = null;
   try {
-    const response = await fetch(PACK_REORDER_PATH, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    // A signed-out caller is answered with a 303 to sign-in rather than a bare 401 — the
-    // rule for every route under /packs. `fetch` follows it, so what arrives here is the
-    // sign-in page and `response.ok` describes that page rather than a move.
-    if (response.redirected) {
-      revert(before, SIGNED_OUT_MESSAGE);
-      return;
-    }
-
-    const payload: unknown = await response.json().catch(() => null);
-    if (!response.ok) {
-      revert(before, messageOf(payload) ?? SAVE_FAILED_MESSAGE);
-      return;
-    }
-
-    const applied = planOf(payload);
-    // An unreadable success body keeps the optimistic tree: the write landed, and this
-    // island's own prediction came from the same functions the endpoint planned with, so it
-    // is the best answer available — and a better one than throwing away a move that
-    // actually happened.
-    if (applied !== null) tree.value = applyReorderPlan(before, applied);
-    notice.value = { text: SAVED_MESSAGE, kind: 'status' };
-  } catch {
-    // A network failure, a dropped connection, a Worker that never answered. The request may
-    // or may not have been received, but nothing was CONFIRMED, so the tree goes back to what
-    // the server last agreed to rather than showing a move nobody can vouch for.
-    revert(before, OFFLINE_MESSAGE);
+    const outcome = await sendReorder(fetch, body, before);
+    if (outcome.kind === 'applied') tree.value = applyReorderPlan(before, outcome.plan);
+    else if (reorderRevertsTree(outcome)) tree.value = before;
+    notice.value = reorderNotice(outcome);
   } finally {
     pending.value = false;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Reading the response
-// ---------------------------------------------------------------------------
-
-/**
- * The endpoint answers `{ ok, message }` on every failure, in one shape, deliberately. Read
- * defensively anyway: this is a `fetch` whose response could be a proxy's error page or a
- * truncated body, and a `payload.message` read off `null` is a TypeError inside a drag.
- */
-function messageOf(payload: unknown): string | null {
-  if (typeof payload !== 'object' || payload === null) return null;
-  const message = (payload as { message?: unknown }).message;
-  return typeof message === 'string' && message !== '' ? message : null;
-}
-
-function readUpdates(value: unknown): PositionUpdate[] | null {
-  if (!Array.isArray(value)) return null;
-  const updates: PositionUpdate[] = [];
-  for (const entry of value) {
-    if (typeof entry !== 'object' || entry === null) return null;
-    const { id, position } = entry as { id?: unknown; position?: unknown };
-    if (typeof id !== 'string' || typeof position !== 'number' || !Number.isFinite(position)) {
-      return null;
-    }
-    updates.push({ id, position });
-  }
-  return updates;
-}
-
-/**
- * The applied plan, or `null` for anything this cannot vouch for.
- *
- * EVERY FIELD IS CHECKED RATHER THAN CAST, and the reason is specific rather than ceremony: a
- * `position` that arrived as `undefined` — from a body shaped differently than expected —
- * would be written into a row and then compared, and `undefined` in a comparator produces
- * `NaN`, which sorts as "equal to everything". The pack would not error; it would render in
- * an order nobody chose. Refusing the whole plan is the only outcome that cannot do that.
- */
-function planOf(payload: unknown): ReorderPlan | null {
-  if (typeof payload !== 'object' || payload === null) return null;
-  const body = payload as { ok?: unknown; runs?: unknown; reparent?: unknown };
-  if (body.ok !== true || !Array.isArray(body.runs)) return null;
-
-  const runs: RunUpdate[] = [];
-  for (const run of body.runs) {
-    if (typeof run !== 'object' || run === null) return null;
-    const { parentId, updates } = run as { parentId?: unknown; updates?: unknown };
-    const read = readUpdates(updates);
-    if (typeof parentId !== 'string' || read === null) return null;
-    runs.push({ parentId, updates: read });
-  }
-
-  const raw = body.reparent;
-  if (raw === null || raw === undefined) return { runs, reparent: null };
-  if (typeof raw !== 'object') return null;
-  const { id, parentId } = raw as { id?: unknown; parentId?: unknown };
-  if (typeof id !== 'string' || typeof parentId !== 'string') return null;
-  return { runs, reparent: { id, parentId } };
 }
 </script>
 
