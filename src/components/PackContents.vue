@@ -305,8 +305,10 @@ const marker = shallowRef<Marker | null>(null);
  * control does outside the island.
  *
  * The attribute is read by the browser at `dragstart`, which is after `pointerdown`, so
- * setting it here is early enough. It is cleared on `pointerup` (a press on the grip that
- * never became a drag) and in `endDrag` (one that did).
+ * setting it here is early enough. It is cleared on `pointerup` ANYWHERE (a press that never
+ * became a drag, which is usually released a few pixels off the grip rather than on it), on
+ * `pointercancel` (touch or pen taken away mid-gesture), and in `endDrag` (a press that did
+ * become a drag) — see `grab` for why the window and not the grip carries those listeners.
  */
 const grabbed = shallowRef<string | null>(null);
 
@@ -464,10 +466,25 @@ function markerIsCategory(insertAt: number): boolean {
 function grab(id: string): void {
   if (!draggable.value) return;
   grabbed.value = id;
+  // THE RELEASE HAS TO BE LISTENED FOR ON THE WINDOW, NOT ON THE GRIP.
+  //
+  // A press that never becomes a drag is usually not released where it started: the pointer
+  // has drifted a few pixels off the grip by the time the button comes up, and a `pointerup`
+  // bound to the grip alone never hears it. That leaves the row armed permanently, which is
+  // the exact state this whole mechanism exists to prevent — its own quantity and name fields
+  // stop taking a press-and-drag to select, because the row picks itself up instead. The grip
+  // keeps its own handler as well, so the common case needs no bubbling at all.
+  //
+  // `pointercancel` matters for touch and pen, where the browser can take the pointer away
+  // from us (a scroll takes over, the gesture is interrupted) and no `pointerup` ever arrives.
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
 }
 
 function release(): void {
   grabbed.value = null;
+  window.removeEventListener('pointerup', release);
+  window.removeEventListener('pointercancel', release);
 }
 
 /** The half of a row the pointer is in decides whether the indicator sits above it or below
