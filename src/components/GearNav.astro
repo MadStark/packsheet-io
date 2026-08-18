@@ -1,19 +1,32 @@
 ---
-// A plain, non-hydrated header for the gear closet's pages (PK-4) — the wordmark and
-// links to Closet and Account, shared by src/pages/gear/index.astro and the closet
-// pages that follow it.
+// The plain, non-hydrated header every signed-in page of this product renders (PK-4) —
+// the wordmark and links to the three sections a signed-in visitor moves between: their
+// packs, their closet, and their account.
+//
+// IT IS NO LONGER THE GEAR CLOSET'S NAV, WHICH IS WHY THE LABEL NO LONGER SAYS SO. PK-37
+// added /packs and /packs/<id>, which render this same header, so a nav announcing itself
+// as "Gear closet" would name one of the two sections it links to — and would tell a
+// screen-reader user they were in the closet while they stood in the pack editor. The FILE
+// keeps its name: renaming it is a rename of every import of it and buys nothing this
+// comment does not.
 //
 // KEEP THIS A PLAIN .astro COMPONENT. It imports nothing from src/lib/auth/ (only the
 // dependency-free path constants below, which is exactly what those modules exist
 // for — see their own module comments), takes no `client:*` directive anywhere it is
 // used, and must never gain one: a hydrated nav bar is a component the browser
-// downloads, and the whole point of src/lib/gear/routes.ts and src/lib/auth-routes.ts
-// being importable from anywhere is that a component like this one can render a link
-// without ever becoming a reason for an auth SDK to reach the client.
+// downloads, and the whole point of src/lib/gear/routes.ts, src/lib/packs/routes.ts and
+// src/lib/auth-routes.ts being importable from anywhere is that a component like this one
+// can render a link without ever becoming a reason for an auth SDK to reach the client.
 // Neither GEAR_TRASH_PATH nor GEAR_NEW_PATH is imported any more, and each was dropped
 // by a different ticket: PK-60 deleted the trash page outright, and PK-62 removed the
-// "Add item" link from this nav. What is left is the two DESTINATIONS this header is for.
+// "Add item" link from this nav. What is left is DESTINATIONS, which is what this header
+// is for — see the note at the foot of the list about the action link that is not coming
+// back.
 import { GEAR_PATH } from '../lib/gear/routes';
+// Dependency-free, on exactly the same footing as GEAR_PATH above — see that module's own
+// header, which spells out that this component's ability to import it is one of the two
+// reasons it holds nothing else.
+import { PACKS_PATH } from '../lib/packs/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
 // The wordmark's destination, which used to be a hard-coded "/" and is the single click
 // this whole change is about. Every page this nav renders on belongs to a signed-in
@@ -25,18 +38,30 @@ import { HOME_PATH } from '../lib/routes';
 // aria-current="page" on whichever link matches the current path — a small,
 // server-computed affordance (no JS needed) that tells a screen reader, and a sighted
 // visitor via :focus/underline styling, which section they are already in.
+//
+// PACKS SITS BETWEEN THE TWO EXISTING ENTRIES rather than at either end, which is a
+// decision about what this header is a list of: the closet is where gear lives, packs are
+// what gets built out of it, and the account is the settings drawer at the end. Appending
+// Packs after Account would have put a section behind the settings; putting it first would
+// have moved Closet under a signed-in visitor's cursor for no reason PK-37 has.
 const path = Astro.url.pathname;
 const links: readonly [href: string, label: string][] = [
   [GEAR_PATH, 'Closet'],
+  [PACKS_PATH, 'Packs'],
   [ACCOUNT_PATH, 'Account'],
 ];
 ---
 
 <header class="border-hairline border-b">
-  <nav
-    aria-label="Gear closet"
-    class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4"
-  >
+  {
+    /* aria-label="Sections", not "Gear closet". A nav's accessible name is announced as the
+       name of the LANDMARK — "Sections navigation" — so it has to describe what the list
+       is, not which page rendered it. It is still labelled at all (rather than left as a
+       bare <nav>) because a second navigation landmark already exists on some of these
+       pages: the closet's pager, and the pack editor's picker pages, both of which carry
+       their own aria-label for the same reason. */
+  }
+  <nav aria-label="Sections" class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
     <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
       >Packsheet</a
     >

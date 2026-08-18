@@ -1,0 +1,261 @@
+---
+// On-demand: this page requires a session, reads Astro.locals.user, inserts into packs on
+// POST and redirects — none of which a prerendered file can do. See src/middleware.ts for
+// why PACKS_PATH carries the no-store rule the same way GEAR_PATH and /account do, and
+// src/pages/gear/index.astro for the page this one shares its shape with.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import GearNav from '../../components/GearNav.astro';
+import { createAuthClient } from '../../lib/auth';
+import { readWeightSystem } from '../../lib/profile';
+import { formatWeight } from '../../lib/units';
+import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
+// `packPath` only. This page IS `PACKS_PATH`, and a `<form method="POST">` with no action
+// posts to the URL it was served from, so there is nothing here for the constant to name —
+// the one redirect this page issues goes into the pack it just created.
+import { packPath } from '../../lib/packs/routes';
+import { loadPackList } from '../../lib/packs/query';
+import { createPack } from '../../lib/packs/mutations';
+import {
+  EMPTY_PACK_FORM_VALUES,
+  PACK_FORM_FIELD,
+  parsePackForm,
+  rawPackFormValues,
+  type PackFormValues,
+} from '../../lib/packs/form';
+import { packTripTypeLabel } from '../../lib/packs/fields';
+
+// src/middleware.ts has already resolved this with a verified getUser() call; reading it
+// here rather than calling getUser() again is the whole point of doing it once in
+// middleware. A null user redirects to sign-in with `next` set back to this exact URL
+// (path + query), so signing in returns here rather than dropping the visitor somewhere
+// they did not ask for.
+const user = Astro.locals.user;
+if (!user) {
+  const next = `${Astro.url.pathname}${Astro.url.search}`;
+  return Astro.redirect(`${SIGN_IN_PATH}?${NEXT_PARAM}=${encodeURIComponent(next)}`);
+}
+
+// CSRF: same protection as sign-in.astro and src/pages/gear/index.astro — Astro's
+// on-demand origin check (security.checkOrigin, set explicitly in astro.config.mjs) plus
+// the session cookie's sameSite: 'lax'. No separate CSRF token is needed on top of that
+// pair for the same reason it isn't on those pages.
+const client = createAuthClient(Astro.cookies, Astro.request);
+
+// Never render a raw PostgREST/Supabase error string — the house rule stated in
+// src/lib/packs/form.ts's "NEVER A RAW POSTGRES OR POSTGREST STRING" section.
+const GENERIC_LOAD_ERROR = 'Something went wrong loading your packs. Please try again.';
+const GENERIC_WRITE_ERROR = 'Something went wrong creating that pack. Please try again.';
+
+let formErrors: Readonly<Record<string, string>> = {};
+let formValues: PackFormValues = EMPTY_PACK_FORM_VALUES;
+let writeError: string | null = null;
+
+// ---------------------------------------------------------------------------
+// POST: create one pack.
+//
+// Method discipline: this page answers GET and POST, nothing else — Astro returns 405 for
+// any other method, since no other handler is exported. The one state-changing branch
+// redirects with 303, so a refresh can never resubmit the create; a validation failure
+// re-renders without having written anything, which is the whole point of it.
+// ---------------------------------------------------------------------------
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const result = parsePackForm(form);
+
+  if (!result.ok) {
+    formErrors = result.errors;
+    formValues = result.values;
+  } else {
+    // createPack (src/lib/packs/mutations.ts) issues exactly one INSERT and counts nothing
+    // first: THERE IS NO CAP on how many packs an account may have, and that module's
+    // header says so explicitly because a limit is the kind of thing that gets added to a
+    // create path by reflex. tests/packs-mutations.test.ts asserts the absence.
+    const { id, error } = await createPack(client, user.id, result.values);
+
+    if (error || id === null) {
+      writeError = GENERIC_WRITE_ERROR;
+      // The submission validated; the write did not. Re-render with exactly what the
+      // visitor typed — see rawPackFormValues' own comment for why this is the right thing
+      // to show back rather than a value reconstructed from the parsed input.
+      formValues = rawPackFormValues(form);
+    } else {
+      // Straight into the new pack's editor. A pack created from this form is empty, and
+      // the next thing its owner wants is a category to put something in — landing back on
+      // the list would make them find the row they just made and click it.
+      return Astro.redirect(packPath(id), 303);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET (and the render after a POST that did not redirect): every pack this visitor owns,
+// each with its own totals.
+// ---------------------------------------------------------------------------
+
+// One round trip for the whole list, totals included — loadPackList embeds the tree each
+// pack's totals are computed from, so this is not an N+1 waiting to happen. Its
+// `.eq('user_id', ...)` is load-bearing rather than belt-and-braces: `packs_select_public`
+// would union in every stranger's public pack under a heading that says "your packs". See
+// that function's own comment.
+const { packs, error: listError } = await loadPackList(client, user.id);
+
+// PK-67: the account's system, read once for the whole list rather than per row — it is
+// one value for the page, and a query per pack to render one column would be a round trip
+// for a display preference.
+const { system: weightSystem } = await readWeightSystem(client, user.id);
+
+const loadError = listError ? GENERIC_LOAD_ERROR : null;
+
+// "This visitor has no packs" is exactly an empty list from a read that did not fail, and
+// it is an ordinary state rather than an error — a new account has no packs, and the first
+// thing it should see is an invitation to make one, not a blank page.
+const listIsEmpty = !loadError && packs.length === 0;
+
+const LABEL_CLASS = 'text-ink-2 block text-sm';
+const INPUT_CLASS =
+  'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
+const ERROR_CLASS = 'text-rust mt-1 text-sm';
+const ALERT_CLASS =
+  'border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm';
+---
+
+<Layout
+  title="Your packs — Packsheet"
+  description="Every pack list you have built in Packsheet, with its weight and item count."
+>
+  <GearNav />
+  <main class="mx-auto max-w-5xl px-6 py-10">
+    <h1 class="text-3xl">Your packs</h1>
+
+    {
+      writeError && (
+        <p role="alert" class={ALERT_CLASS}>
+          {writeError}
+        </p>
+      )
+    }
+    {
+      loadError && (
+        <p role="alert" class={ALERT_CLASS}>
+          {loadError}
+        </p>
+      )
+    }
+
+    {
+      /* The create form, rendered whether the list is empty or full — the C1 (PK-4 review)
+         defect in miniature: an action reachable only from an empty state stops being
+         reachable the moment the state is no longer empty.
+
+         NAME ONLY. `packs.description` and `packs.trip_type` are both nullable with no
+         default, so a pack that has neither is a complete pack rather than a half-filled
+         one, and asking for three answers to make an empty list is three answers before
+         the visitor has anything to put in it. Both fields are on the editor's own form,
+         one click away, where the pack they describe actually exists. `parsePackForm`
+         reads all three regardless and turns the two absent ones into SQL null, which is
+         exactly what this form means by leaving them out. */
+    }
+    <form method="POST" class="border-hairline bg-surface mt-6 rounded-[var(--r)] border p-5">
+      <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
+        <div class="flex-1">
+          <label for="pack-name" class={LABEL_CLASS}>
+            New pack name <span aria-hidden="true" class="text-rust">*</span>
+          </label>
+          {
+            /* NOT the HTML `required` attribute, for the reason GearItemForm gives at
+               length: native constraint validation would block the submit in-browser, so
+               `parsePackForm` — the only place this rule is actually enforced, and the
+               only one a test can reach — would never run. `aria-required` says the same
+               thing to assistive technology without touching submission behaviour. */
+          }
+          <input
+            id="pack-name"
+            name={PACK_FORM_FIELD.name}
+            type="text"
+            value={formValues.name}
+            placeholder="Three days on the Cape Wrath Trail"
+            aria-required="true"
+            aria-describedby={formErrors.name ? 'pack-name-error' : undefined}
+            aria-invalid={formErrors.name ? 'true' : undefined}
+            class={INPUT_CLASS}
+          />
+          {
+            formErrors.name && (
+              <p id="pack-name-error" class={ERROR_CLASS}>
+                {formErrors.name}
+              </p>
+            )
+          }
+        </div>
+        <button
+          type="submit"
+          class="border-blue-deep text-blue-deep hover:bg-blue-tint shrink-0 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+        >
+          Create pack
+        </button>
+      </div>
+    </form>
+
+    {
+      loadError ? null : listIsEmpty ? (
+        <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
+          <p class="text-ink-2">You have not built a pack yet.</p>
+          <p class="text-ink-3 mt-2 text-sm">
+            A pack is a list of what you are taking on one trip, grouped into categories and weighed
+            as you build it.
+          </p>
+        </div>
+      ) : (
+        <ul class="mt-8 space-y-3">
+          {packs.map(({ pack, totals }) => {
+            // EVERY NUMBER ON THIS ROW COMES FROM `totals`, which loadPackList produced
+            // with computeTotals (src/lib/totals.ts) from the same tree the row was fetched
+            // with. Nothing on this page adds up a weight or counts an item itself — a
+            // second summation here is exactly the duplication that makes the list and the
+            // editor disagree about a figure a visitor can see on both screens within one
+            // click of each other.
+            const tripType = packTripTypeLabel(pack.trip_type);
+            return (
+              <li class="border-hairline bg-surface rounded-[var(--r)] border">
+                <a
+                  href={packPath(pack.id)}
+                  class="hover:bg-sunk flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 rounded-[var(--r)] px-5 py-4 transition-colors"
+                >
+                  <span class="min-w-0">
+                    <span class="text-blue-deep block font-medium underline">{pack.name}</span>
+                    {tripType !== '' && (
+                      <span class="text-ink-3 mt-1 block text-sm">{tripType}</span>
+                    )}
+                  </span>
+                  <span class="text-ink-2 flex items-baseline gap-6 text-sm">
+                    {/* Blue for a base weight is the one non-interactive use the palette
+                        allows (CONTRIBUTING.md); the total beside it stays ink, because a
+                        total is not a base weight and colouring it blue would spend the
+                        signal on the number that needs it least. */}
+                    <span class="numeric">
+                      <span class="text-w-base font-medium">
+                        {formatWeight(totals.base, weightSystem)}
+                      </span>
+                      <span class="text-ink-3"> base</span>
+                    </span>
+                    <span class="numeric">
+                      <span class="text-ink font-medium">
+                        {formatWeight(totals.total, weightSystem)}
+                      </span>
+                      <span class="text-ink-3"> total</span>
+                    </span>
+                    <span class="numeric">
+                      {totals.itemCount} item{totals.itemCount === 1 ? '' : 's'}
+                    </span>
+                  </span>
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      )
+    }
+  </main>
+</Layout>

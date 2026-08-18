@@ -1,0 +1,1397 @@
+---
+// On-demand: this page requires a session, reads Astro.locals.user, and writes packs,
+// pack_categories and pack_items on POST — none of which a prerendered file can do. See
+// src/middleware.ts for why PACKS_PATH carries the no-store rule the same way GEAR_PATH
+// does, and src/pages/gear/[id].astro for the page this one shares its shape with.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import GearNav from '../../components/GearNav.astro';
+import { createAuthClient } from '../../lib/auth';
+import { readWeightSystem } from '../../lib/profile';
+import { WEIGHT_ENTRY_UNIT, formatWeight } from '../../lib/units';
+import { formatMoney } from '../../lib/money';
+import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
+import { PACKS_PATH, packPath } from '../../lib/packs/routes';
+import { loadPackForEdit } from '../../lib/packs/query';
+import {
+  addGearItemsToCategory,
+  createCustomPackItem,
+  createPackCategory,
+  deletePack,
+  deletePackCategory,
+  deletePackItem,
+  duplicatePack,
+  renamePackCategory,
+  updatePack,
+  updatePackItem,
+} from '../../lib/packs/mutations';
+import {
+  CUSTOM_PACK_ITEM_FORM_FIELD,
+  EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES,
+  EMPTY_PACK_CATEGORY_FORM_VALUES,
+  PACK_CATEGORY_FORM_FIELD,
+  PACK_FORM_FIELD,
+  PACK_ITEM_FORM_FIELD,
+  packItemToFormValues,
+  packToFormValues,
+  parseCustomPackItemForm,
+  parsePackCategoryForm,
+  parsePackForm,
+  parsePackItemForm,
+  rawCustomPackItemFormValues,
+  rawPackCategoryFormValues,
+  rawPackFormValues,
+  rawPackItemFormValues,
+  type CustomPackItemFormValues,
+  type PackCategoryFormValues,
+  type PackFormValues,
+  type PackItemFormValues,
+} from '../../lib/packs/form';
+import {
+  PACK_ITEM_CARRIAGES,
+  PACK_ITEM_CARRIAGE_LABELS,
+  PACK_ITEM_CARRIAGE_MEANINGS,
+  packTripTypeLabel,
+  packTripTypeOptions,
+} from '../../lib/packs/fields';
+import {
+  PACK_EDITOR_FIELD,
+  categoryAppendPosition,
+  hasPackCategory,
+  itemAppendPosition,
+  parseEntityId,
+  parseGearItemIds,
+} from '../../lib/packs/editor';
+import { WEIGHT_BUCKETS, computeTotals, type WeightBucket } from '../../lib/totals';
+// The closet picker reads the closet through the SAME module the closet page does — one
+// owner-scoped, filtered, paginated read of `gear_items`, not a second one grown here. See
+// loadGearCloset's own comment for why its `.eq('user_id', ...)` is load-bearing rather
+// than belt-and-braces, and why the page clamp means an over-range `?page=` lands on the
+// last real page instead of replacing this whole editor with an error.
+import { gearQueryToSearchParams, loadGearCloset, parseGearQuery } from '../../lib/gear/query';
+import { GEAR_PAGE_SIZE } from '../../lib/gear/fields';
+// The delete gate itself, imported rather than re-spelled. PK-60's review (F1) found the
+// same two-step confirmation written inline in each of the two gear pages — two copies of
+// the only guard in front of an irreversible write, in the directory vitest.config.ts
+// excludes. This page is the third caller, and writing a third copy of `=== '1'` here would
+// re-open exactly that defect. The name says "gear" because that is where it was first
+// needed; what it decides is "did this submission carry the confirmation we rendered",
+// which is not a gear question.
+import {
+  BULK_FORM_FIELD,
+  GEAR_DELETE_CONFIRMATION_VALUE,
+  confirmsGearDeletion,
+} from '../../lib/gear/bulk';
+
+// src/middleware.ts has already resolved this with a verified getUser() call; reading it
+// here rather than calling getUser() again is the whole point of doing it once in
+// middleware. A null user redirects to sign-in with `next` set back to this exact URL
+// (path + query), so signing in returns to the pack — and to the closet search the picker
+// was showing — rather than dropping the visitor on the pack list.
+const user = Astro.locals.user;
+if (!user) {
+  const next = `${Astro.url.pathname}${Astro.url.search}`;
+  return Astro.redirect(`${SIGN_IN_PATH}?${NEXT_PARAM}=${encodeURIComponent(next)}`);
+}
+
+const id = Astro.params.id;
+if (typeof id !== 'string' || id === '') {
+  return new Response('Not found', { status: 404 });
+}
+
+// CSRF: same protection as sign-in.astro and the gear pages — Astro's on-demand origin
+// check (security.checkOrigin, set explicitly in astro.config.mjs) plus the session
+// cookie's sameSite: 'lax'. No separate CSRF token is needed on top of that pair for the
+// same reason it isn't on those pages.
+const client = createAuthClient(Astro.cookies, Astro.request);
+
+// ---------------------------------------------------------------------------
+// Messages. Never a raw PostgREST/Postgres string — the house rule stated in
+// src/lib/packs/form.ts's "NEVER A RAW POSTGRES OR POSTGREST STRING" section. Every
+// sentence below is complete, neutral, and says what a visitor can do next.
+// ---------------------------------------------------------------------------
+const GENERIC_WRITE_ERROR = 'Something went wrong saving that change. Please try again.';
+const CATEGORY_MISSING_MESSAGE = 'That category is no longer in this pack.';
+const ITEM_MISSING_MESSAGE = 'That item is no longer in this pack.';
+const NOTHING_SELECTED_MESSAGE = 'Choose at least one closet item to add.';
+const CLOSET_LOAD_ERROR = 'Something went wrong loading your closet, so nothing is listed below.';
+const DUPLICATE_FAILED_MESSAGE = 'Something went wrong duplicating this pack. Please try again.';
+// NOT "please try again", for the reason GEAR_DELETE_FAILED_MESSAGE gives at length: a
+// DELETE that commits and then loses its response (a worker timeout, a reset connection)
+// arrives in the same branch with the rows already gone, so a message promising the pack is
+// still here would be a promise this code cannot keep. It sends the visitor to the one
+// thing that can answer the question instead.
+const DELETE_FAILED_MESSAGE =
+  'We could not confirm whether that delete went through. Check your packs to see what is still there.';
+
+/**
+ * This page answers one POST handler for nine different forms, told apart by a hidden
+ * `intent` field — the same mechanism src/pages/gear/[id].astro uses for its two, and
+ * src/lib/gear/bulk.ts's BULK_FORM_FIELD.intent for the closet list's several. Not exported
+ * from src/lib/packs/ because there is no decision buried in naming nine strings; the
+ * decisions each branch reaches for (which ids, which positions, what counts as
+ * confirmation) all live in modules a test can call, which is the line GearItemForm's own
+ * "NO DECISION-MAKING LIVES HERE" draws and this page stays on the right side of.
+ */
+const PACK_INTENT = {
+  savePack: 'save-pack',
+  duplicatePack: 'duplicate-pack',
+  deletePack: 'delete-pack',
+  createCategory: 'create-category',
+  renameCategory: 'rename-category',
+  deleteCategory: 'delete-category',
+  addGear: 'add-gear',
+  addCustomItem: 'add-custom-item',
+  saveItem: 'save-item',
+  removeItem: 'remove-item',
+} as const;
+
+let writeError: string | null = null;
+let packErrors: Readonly<Record<string, string>> = {};
+let packValuesOverride: PackFormValues | null = null;
+let categoryErrors: Readonly<Record<string, string>> = {};
+let categoryValues: PackCategoryFormValues = EMPTY_PACK_CATEGORY_FORM_VALUES;
+/** A rename that failed validation, scoped to the ONE category it was submitted for, so the
+ *  message renders beside that category's own field rather than at the top of a page with
+ *  nine forms on it. */
+let renameError: { readonly categoryId: string; readonly message: string } | null = null;
+let customErrors: Readonly<Record<string, string>> = {};
+let customValues: CustomPackItemFormValues = EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES;
+/** Likewise for one item's per-list settings: which row failed, what to say, and exactly
+ *  what the visitor typed — see rawPackItemFormValues' own comment for why the raw strings
+ *  are what a re-render shows rather than the stored row. */
+let itemError: {
+  readonly itemId: string;
+  readonly errors: Readonly<Record<string, string>>;
+  readonly values: PackItemFormValues;
+} | null = null;
+/** Set only for a delete that has not been confirmed yet — see "Method discipline" below.
+ *  Neither has written anything at the point it is set. */
+let pendingCategoryDelete: string | null = null;
+let pendingPackDelete = false;
+
+// PK-67: needed BEFORE the POST branch, not only for rendering. The unit the custom item's
+// Weight field is typed in must be the unit parseCustomPackItemForm converts from — see
+// that parser's own comment, and src/pages/gear/new.astro, which reads it in the same order
+// for the same reason.
+const { system: weightSystem } = await readWeightSystem(client, user.id);
+const entryUnit = WEIGHT_ENTRY_UNIT[weightSystem];
+
+// ---------------------------------------------------------------------------
+// The pack itself, loaded BEFORE the POST branch because every create needs an append
+// position derived from it and every delete confirmation needs to name what it will take.
+//
+// loadPackForEdit carries the load-bearing `.eq('user_id', ...)` alongside `.eq('id', ...)`
+// — not belt-and-braces. `packs_select_public` would hand this query any stranger's public
+// pack for the id alone, and "the edit form loads for a pack you do not own" is the wrong
+// outcome whether or not the write policies would then refuse the save. See that function's
+// own comment.
+//
+// A missing pack, another visitor's pack and a malformed id all collapse to one real 404,
+// exactly as src/pages/gear/[id].astro does: none of the three is a distinction a visitor
+// probing this URL should be able to tell apart from the outside.
+// ---------------------------------------------------------------------------
+const { data: pack, error: loadError } = await loadPackForEdit(client, user.id, id);
+if (loadError || pack === null) {
+  return new Response('Not found', { status: 404 });
+}
+
+// The closet picker's own view state, parsed from this page's query string by the closet's
+// own parser. Rebuilt through gearQueryToSearchParams rather than carried verbatim so that
+// a redirect after a write drops anything parseGearQuery does not recognise as its own — a
+// stray `?utm_source=`, a typo'd `?cagegory=` — which is the argument gearListPath makes
+// for the closet list's own redirects.
+const pickerQuery = parseGearQuery(Astro.url.searchParams);
+const pickerSearch = gearQueryToSearchParams(pickerQuery).toString();
+const selfPath = pickerSearch === '' ? packPath(id) : `${packPath(id)}?${pickerSearch}`;
+
+// ---------------------------------------------------------------------------
+// POST: nine intents.
+//
+// Method discipline: this page answers GET and POST, nothing else — Astro returns 405 for
+// any other method, since no other handler is exported. EVERY state-changing branch
+// redirects with 303, so a refresh can never resubmit a mutation. The branches that do NOT
+// redirect are the two unconfirmed deletes and the validation failures, and none of them
+// has changed anything — which is the entire point of them.
+// ---------------------------------------------------------------------------
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const intent = form.get('intent');
+
+  if (intent === PACK_INTENT.savePack) {
+    const result = parsePackForm(form);
+    if (!result.ok) {
+      packErrors = result.errors;
+      packValuesOverride = result.values;
+    } else {
+      // One write for name, description and trip type together — see updatePack's own
+      // comment for why the three fields this form edits are not three setters. The trip
+      // type is passed through untouched, curated value or not: `packs.trip_type` carries
+      // no CHECK constraint on purpose, and nothing here may branch on isPackTripType.
+      const { error } = await updatePack(client, user.id, id, result.values);
+      if (error) {
+        writeError = GENERIC_WRITE_ERROR;
+        packValuesOverride = rawPackFormValues(form);
+      } else {
+        return Astro.redirect(selfPath, 303);
+      }
+    }
+  } else if (intent === PACK_INTENT.createCategory) {
+    const result = parsePackCategoryForm(form);
+    if (!result.ok) {
+      categoryErrors = result.errors;
+      categoryValues = result.values;
+    } else {
+      // Appended, never inserted: `categoryAppendPosition` (src/lib/packs/editor.ts) is
+      // where "at the end" is decided, because a wrong answer here is silent — position 0
+      // is a legal value and every new category would simply appear at the top.
+      const { error } = await createPackCategory(
+        client,
+        user.id,
+        id,
+        result.values,
+        categoryAppendPosition(pack),
+      );
+      if (error) {
+        writeError = GENERIC_WRITE_ERROR;
+        categoryValues = rawPackCategoryFormValues(form);
+      } else {
+        return Astro.redirect(selfPath, 303);
+      }
+    }
+  } else if (intent === PACK_INTENT.renameCategory) {
+    const categoryId = parseEntityId(form.get(PACK_EDITOR_FIELD.categoryId));
+    const result = parsePackCategoryForm(form);
+    if (categoryId === null || !hasPackCategory(pack, categoryId)) {
+      writeError = CATEGORY_MISSING_MESSAGE;
+    } else if (!result.ok) {
+      renameError = {
+        categoryId,
+        message: Object.values(result.errors)[0] ?? GENERIC_WRITE_ERROR,
+      };
+    } else {
+      const { error } = await renamePackCategory(client, user.id, categoryId, result.values.name);
+      if (error) writeError = GENERIC_WRITE_ERROR;
+      else return Astro.redirect(selfPath, 303);
+    }
+  } else if (intent === PACK_INTENT.deleteCategory) {
+    const categoryId = parseEntityId(form.get(PACK_EDITOR_FIELD.categoryId));
+    if (categoryId === null || !hasPackCategory(pack, categoryId)) {
+      writeError = CATEGORY_MISSING_MESSAGE;
+    } else if (!confirmsGearDeletion(form.get(BULK_FORM_FIELD.confirm))) {
+      // The reveal half of the two-step. NOTHING IS WRITTEN HERE — the confirmation
+      // rendered below names how many items the cascade will take with the category, which
+      // is a figure this page can only state honestly BEFORE the delete, from the tree it
+      // rendered from. deletePackCategory's own comment refuses to report it afterwards
+      // (its `count` is 1 whether the category held nothing or twelve), and says why
+      // counting the cascade with a SELECT before the DELETE would be reporting a
+      // possibly-stale number as though it were the write's own result.
+      pendingCategoryDelete = categoryId;
+    } else {
+      const { error } = await deletePackCategory(client, user.id, categoryId);
+      if (error) writeError = DELETE_FAILED_MESSAGE;
+      else return Astro.redirect(selfPath, 303);
+    }
+  } else if (intent === PACK_INTENT.addGear) {
+    const categoryId = parseEntityId(form.get(PACK_EDITOR_FIELD.categoryId));
+    const position = categoryId === null ? null : itemAppendPosition(pack, categoryId);
+    // NOT de-duplicated: the same closet item may legitimately be added to a pack more than
+    // once, and parseGearItemIds is written to preserve repeats for exactly that reason —
+    // see its own comment, and addGearItemsToCategory's.
+    const gearItemIds = parseGearItemIds(form.getAll(PACK_EDITOR_FIELD.gearItemId));
+    if (categoryId === null || position === null) {
+      writeError = CATEGORY_MISSING_MESSAGE;
+    } else if (gearItemIds.length === 0) {
+      writeError = NOTHING_SELECTED_MESSAGE;
+    } else {
+      const { error } = await addGearItemsToCategory(
+        client,
+        user.id,
+        categoryId,
+        gearItemIds,
+        position,
+      );
+      if (error) writeError = GENERIC_WRITE_ERROR;
+      else return Astro.redirect(selfPath, 303);
+    }
+  } else if (intent === PACK_INTENT.addCustomItem) {
+    const categoryId = parseEntityId(form.get(PACK_EDITOR_FIELD.categoryId));
+    const position = categoryId === null ? null : itemAppendPosition(pack, categoryId);
+    const result = parseCustomPackItemForm(form, weightSystem);
+    if (!result.ok) {
+      customErrors = result.errors;
+      customValues = result.values;
+    } else if (categoryId === null || position === null) {
+      writeError = CATEGORY_MISSING_MESSAGE;
+      customValues = rawCustomPackItemFormValues(form);
+    } else {
+      // Nothing on this path writes to gear_items — that is an acceptance criterion of
+      // PK-37 and createCustomPackItem asserts it directly. A one-off item is a pack_items
+      // row with a snapshot and no gear reference; putting it in the closet is PK-66's
+      // deliberate, separate choice.
+      const { error } = await createCustomPackItem(
+        client,
+        user.id,
+        categoryId,
+        result.values,
+        position,
+      );
+      if (error) {
+        writeError = GENERIC_WRITE_ERROR;
+        customValues = rawCustomPackItemFormValues(form);
+      } else {
+        return Astro.redirect(selfPath, 303);
+      }
+    }
+  } else if (intent === PACK_INTENT.saveItem) {
+    const itemId = parseEntityId(form.get(PACK_EDITOR_FIELD.itemId));
+    const result = parsePackItemForm(form);
+    if (itemId === null) {
+      writeError = ITEM_MISSING_MESSAGE;
+    } else if (!result.ok) {
+      itemError = { itemId, errors: result.errors, values: rawPackItemFormValues(form) };
+    } else {
+      // Quantity, carriage and packed in ONE update. The two boolean columns arrive as a
+      // pair out of carriageFlags, so there is no intermediate state where a row is worn
+      // and still consumable — the state pack_items_worn_consumable_exclusive refuses.
+      const { error } = await updatePackItem(client, user.id, itemId, result.values);
+      if (error) writeError = GENERIC_WRITE_ERROR;
+      else return Astro.redirect(selfPath, 303);
+    }
+  } else if (intent === PACK_INTENT.removeItem) {
+    const itemId = parseEntityId(form.get(PACK_EDITOR_FIELD.itemId));
+    if (itemId === null) {
+      writeError = ITEM_MISSING_MESSAGE;
+    } else {
+      // ONE CLICK, NOT TWO, and this is the one destructive control on the page that is not
+      // behind the reveal-then-confirm step. It removes an APPEARANCE, not a piece of gear:
+      // a referenced item's closet row is untouched (rule 1 of the core schema), and
+      // putting it back is one tick in the picker three inches below. The two controls that
+      // DO carry the step — deleting a category, deleting the pack — each destroy rows
+      // nothing else holds a copy of, which is the distinction the gesture is spent on. See
+      // src/pages/gear/index.astro's own note on not spending a typed-word confirmation on
+      // deleting a tent.
+      const { error } = await deletePackItem(client, user.id, itemId);
+      if (error) writeError = DELETE_FAILED_MESSAGE;
+      else return Astro.redirect(selfPath, 303);
+    }
+  } else if (intent === PACK_INTENT.duplicatePack) {
+    // The RPC, in one transaction. The copy is private, unlocked and carries a fresh slug
+    // whatever the original was — including when the original is LOCKED, which is the point
+    // of the feature rather than an edge case. See duplicatePack's own comment.
+    const { id: copyId, error } = await duplicatePack(client, user.id, id);
+    if (error || copyId === null) writeError = DUPLICATE_FAILED_MESSAGE;
+    else return Astro.redirect(packPath(copyId), 303);
+  } else if (intent === PACK_INTENT.deletePack) {
+    if (!confirmsGearDeletion(form.get(BULK_FORM_FIELD.confirm))) {
+      pendingPackDelete = true;
+    } else {
+      const { error } = await deletePack(client, user.id, id);
+      if (error) {
+        writeError = DELETE_FAILED_MESSAGE;
+      } else {
+        // Back to the list, with nothing appended. The pack's absence from it is the
+        // confirmation — the same reasoning src/pages/gear/[id].astro gives for not
+        // inventing a flash message for a deletion the visitor asked for twice.
+        return Astro.redirect(PACKS_PATH, 303);
+      }
+    }
+  } else {
+    // Neither of the nine: a stale form from before a deploy, or a crafted request. Named
+    // rather than silently ignored, exactly as the gear pages name an unrecognised intent.
+    writeError = GENERIC_WRITE_ERROR;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The render.
+// ---------------------------------------------------------------------------
+
+/**
+ * EVERY NUMBER ON THIS PAGE COMES FROM HERE. `computeTotals` (src/lib/totals.ts) is the
+ * product's one totals engine, and this page performs no summation of its own — not for the
+ * pack, not for a category, not for a line. The duplication that rule prevents is specific:
+ * two implementations of "what does this pack weigh" drift, and the way they drift is that
+ * the editor and the /packs list disagree about a figure a visitor can see on both screens
+ * one click apart.
+ *
+ * It also decides which bucket each item is in, from `worn`/`consumable`, so the coloured
+ * marker beside a row and the three subtotals in the summary can never contradict each
+ * other — they are the same classification, read twice.
+ *
+ * It THROWS rather than returning a partial total for a malformed row (a quantity outside
+ * its CHECK constraint, a snapshot whose weight is not a number, an item flagged both worn
+ * and consumable). That is deliberate on its part and is not caught here: every one of
+ * those states is unreachable through this product's own write paths, and a pack that
+ * cannot be totalled is a pack this editor cannot honestly render. See "ABSENT IS A VALUE;
+ * MALFORMED IS A DEFECT" in that module.
+ */
+const totals = computeTotals(pack);
+
+/** The raw `pack_items` rows by id, so each row's form can pre-fill from the item's own
+ *  stored columns while every number beside it comes from `totals`. `packItemToFormValues`
+ *  is what collapses `worn`/`consumable` back into the one carriage value the control
+ *  offers — the read direction of `carriageFlags`, and the only one this page uses. */
+const itemRows = new Map(
+  pack.pack_categories.flatMap((category) =>
+    category.pack_items.map((item) => [item.id, item] as const),
+  ),
+);
+
+const packValues: PackFormValues = packValuesOverride ?? packToFormValues(pack);
+// Options derived from the value the FORM is about to show, not from the stored column, so
+// that a re-render after a failed save still offers the value it is displaying. Either way
+// `packTripTypeOptions` is what keeps an unrecognised trip type — `'PCT section hike'` from
+// an import (PK-33, PK-65) — as a real option instead of letting the <select> silently
+// display its first entry and write that over the imported value on the next save.
+const tripTypeOptions = packTripTypeOptions(packValues.trip_type);
+const tripTypeLabel = packTripTypeLabel(pack.trip_type);
+
+const categories = pack.pack_categories;
+const packIsEmpty = categories.length === 0;
+const pendingCategory =
+  pendingCategoryDelete === null
+    ? null
+    : (categories.find((category) => category.id === pendingCategoryDelete) ?? null);
+
+// The picker's page of closet rows. A failure here degrades to an empty picker with a
+// notice rather than failing the whole page: the pack itself loaded, and refusing to render
+// an editor because the closet is briefly unreadable would turn a minor inconvenience into
+// a hard block on editing a pack the visitor already has.
+const {
+  items: closetItems,
+  error: closetError,
+  count: closetCount,
+  page: closetPage,
+} = await loadGearCloset(client, user.id, pickerQuery);
+const closetTotalPages = Math.max(1, Math.ceil(closetCount / GEAR_PAGE_SIZE));
+
+// An arrow function rather than a `function` declaration, which is not a style choice: a
+// hoisted declaration is analysed against `id`'s DECLARED type (`string | undefined`, from
+// Astro.params), not against the narrowing the 404 guard above established, so the same
+// body written as `function pickerPageHref(...)` fails to compile. The narrowing does reach
+// a closure created after it.
+const pickerPageHref = (target: number): string => {
+  const search = gearQueryToSearchParams({ ...pickerQuery, page: target }).toString();
+  return search === '' ? packPath(id) : `${packPath(id)}?${search}`;
+};
+
+/**
+ * The three weight buckets, as copy and as colour.
+ *
+ * PAGE-LOCAL AND COMPILER-CHECKED. These are `Record<WeightBucket, string>`, so a fourth
+ * bucket added to `WEIGHT_BUCKETS` fails to compile here rather than rendering unlabelled
+ * and uncoloured — which is the property that makes a lookup table safe to keep in a page
+ * where a `if (bucket === 'base')` chain would not be. They are copy and colour, not a
+ * decision: nothing branches on them, and the classification itself is `classifyPackItem`'s
+ * inside computeTotals.
+ *
+ * BLUE FOR BASE WEIGHT IS THE ONE NON-INTERACTIVE USE THE PALETTE ALLOWS (CONTRIBUTING.md,
+ * and --w-base is literally `var(--blue)` in src/styles/tokens.css). The other two are
+ * their own tokens with their own dark cuts; none of the three is decorative, each one
+ * marks which total a number belongs to.
+ */
+const BUCKET_LABELS: Record<WeightBucket, string> = {
+  base: 'Base weight',
+  worn: 'Worn',
+  consumable: 'Consumables',
+};
+const BUCKET_TEXT_CLASS: Record<WeightBucket, string> = {
+  base: 'text-w-base',
+  worn: 'text-w-worn',
+  consumable: 'text-w-cons',
+};
+
+const prices = [...totals.pricesByCurrency.values()];
+
+const LABEL_CLASS = 'text-ink-2 block text-sm';
+const INPUT_CLASS =
+  'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
+const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-24`;
+const ERROR_CLASS = 'text-rust mt-1 text-sm';
+const ALERT_CLASS =
+  'border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm';
+const PANEL_CLASS = 'border-hairline bg-surface mt-8 rounded-[var(--r)] border p-5';
+const PRIMARY_BUTTON_CLASS =
+  'border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors';
+const QUIET_BUTTON_CLASS =
+  'border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors';
+const DANGER_BUTTON_CLASS =
+  'border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors';
+const CONFIRM_BUTTON_CLASS =
+  'bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95';
+const CARRIAGE_OPTION_CLASS =
+  'border-hairline has-[:checked]:border-blue-deep has-[:checked]:bg-blue-tint flex cursor-pointer items-center gap-1.5 rounded-[var(--r-sm)] border px-2 py-1 text-xs';
+---
+
+<Layout title={`${pack.name} — Packsheet`} description={`Build and weigh ${pack.name}.`}>
+  <GearNav />
+  <main class="mx-auto max-w-5xl px-6 py-10">
+    <div class="flex flex-wrap items-baseline justify-between gap-4">
+      <div>
+        <h1 class="text-3xl">{pack.name}</h1>
+        {tripTypeLabel !== '' && <p class="text-ink-3 mt-1 text-sm">{tripTypeLabel}</p>}
+      </div>
+      <a href={PACKS_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline">
+        All packs
+      </a>
+    </div>
+
+    {
+      writeError && (
+        <p role="alert" class={ALERT_CLASS}>
+          {writeError}
+        </p>
+      )
+    }
+
+    {
+      /* The summary. Base, worn and consumable are the partition computeTotals guarantees —
+         the three add up to the total by definition, not by coincidence — so they are
+         rendered together rather than as one figure with the others hidden behind a link. */
+    }
+    <section aria-labelledby="summary-heading" class={PANEL_CLASS}>
+      <h2 id="summary-heading" class="sr-only">Pack totals</h2>
+      <dl class="flex flex-wrap gap-x-10 gap-y-4">
+        {
+          WEIGHT_BUCKETS.map((bucket) => (
+            <div>
+              <dt class="text-ink-3 text-xs tracking-wide uppercase">{BUCKET_LABELS[bucket]}</dt>
+              <dd class={`numeric mt-1 text-lg font-medium ${BUCKET_TEXT_CLASS[bucket]}`}>
+                {formatWeight(totals[bucket], weightSystem)}
+              </dd>
+            </div>
+          ))
+        }
+        <div>
+          <dt class="text-ink-3 text-xs tracking-wide uppercase">Total</dt>
+          <dd class="numeric text-ink mt-1 text-lg font-medium">
+            {formatWeight(totals.total, weightSystem)}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-ink-3 text-xs tracking-wide uppercase">Packed</dt>
+          <dd class="numeric text-ink mt-1 text-lg font-medium">
+            {totals.packedCount} / {totals.itemCount}
+          </dd>
+        </div>
+        {
+          /* One entry per currency, never a single number: src/lib/money.ts refuses to
+             invent an exchange rate, so a pack holding GBP and USD gear has two costs and
+             saying so is the only honest rendering. */
+          prices.length > 0 && (
+            <div>
+              <dt class="text-ink-3 text-xs tracking-wide uppercase">Cost</dt>
+              <dd class="numeric text-ink mt-1 text-lg font-medium">
+                {prices.map((money) => formatMoney(money)).join(' · ')}
+              </dd>
+            </div>
+          )
+        }
+      </dl>
+    </section>
+
+    {
+      /* Pack details. One form, three fields, one write — see updatePack's own comment for
+         why name, description and trip type are saved together rather than by three
+         setters. */
+    }
+    <section aria-labelledby="details-heading" class={PANEL_CLASS}>
+      <h2 id="details-heading" class="text-lg">Pack details</h2>
+      <form method="POST" class="mt-4 space-y-4">
+        <input type="hidden" name="intent" value={PACK_INTENT.savePack} />
+        <div>
+          <label for="pack-name" class={LABEL_CLASS}>
+            Name <span aria-hidden="true" class="text-rust">*</span>
+          </label>
+          <input
+            id="pack-name"
+            name={PACK_FORM_FIELD.name}
+            type="text"
+            value={packValues.name}
+            aria-required="true"
+            aria-describedby={packErrors.name ? 'pack-name-error' : undefined}
+            aria-invalid={packErrors.name ? 'true' : undefined}
+            class={INPUT_CLASS}
+          />
+          {
+            packErrors.name && (
+              <p id="pack-name-error" class={ERROR_CLASS}>
+                {packErrors.name}
+              </p>
+            )
+          }
+        </div>
+        <div>
+          <label for="pack-description" class={LABEL_CLASS}>Description</label>
+          <textarea id="pack-description" name={PACK_FORM_FIELD.description} class={TEXTAREA_CLASS}
+            >{packValues.description}</textarea
+          >
+        </div>
+        <div>
+          <label for="pack-trip-type" class={LABEL_CLASS}>Trip type</label>
+          {
+            /* A <select> whose FIRST option is blank and whose second is the stored value
+               when this product does not recognise it. That middle option is the whole
+               reason packTripTypeOptions exists: `packs.trip_type` has no CHECK constraint,
+               imports (PK-33, PK-65) bring their own vocabularies, and a <select> missing
+               its own bound value silently displays and submits its first option — so the
+               next unrelated save would write null over a value the visitor never touched. */
+          }
+          <select id="pack-trip-type" name={PACK_FORM_FIELD.tripType} class={INPUT_CLASS}>
+            {
+              tripTypeOptions.map((option) => (
+                <option value={option.value} selected={option.value === packValues.trip_type}>
+                  {option.label}
+                </option>
+              ))
+            }
+          </select>
+        </div>
+        <button type="submit" class={PRIMARY_BUTTON_CLASS}>Save details</button>
+      </form>
+    </section>
+
+    {
+      /* The categories, in `position` then `id` order — applied by loadPackForEdit, which
+         is where that tie-break lives, because ties are legal (the column is deliberately
+         not unique) and the two sides have to agree on how they resolve.
+
+         REORDERING IS NOT ON THIS PAGE YET, and its absence is a decision rather than an
+         omission: PK-41's drag-and-drop island is pointer-only by design, and the endpoint
+         it posts to (PACK_REORDER_PATH) already exists. Until it lands, a category's place
+         is where it was created and an item's is where it was added — both appended at the
+         end, which is what makes the order predictable without a control. */
+    }
+    <section aria-labelledby="categories-heading" class="mt-10">
+      <h2 id="categories-heading" class="text-xl">Categories</h2>
+
+      {
+        packIsEmpty ? (
+          <div class="border-hairline bg-surface mt-4 rounded-[var(--r)] border px-6 py-12 text-center">
+            {/* A pack with no categories is a valid, ordinary state — a pack somebody made
+                a minute ago — and not an error. It renders as an invitation, and every
+                total above it reads zero, which is the truth about an empty pack. */}
+            <p class="text-ink-2">This pack has no categories yet.</p>
+            <p class="text-ink-3 mt-2 text-sm">
+              Categories are how a pack is grouped — Shelter, Sleep, Cooking, or whatever matches
+              the trip. Add one below, then fill it from your closet.
+            </p>
+          </div>
+        ) : (
+          <ul class="mt-4 space-y-6">
+            {totals.categories.map((categoryTotals) => (
+              <li class="border-hairline bg-surface rounded-[var(--r)] border">
+                <div class="border-hairline flex flex-wrap items-end justify-between gap-4 border-b p-5">
+                  <form method="POST" class="flex flex-1 flex-wrap items-end gap-3">
+                    <input type="hidden" name="intent" value={PACK_INTENT.renameCategory} />
+                    <input
+                      type="hidden"
+                      name={PACK_EDITOR_FIELD.categoryId}
+                      value={categoryTotals.id}
+                    />
+                    <div class="min-w-48 flex-1">
+                      <label for={`category-name-${categoryTotals.id}`} class={LABEL_CLASS}>
+                        Category name
+                      </label>
+                      <input
+                        id={`category-name-${categoryTotals.id}`}
+                        name={PACK_CATEGORY_FORM_FIELD.name}
+                        type="text"
+                        value={categoryTotals.name}
+                        aria-describedby={
+                          renameError?.categoryId === categoryTotals.id
+                            ? `category-name-error-${categoryTotals.id}`
+                            : undefined
+                        }
+                        aria-invalid={
+                          renameError?.categoryId === categoryTotals.id ? 'true' : undefined
+                        }
+                        class={INPUT_CLASS}
+                      />
+                      {renameError?.categoryId === categoryTotals.id && (
+                        <p id={`category-name-error-${categoryTotals.id}`} class={ERROR_CLASS}>
+                          {renameError.message}
+                        </p>
+                      )}
+                    </div>
+                    <button type="submit" class={QUIET_BUTTON_CLASS}>
+                      Rename
+                    </button>
+                  </form>
+
+                  <p class="text-ink-2 numeric text-sm">
+                    <span class={`font-medium ${BUCKET_TEXT_CLASS.base}`}>
+                      {formatWeight(categoryTotals.base, weightSystem)}
+                    </span>
+                    <span class="text-ink-3"> base of </span>
+                    <span class="text-ink font-medium">
+                      {formatWeight(categoryTotals.total, weightSystem)}
+                    </span>
+                  </p>
+
+                  {pendingCategoryDelete === categoryTotals.id ? null : (
+                    <form method="POST">
+                      <input type="hidden" name="intent" value={PACK_INTENT.deleteCategory} />
+                      <input
+                        type="hidden"
+                        name={PACK_EDITOR_FIELD.categoryId}
+                        value={categoryTotals.id}
+                      />
+                      <button type="submit" class={DANGER_BUTTON_CLASS}>
+                        Delete category
+                      </button>
+                    </form>
+                  )}
+                </div>
+
+                {/* The reveal half of the two-step, rendered in place of the row's own
+                    delete button and naming the cascade BEFORE it happens. pack_items
+                    references pack_categories ON DELETE CASCADE (core_schema.sql:303), so
+                    deleting a category takes every item in it; a visitor who only meant to
+                    tidy a heading has to be told that in the same breath as being asked.
+                    No client-side confirm() anywhere in this — see the identical reveal on
+                    the two gear pages, whose gate this shares. */}
+                {pendingCategory?.id === categoryTotals.id && (
+                  <div class="border-rust/40 bg-rust/10 border-b px-5 py-4">
+                    <h3 class="text-rust text-base">Confirm delete</h3>
+                    <p class="text-ink-2 mt-2 text-sm">
+                      Delete “{categoryTotals.name}” permanently?{' '}
+                      {categoryTotals.items.length === 0
+                        ? 'It holds no items.'
+                        : `Its ${categoryTotals.items.length} item${categoryTotals.items.length === 1 ? '' : 's'} will be removed from this pack with it.`}{' '}
+                      This cannot be undone. Your closet is not affected — a pack item points at
+                      your gear and never owns it.
+                    </p>
+                    <div class="mt-4 flex flex-wrap gap-3">
+                      <form method="POST">
+                        <input type="hidden" name="intent" value={PACK_INTENT.deleteCategory} />
+                        <input
+                          type="hidden"
+                          name={PACK_EDITOR_FIELD.categoryId}
+                          value={categoryTotals.id}
+                        />
+                        {/* Value from the same constant confirmsGearDeletion compares
+                            against, never a bare "1": the writer and the reader of this
+                            gate must not be able to drift apart. */}
+                        <input
+                          type="hidden"
+                          name={BULK_FORM_FIELD.confirm}
+                          value={GEAR_DELETE_CONFIRMATION_VALUE}
+                        />
+                        <button type="submit" class={CONFIRM_BUTTON_CLASS}>
+                          Delete category and its items
+                        </button>
+                      </form>
+                      <a
+                        href={selfPath}
+                        class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
+                      >
+                        Cancel
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                {categoryTotals.items.length === 0 ? (
+                  <p class="text-ink-3 px-5 py-6 text-sm">
+                    Nothing in here yet. Add something from your closet below, or a one-off item.
+                  </p>
+                ) : (
+                  <ul class="divide-hairline divide-y">
+                    {categoryTotals.items.map((item) => {
+                      // The stored row behind this line, for the controls; every NUMBER
+                      // beside them comes from `item`, which is computeTotals' own rollup.
+                      const row = itemRows.get(item.id);
+                      const values =
+                        itemError?.itemId === item.id
+                          ? itemError.values
+                          : row
+                            ? packItemToFormValues(row)
+                            : null;
+                      return (
+                        <li class="px-5 py-4">
+                          <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+                            <p class="text-ink min-w-0 font-medium">
+                              {/* `name` is null only for a row whose gear was deleted and
+                                  whose snapshot carried no name — unreachable through this
+                                  product's write paths, but ResolvedPackItem types it as
+                                  nullable and inventing a name here would be inventing
+                                  data. */}
+                              {item.name ?? 'Unnamed item'}
+                              {item.source === 'snapshot' && (
+                                <span class="text-ink-3 ml-2 text-xs font-normal">
+                                  one-off item
+                                </span>
+                              )}
+                            </p>
+                            <p class="numeric text-sm">
+                              <span class={`font-medium ${BUCKET_TEXT_CLASS[item.bucket]}`}>
+                                {formatWeight(item.lineWeightGrams, weightSystem)}
+                              </span>
+                              {item.quantity > 1 && (
+                                <span class="text-ink-3">
+                                  {' '}
+                                  ({formatWeight(item.unitWeightGrams, weightSystem)} each)
+                                </span>
+                              )}
+                              {item.linePrice !== null && (
+                                <span class="text-ink-3"> · {formatMoney(item.linePrice)}</span>
+                              )}
+                            </p>
+                          </div>
+
+                          {values !== null && (
+                            <form method="POST" class="mt-3 flex flex-wrap items-center gap-3">
+                              <input type="hidden" name="intent" value={PACK_INTENT.saveItem} />
+                              <input
+                                type="hidden"
+                                name={PACK_EDITOR_FIELD.itemId}
+                                value={item.id}
+                              />
+
+                              <label class="text-ink-2 flex items-center gap-2 text-sm">
+                                <span>Qty</span>
+                                <input
+                                  name={PACK_ITEM_FORM_FIELD.quantity}
+                                  type="text"
+                                  inputmode="numeric"
+                                  value={values.quantity}
+                                  aria-label={`Quantity of ${item.name ?? 'this item'}`}
+                                  aria-invalid={
+                                    itemError?.itemId === item.id && itemError.errors.quantity
+                                      ? 'true'
+                                      : undefined
+                                  }
+                                  class="border-hairline bg-surface text-ink aria-invalid:border-rust w-16 rounded-[var(--r-sm)] border px-2 py-1 text-sm"
+                                />
+                              </label>
+
+                              {/* ONE CONTROL, THREE OPTIONS — never two checkboxes. The
+                                  fourth combination two checkboxes make easiest to produce
+                                  (worn AND consumable) is refused by
+                                  pack_items_worn_consumable_exclusive and would make the
+                                  pack's own totals throw on read. A radio group cannot
+                                  express it at all: the browser itself refuses to let two
+                                  radios of one name be checked. See PACK_ITEM_CARRIAGES. */}
+                              <fieldset class="flex flex-wrap items-center gap-2">
+                                <legend class="sr-only">
+                                  How {item.name ?? 'this item'} is carried
+                                </legend>
+                                {PACK_ITEM_CARRIAGES.map((carriage) => (
+                                  <label
+                                    class={CARRIAGE_OPTION_CLASS}
+                                    title={PACK_ITEM_CARRIAGE_MEANINGS[carriage]}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={PACK_ITEM_FORM_FIELD.carriage}
+                                      value={carriage}
+                                      checked={carriage === values.carriage}
+                                      aria-invalid={
+                                        itemError?.itemId === item.id && itemError.errors.carriage
+                                          ? 'true'
+                                          : undefined
+                                      }
+                                    />
+                                    {PACK_ITEM_CARRIAGE_LABELS[carriage]}
+                                  </label>
+                                ))}
+                              </fieldset>
+
+                              <label class="text-ink-2 flex items-center gap-2 text-sm">
+                                <input
+                                  type="checkbox"
+                                  name={PACK_ITEM_FORM_FIELD.packed}
+                                  value="on"
+                                  checked={values.packed !== ''}
+                                  class="accent-blue"
+                                />
+                                Packed
+                              </label>
+
+                              <button type="submit" class={QUIET_BUTTON_CLASS}>
+                                Save
+                              </button>
+                            </form>
+                          )}
+
+                          {itemError?.itemId === item.id && (
+                            <ul class="mt-2 space-y-1">
+                              {Object.entries(itemError.errors).map(([, message]) => (
+                                <li class={ERROR_CLASS}>{message}</li>
+                              ))}
+                            </ul>
+                          )}
+
+                          <form method="POST" class="mt-2">
+                            <input type="hidden" name="intent" value={PACK_INTENT.removeItem} />
+                            <input type="hidden" name={PACK_EDITOR_FIELD.itemId} value={item.id} />
+                            <button
+                              type="submit"
+                              class="text-ink-3 hover:text-rust text-xs underline transition-colors"
+                            >
+                              Remove {item.name ?? 'this item'} from this pack
+                            </button>
+                          </form>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        )
+      }
+
+      <form method="POST" class={PANEL_CLASS}>
+        <input type="hidden" name="intent" value={PACK_INTENT.createCategory} />
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
+          <div class="flex-1">
+            <label for="new-category-name" class={LABEL_CLASS}>
+              New category <span aria-hidden="true" class="text-rust">*</span>
+            </label>
+            <input
+              id="new-category-name"
+              name={PACK_CATEGORY_FORM_FIELD.name}
+              type="text"
+              value={categoryValues.name}
+              placeholder="Shelter"
+              aria-required="true"
+              aria-describedby={categoryErrors.name ? 'new-category-error' : undefined}
+              aria-invalid={categoryErrors.name ? 'true' : undefined}
+              class={INPUT_CLASS}
+            />
+            {
+              categoryErrors.name && (
+                <p id="new-category-error" class={ERROR_CLASS}>
+                  {categoryErrors.name}
+                </p>
+              )
+            }
+          </div>
+          <button type="submit" class={PRIMARY_BUTTON_CLASS}>Add category</button>
+        </div>
+      </form>
+    </section>
+
+    {
+      /* Adding things. Both forms need a category to put something in, so both are hidden
+         while the pack has none — with the reason said out loud rather than left as a
+         disabled control nobody can explain. */
+    }
+    {
+      packIsEmpty ? null : (
+        <section aria-labelledby="add-heading" class="mt-10">
+          <h2 id="add-heading" class="text-xl">
+            Add to this pack
+          </h2>
+
+          {/* THE CLOSET PICKER. It reads the closet through loadGearCloset — the same
+              function src/pages/gear/index.astro uses — rather than growing a second read
+              of gear_items here. Name, brand and weight are shown together because two
+              closet items called "Stakes" are told apart by the other two, and a picker
+              that shows only a name makes the visitor guess.
+
+              THE SAME ITEM MAY BE ADDED MORE THAN ONCE, and nothing here prevents it: rows
+              already in this pack are neither hidden nor disabled, and parseGearItemIds
+              does not de-duplicate a repeated tick. Two of the same stuff sack, a spare
+              carried both worn and packed, one fuel canister for two legs — see
+              addGearItemsToCategory's own comment. */}
+          <div class={PANEL_CLASS}>
+            <h3 class="text-lg">From your closet</h3>
+
+            {closetError && (
+              <p role="alert" class={ALERT_CLASS}>
+                {CLOSET_LOAD_ERROR}
+              </p>
+            )}
+
+            {/* A plain GET form, so a search is a bookmarkable navigation and needs no
+                script — the same shape the closet's own filter bar takes. It posts back to
+                this pack's URL, so the picker's search survives in the address bar and in
+                the 303 every write on this page redirects to. */}
+            <form method="GET" action={packPath(id)} class="mt-4 flex flex-wrap items-end gap-3">
+              <div class="min-w-48 flex-1">
+                <label for="closet-search" class={LABEL_CLASS}>
+                  Search your closet
+                </label>
+                <input
+                  id="closet-search"
+                  name="q"
+                  type="search"
+                  value={pickerQuery.search}
+                  placeholder="Search name or brand"
+                  class={INPUT_CLASS}
+                />
+              </div>
+              <button type="submit" class={QUIET_BUTTON_CLASS}>
+                Search
+              </button>
+            </form>
+
+            {closetItems.length === 0 ? (
+              <p class="text-ink-3 mt-4 text-sm">
+                {pickerQuery.search === ''
+                  ? 'Your closet is empty. Anything you add below as a one-off item stays in this pack only.'
+                  : 'No closet items match that search.'}
+              </p>
+            ) : (
+              <form method="POST" class="mt-4">
+                <input type="hidden" name="intent" value={PACK_INTENT.addGear} />
+                <fieldset>
+                  <legend class="sr-only">Closet items to add</legend>
+                  <ul class="divide-hairline border-hairline divide-y rounded-[var(--r-sm)] border">
+                    {closetItems.map((gearItem) => (
+                      <li>
+                        <label class="hover:bg-sunk flex flex-wrap items-baseline gap-x-4 gap-y-1 px-3 py-2 text-sm transition-colors">
+                          <input
+                            type="checkbox"
+                            name={PACK_EDITOR_FIELD.gearItemId}
+                            value={gearItem.id}
+                            class="accent-blue"
+                          />
+                          <span class="text-ink font-medium">{gearItem.name}</span>
+                          <span class="text-ink-3">{gearItem.brand ?? '—'}</span>
+                          <span class="numeric text-ink-2 ml-auto">
+                            {formatWeight(gearItem.weight_grams, weightSystem)}
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                </fieldset>
+
+                <div class="mt-4 flex flex-wrap items-end gap-3">
+                  <div>
+                    <label for="add-gear-category" class={LABEL_CLASS}>
+                      Add to category
+                    </label>
+                    <select
+                      id="add-gear-category"
+                      name={PACK_EDITOR_FIELD.categoryId}
+                      class={INPUT_CLASS}
+                    >
+                      {categories.map((category) => (
+                        <option value={category.id}>{category.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button type="submit" class={PRIMARY_BUTTON_CLASS}>
+                    Add selected
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {closetTotalPages > 1 && (
+              <nav aria-label="Closet pages" class="mt-4 flex items-center gap-3">
+                {closetPage > 1 && (
+                  <a href={pickerPageHref(closetPage - 1)} class={QUIET_BUTTON_CLASS}>
+                    Previous
+                  </a>
+                )}
+                <p class="text-ink-3 text-sm">
+                  Page {closetPage} of {closetTotalPages}
+                </p>
+                {closetPage < closetTotalPages && (
+                  <a href={pickerPageHref(closetPage + 1)} class={QUIET_BUTTON_CLASS}>
+                    Next
+                  </a>
+                )}
+              </nav>
+            )}
+          </div>
+
+          {/* THE ONE-OFF ITEM. A pack_items row with a snapshot and no gear reference —
+              nothing here writes to gear_items, which is what keeps a borrowed tent or a
+              bag of trail mix out of a closet the visitor did not ask to grow. Promoting
+              one into the closet later is PK-66's, and the snapshot's own null
+              `gear_item_id` is what makes it offerable.
+
+              `description` is deliberately not on this form: nothing in this editor renders
+              a pack item's description, and a textarea whose value has no reader is a
+              question asked for nothing. The parser accepts its absence as null, which is
+              what a frozen gear row with no description also holds. */}
+          <div class={PANEL_CLASS}>
+            <h3 class="text-lg">A one-off item</h3>
+            <p class="text-ink-3 mt-1 text-sm">
+              Something you are taking on this trip that is not in your closet, and that you do not
+              want to add to it.
+            </p>
+            <form method="POST" class="mt-4 space-y-4">
+              <input type="hidden" name="intent" value={PACK_INTENT.addCustomItem} />
+
+              <div class="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label for="custom-name" class={LABEL_CLASS}>
+                    Name{' '}
+                    <span aria-hidden="true" class="text-rust">
+                      *
+                    </span>
+                  </label>
+                  <input
+                    id="custom-name"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.name}
+                    type="text"
+                    value={customValues.name}
+                    aria-required="true"
+                    aria-describedby={customErrors.name ? 'custom-name-error' : undefined}
+                    aria-invalid={customErrors.name ? 'true' : undefined}
+                    class={INPUT_CLASS}
+                  />
+                  {customErrors.name && (
+                    <p id="custom-name-error" class={ERROR_CLASS}>
+                      {customErrors.name}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label for="custom-brand" class={LABEL_CLASS}>
+                    Brand
+                  </label>
+                  <input
+                    id="custom-brand"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.brand}
+                    type="text"
+                    value={customValues.brand}
+                    class={INPUT_CLASS}
+                  />
+                </div>
+              </div>
+
+              <div class="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label for="custom-category" class={LABEL_CLASS}>
+                    Kind of gear
+                  </label>
+                  <input
+                    id="custom-category"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.category}
+                    type="text"
+                    value={customValues.category}
+                    placeholder="Shelter"
+                    class={INPUT_CLASS}
+                  />
+                </div>
+                {/* The unit is part of what this field IS, so it goes in the label rather
+                    than beside the box — the accessible name and the visible one are then
+                    the same string. Entry is always in the account's base unit and never
+                    scales; /account is where that changes. */}
+                <div>
+                  <label for="custom-weight" class={LABEL_CLASS}>
+                    Weight ({entryUnit})
+                  </label>
+                  <input
+                    id="custom-weight"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.weight}
+                    type="text"
+                    inputmode="decimal"
+                    value={customValues.weight}
+                    aria-describedby={customErrors.weight ? 'custom-weight-error' : undefined}
+                    aria-invalid={customErrors.weight ? 'true' : undefined}
+                    class={INPUT_CLASS}
+                  />
+                  {customErrors.weight && (
+                    <p id="custom-weight-error" class={ERROR_CLASS}>
+                      {customErrors.weight}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label for="custom-quantity" class={LABEL_CLASS}>
+                    Quantity
+                  </label>
+                  <input
+                    id="custom-quantity"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.quantity}
+                    type="text"
+                    inputmode="numeric"
+                    value={customValues.quantity}
+                    aria-describedby={customErrors.quantity ? 'custom-quantity-error' : undefined}
+                    aria-invalid={customErrors.quantity ? 'true' : undefined}
+                    class={INPUT_CLASS}
+                  />
+                  {customErrors.quantity && (
+                    <p id="custom-quantity-error" class={ERROR_CLASS}>
+                      {customErrors.quantity}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div class="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label for="custom-price" class={LABEL_CLASS}>
+                    Price
+                  </label>
+                  <input
+                    id="custom-price"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.price}
+                    type="text"
+                    inputmode="decimal"
+                    value={customValues.price}
+                    aria-describedby={customErrors.price ? 'custom-price-error' : undefined}
+                    aria-invalid={customErrors.price ? 'true' : undefined}
+                    class={INPUT_CLASS}
+                  />
+                  {customErrors.price && (
+                    <p id="custom-price-error" class={ERROR_CLASS}>
+                      {customErrors.price}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label for="custom-currency" class={LABEL_CLASS}>
+                    Currency
+                  </label>
+                  <input
+                    id="custom-currency"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.currency}
+                    type="text"
+                    placeholder="GBP"
+                    value={customValues.currency}
+                    aria-describedby={customErrors.currency ? 'custom-currency-error' : undefined}
+                    aria-invalid={customErrors.currency ? 'true' : undefined}
+                    class={INPUT_CLASS}
+                  />
+                  {customErrors.currency && (
+                    <p id="custom-currency-error" class={ERROR_CLASS}>
+                      {customErrors.currency}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <fieldset>
+                <legend class={LABEL_CLASS}>How it is carried</legend>
+                <div class="mt-1 flex flex-wrap gap-2">
+                  {PACK_ITEM_CARRIAGES.map((carriage) => (
+                    <label
+                      class={CARRIAGE_OPTION_CLASS}
+                      title={PACK_ITEM_CARRIAGE_MEANINGS[carriage]}
+                    >
+                      <input
+                        type="radio"
+                        name={CUSTOM_PACK_ITEM_FORM_FIELD.carriage}
+                        value={carriage}
+                        checked={carriage === customValues.carriage}
+                        aria-describedby={
+                          customErrors.carriage ? 'custom-carriage-error' : undefined
+                        }
+                        aria-invalid={customErrors.carriage ? 'true' : undefined}
+                      />
+                      {PACK_ITEM_CARRIAGE_LABELS[carriage]}
+                    </label>
+                  ))}
+                </div>
+                {customErrors.carriage && (
+                  <p id="custom-carriage-error" class={ERROR_CLASS}>
+                    {customErrors.carriage}
+                  </p>
+                )}
+              </fieldset>
+
+              <div class="flex flex-wrap items-end gap-4">
+                <label class="text-ink-2 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.packed}
+                    value="on"
+                    checked={customValues.packed !== ''}
+                    class="accent-blue"
+                  />
+                  Already packed
+                </label>
+                <div>
+                  <label for="custom-category-id" class={LABEL_CLASS}>
+                    Add to category
+                  </label>
+                  <select
+                    id="custom-category-id"
+                    name={PACK_EDITOR_FIELD.categoryId}
+                    class={INPUT_CLASS}
+                  >
+                    {categories.map((category) => (
+                      <option value={category.id}>{category.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <button type="submit" class={PRIMARY_BUTTON_CLASS}>
+                  Add item
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+      )
+    }
+
+    <section aria-labelledby="pack-actions-heading" class="border-hairline mt-12 border-t pt-8">
+      <h2 id="pack-actions-heading" class="text-lg">This pack</h2>
+
+      <form method="POST" class="mt-4">
+        <input type="hidden" name="intent" value={PACK_INTENT.duplicatePack} />
+        <button type="submit" class={PRIMARY_BUTTON_CLASS}>Duplicate this pack</button>
+        {
+          /* The copy is private, unlocked and freshly slugged whatever the original was, and
+            duplicating a LOCKED pack is the point of the feature rather than an edge case —
+            last summer's frozen trip becoming this year's starting point. The name is
+            copied verbatim: a " (copy)" suffix invented in a migration is a user-facing
+            string no designer would ever find. */
+        }
+        <p class="text-ink-3 mt-2 text-sm">
+          Makes a private, unlocked copy — categories, items and all — and opens it.
+        </p>
+      </form>
+
+      <div class="mt-8">
+        {
+          pendingPackDelete ? (
+            <div class="border-rust/40 bg-rust/10 rounded-[var(--r)] border px-5 py-4">
+              <h3 class="text-rust text-base">Confirm delete</h3>
+              <p class="text-ink-2 mt-2 text-sm">
+                Delete “{pack.name}” permanently? Its {categories.length} categor
+                {categories.length === 1 ? 'y' : 'ies'} and all {totals.itemCount} item
+                {totals.itemCount === 1 ? '' : 's'} go with it. This cannot be undone. Your closet
+                is not affected — deleting a pack removes appearances of gear, never gear.
+              </p>
+              <div class="mt-4 flex flex-wrap gap-3">
+                <form method="POST">
+                  <input type="hidden" name="intent" value={PACK_INTENT.deletePack} />
+                  <input
+                    type="hidden"
+                    name={BULK_FORM_FIELD.confirm}
+                    value={GEAR_DELETE_CONFIRMATION_VALUE}
+                  />
+                  <button type="submit" class={CONFIRM_BUTTON_CLASS}>
+                    Delete pack permanently
+                  </button>
+                </form>
+                <a
+                  href={selfPath}
+                  class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
+                >
+                  Cancel
+                </a>
+              </div>
+            </div>
+          ) : (
+            <form method="POST">
+              <input type="hidden" name="intent" value={PACK_INTENT.deletePack} />
+              <button type="submit" class={DANGER_BUTTON_CLASS}>
+                Delete this pack
+              </button>
+              <p class="text-ink-3 mt-2 text-sm">
+                Deletes this pack, its categories and its items permanently. Your closet is not
+                affected.
+              </p>
+            </form>
+          )
+        }
+      </div>
+    </section>
+  </main>
+</Layout>
