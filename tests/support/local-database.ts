@@ -47,6 +47,7 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
 import type { Database } from '../../src/lib/database.types';
+import { PACK_TREE_SELECT } from '../../src/lib/packs/query';
 import { POSTGREST_MAJOR, type PacksheetClient } from '../../src/lib/supabase';
 
 /**
@@ -299,51 +300,11 @@ export async function createUser(label = 'user'): Promise<TestUser> {
   };
 }
 
-/**
- * The full pack tree, in the shape the share page will ask PostgREST for — see below for
- * why a select no page issues yet lives in tests/ at all.
- *
- * Ordering is applied by packTreeQuery() rather than written here, because PostgREST
- * orders an embedded resource from a separate parameter, not from the select list.
- *
- * EVERY COLUMN THE TOTALS ENGINE READS IS HERE, and that is a requirement rather than
- * generosity. `src/lib/totals.ts` takes `consumable`, `packed`, `price` and `currency`
- * as required fields, and tests/totals.test.ts asserts at compile time that this
- * select's inferred row type is assignable to `PackTreePack` — so dropping one of them
- * from this string fails `tsc --noEmit` rather than quietly changing what a total
- * means. The failure it prevents is not hypothetical: with `price` unselected, a pack
- * whose one deleted gear item carried a snapshot (which DOES capture price, whatever
- * the select asked for) reported that single item's price as the whole pack's cost.
- *
- * WIDENING THIS SELECT PUBLISHES NOTHING. This constant lives in tests/, is used only
- * by this suite, and no share page exists yet. `anon` already holds `grant select on
- * public.gear_items` for the whole table — the migration's grants block records exactly
- * that, along with why column-level grants cannot be used while PostgREST embeds are —
- * so asking for `price` here reads a column anon could already read, and no policy or
- * privilege changes either way.
- *
- * Whether the live share page should EXPOSE prices to anonymous readers was left open
- * when this select was widened, and has since been decided: it should. A price is public,
- * on the same footing as a weight. What a setup cost is a large part of why anyone shares
- * a pack list in the first place — it is the comparison the reader came to make — so
- * there is nothing here to protect. tests/rls-anon.test.ts pins that a public pack really
- * does carry its prices to a stranger, so the decision is checkable rather than merely
- * written down.
- *
- * `notes` and `url` are public too, decided the same way and for the same reason. They
- * are extras an owner chooses to add to an item — a remark, and a link to somewhere the
- * item is sold or written about — and a reader who opened a shared list is welcome to
- * them. Deliberately NOT described here as "the purchase link": that is the common case,
- * not the definition, and a column comment that narrows it would be quoted back as
- * licence to render it as a Buy button. They are not headline fields and the share page
- * should not lead with them, but that is a layout decision rather than a privilege one.
- *
- * What remains of the grants block's known gap is `user_id` alone — the owner's JWT
- * `sub`, which nobody asked for and which lets a stranger group every public pack by
- * author. That one is still Ref 26's to close.
- */
-export const PACK_TREE_SELECT =
-  'id, name, slug, visibility, locked_at, pack_categories(id, name, position, pack_items(id, quantity, worn, consumable, packed, position, overrides, snapshot, gear_items(id, name, brand, weight_grams, price, currency)))';
+// `packTreeQuery` — the anonymous-by-slug read PK-26's share page will issue — is defined
+// below, near the other query helpers. `PACK_TREE_SELECT` it builds on moved to
+// `src/lib/packs/query.ts` in PK-37 (see that module's own comment on the constant for
+// the full history and for why widening it published nothing); this file now imports the
+// constant rather than declaring it, so there is exactly one copy of the select string.
 
 // ---------------------------------------------------------------------------
 // Superuser access — catalogue only
@@ -552,12 +513,21 @@ export async function inRolledBackTransaction<T>(run: (sql: ScopedSql) => Promis
 }
 
 /**
- * The pack tree, ordered, as one PostgREST request.
+ * The full pack tree, by slug, with no owner scope at all — the anonymous-by-slug read
+ * PK-26's public share page will issue. It stays here rather than moving to
+ * `src/lib/packs/query.ts` alongside `PACK_TREE_SELECT`: every function in that module is
+ * OWNER-scoped by construction (see that module's own header, "OWNER SCOPING IS
+ * LOAD-BEARING"), and this one deliberately is not — its whole premise is that
+ * `packs_select_public`, not `packs_select_own`, is what authorises the read. It moves to
+ * PK-26's own module the day that page exists, the same way `PACK_TREE_SELECT` moved here
+ * in PK-37.
  *
  * The `position` columns are deliberately not unique, so ties are broken on `id` to
- * make the result a stable sequence rather than whatever order the rows came back in.
- * Without an explicit order PostgREST emits no ORDER BY at all — which would leave the
- * ordering index, and the `position` column itself, as decoration.
+ * make the result a stable sequence rather than whatever order the rows came back in —
+ * the identical tie-break `src/lib/packs/query.ts`'s `loadPackForEdit` applies, for the
+ * identical reason, spelled out at length in that function's own comment. Without an
+ * explicit order PostgREST emits no ORDER BY at all — which would leave the ordering
+ * index, and the `position` column itself, as decoration.
  */
 export function packTreeQuery(client: PacksheetClient, slug: string) {
   return client

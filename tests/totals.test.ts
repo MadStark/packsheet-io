@@ -3,18 +3,12 @@ import {
   WEIGHT_BUCKETS,
   computeTotals,
   resolvePackItem,
-  type PackTotals,
   type PackTreeCategory,
   type PackTreeGearItem,
   type PackTreeItem,
   type PackTreePack,
   type WeightBucket,
 } from '../src/lib/totals';
-// Type-only, so nothing in tests/support runs here and no Supabase client, `pg` or child
-// process is loaded: this file is as pure as the module it tests. The import exists for
-// the compile-time assertion at the bottom of this file, which is the only honest way to
-// state "the engine consumes what the application actually fetches".
-import type { packTreeQuery } from './support/local-database';
 import type { Json } from '../src/lib/database.types';
 // `money.ts` is pure too, so importing the formatter keeps this file's purity claim
 // intact — and the price rollup is only checkable end to end through it.
@@ -1069,106 +1063,11 @@ describe('price rollups', () => {
 // ---------------------------------------------------------------------------
 // The input shape
 // ---------------------------------------------------------------------------
-
-/**
- * The engine must consume what the one pack-tree select actually fetches, without a
- * hand-written reshaping step in between — that transcription is precisely where a `worn`
- * flag gets dropped on the way from the query to the arithmetic. (`PACK_TREE_SELECT`
- * lives in tests/support/ for now, because the share page that will issue it is Ref 26
- * and does not exist yet; this assertion moves with it when it moves.)
- *
- * Both halves are asserted. The compile-time half below is the load-bearing one, and it
- * now fires in BOTH directions: with no optional properties left on the input types, it
- * fails `tsc --noEmit` if `PACK_TREE_SELECT` is narrowed (a missing column is a missing
- * required property) as well as if the engine grows a field the select does not fetch.
- * Before the four flag and price fields were made required it could only catch the
- * second, which is why a select that had never fetched `consumable` or `price` compiled
- * happily for as long as it did.
- *
- * The runtime half is a literal in the exact shape PostgREST returns — a to-one
- * `gear_items` embed as an OBJECT (core-schema.test.ts pins that against the wire
- * format), embedded arrays for the to-many ones, and every column the select names,
- * including the four whose absence used to be the interesting case.
- */
-describe('the shape PACK_TREE_SELECT returns', () => {
-  type PackTreeRow = NonNullable<Awaited<ReturnType<typeof packTreeQuery>>['data']>[number];
-
-  // If this ever resolves to `never` or to a PostgREST parser error, the assignment below
-  // would pass vacuously; naming the property keeps that honest.
-  type _CategoriesAreEmbedded = PackTreeRow['pack_categories'];
-
-  // The assertion itself: a function accepting the query's row type, satisfied by
-  // computeTotals. Contravariance means this only compiles if PackTreeRow is assignable
-  // to PackTreePack.
-  const _acceptsQueryRows: (row: PackTreeRow) => PackTotals = computeTotals;
-
-  it('totals a row in exactly the shape PACK_TREE_SELECT returns', () => {
-    const row = {
-      id: 'pack-1',
-      name: 'Test pack',
-      slug: 'testpack1234',
-      visibility: 'public',
-      locked_at: null,
-      pack_categories: [
-        {
-          id: 'category-1',
-          name: 'Shelter',
-          position: 0,
-          pack_items: [
-            {
-              id: 'item-1',
-              quantity: 2,
-              worn: false,
-              consumable: false,
-              packed: true,
-              position: 0,
-              overrides: {},
-              snapshot: null,
-              gear_items: {
-                id: 'gear-1',
-                name: 'Gear 1',
-                brand: 'Testbrand',
-                weight_grams: 100,
-                price: 42.5,
-                currency: 'GBP',
-              },
-            },
-            {
-              id: 'item-2',
-              quantity: 1,
-              worn: false,
-              consumable: true,
-              packed: false,
-              position: 1,
-              overrides: {},
-              snapshot: null,
-              gear_items: {
-                id: 'gear-2',
-                name: 'Oats',
-                brand: 'Testbrand',
-                weight_grams: 4.4 * GRAMS.oz,
-                price: null,
-                currency: null,
-              },
-            },
-          ],
-        },
-      ],
-    };
-
-    const totals = computeTotals(row);
-
-    expect(totals.base).toBe(200);
-    expect(totals.itemCount).toBe(3);
-    // The consequence of the widened select, stated rather than left to be discovered:
-    // the consumable item's weight lands in its own bucket instead of in base, the packed
-    // row is counted, and the pack has a price. Every one of these four numbers was the
-    // other answer — 0, 0, everything in base — while the select fetched five columns
-    // fewer, and none of them looked wrong.
-    expect(totals.consumable).toBeCloseTo(4.4 * GRAMS.oz, 9);
-    expect(totals.packedCount).toBe(2);
-    expect(Object.fromEntries(totals.pricesByCurrency)).toEqual({
-      GBP: { amountMinorUnits: 8500, currency: 'GBP' },
-    });
-  });
-});
+//
+// The compile-time assignability assertion that used to live here — "the shape
+// PACK_TREE_SELECT returns", the PackTreeRow type, and the _acceptsQueryRows
+// contravariance trick — moved to tests/packs-query.test.ts in PK-37, alongside
+// PACK_TREE_SELECT itself (src/lib/totals.ts:204-220 has the current pointer and the
+// full history of that move). It is not duplicated here: this file tests the engine in
+// isolation from any particular query, and the query it must stay compatible with now
+// has its own home and its own test file to hold that compatibility in place.

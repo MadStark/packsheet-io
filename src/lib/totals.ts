@@ -202,22 +202,27 @@
  * ---------------------------------------------------------------------------
  *
  * `PackTreePack` and friends below are satisfied, without reshaping, by the result of
- * `packTreeQuery` in tests/support/local-database.ts — the single-round-trip select the
- * share page will issue once Ref 26 writes it.
+ * `PACK_TREE_SELECT` in `src/lib/packs/query.ts` — the single-round-trip select every
+ * reader of a pack tree issues: the composition editor's `loadPackForEdit`, the `/packs`
+ * list's `loadPackList`, and `packTreeQuery` in `tests/support/local-database.ts`, which
+ * stands in for PK-26's public share page until that page is written.
  *
- * That select (`PACK_TREE_SELECT`) currently lives in tests/support/ because the page
- * that will issue it does not exist yet, which is worth saying plainly rather than
- * leaving a reader to discover: production code is documenting its input contract by
- * pointing at a test helper. The pointer moves to the page's own module the day there is
- * one, and the compile-time assertion in tests/totals.test.ts moves with it — what must
- * not happen in the meantime is a second, hand-written select growing up beside it.
+ * That select used to live in tests/support/ because no production module read a pack
+ * yet — this comment used to say so, and named the day the pointer would move: "the day
+ * there is one". PK-37 is that day: `PACK_TREE_SELECT` and the compile-time assignability
+ * assertion both moved to `src/lib/packs/query.ts` and `tests/packs-query.test.ts`
+ * respectively. What must not happen now that it has a real home is the thing that was
+ * already true before — a second, hand-written select growing up beside it. Read
+ * `PACK_TREE_SELECT`'s own comment for why WIDENING it (as PK-37 did, for the editor's
+ * `description`/`trip_type`) is safe and NARROWING it is not — the assertion below pins
+ * only the narrow direction.
  *
  * The shape is a deliberate constraint on this module rather than a coincidence: an
  * engine whose input needs hand-mapping from the query result puts a second,
  * hand-written transcription of the schema between the database and the arithmetic,
  * and that transcription is exactly where a `worn` flag gets dropped. The
  * types are structural, so a wider select (extra columns, extra embeds) satisfies them
- * too; tests/totals.test.ts pins the assignability at compile time.
+ * too; tests/packs-query.test.ts pins the assignability at compile time.
  *
  * EVERY FIELD THIS ENGINE READS IS REQUIRED, INCLUDING THE NULLABLE ONES. `consumable`,
  * `packed`, `price` and `currency` are not optional properties below: the two flags are
@@ -242,10 +247,10 @@
  *     empty map is visibly nothing; a partial map is a confident wrong number.
  *
  * Making the fields required moves that from a runtime surprise to a compile error, and
- * the compile error lands in the right place: tests/totals.test.ts asserts that
+ * the compile error lands in the right place: tests/packs-query.test.ts asserts that
  * `PACK_TREE_SELECT`'s inferred row type is assignable to `PackTreePack`, which with no
  * optional properties left now fails in BOTH directions — when a select is too narrow, as
- * well as when one is narrowed later. `tests/support/local-database.ts` fetches all four.
+ * well as when one is narrowed later. `src/lib/packs/query.ts` fetches all four.
  */
 
 import type { Json } from './database.types';
