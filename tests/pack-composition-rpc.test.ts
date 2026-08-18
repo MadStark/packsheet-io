@@ -254,6 +254,11 @@ const SIGNATURES = [
   'public.duplicate_pack(uuid)',
 ] as const;
 
+/** The all-zero UUID, used for every argument of the anonymous end-to-end calls below: a
+ *  well-formed id that names no row, so a refusal that ever stops working cannot move or
+ *  copy anything real. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
 describe('the composition RPCs are reachable by authenticated and by nobody else', () => {
   it.each(SIGNATURES)('%s: anon holds no EXECUTE, authenticated does', async (signature) => {
     const [row] = await adminSql<{ anon: boolean; authenticated: boolean; service_role: boolean }>(
@@ -271,21 +276,49 @@ describe('the composition RPCs are reachable by authenticated and by nobody else
   });
 
   /**
-   * The privilege, measured at the surface it protects rather than in the catalogue.
+   * The privilege, measured at the surface it protects rather than in the catalogue, FOR
+   * ALL THREE FUNCTIONS.
    *
    * `has_function_privilege` returning false and `POST /rest/v1/rpc/...` being refused are
-   * two different claims, and PK-57 was the case where the first was believed and the
-   * second was not true. One end-to-end call is what ties them together.
+   * two different claims, and PK-57 was exactly the case where the first was believed and
+   * the second was not true. The whole lesson of that ticket is that the catalogue and the
+   * surface can disagree, which means one end-to-end call proves one function and says
+   * nothing about its neighbours — PostgREST resolves each `rpc/<name>` independently, and
+   * a schema-cache or grant anomaly is per-function. So each signature gets its own call.
+   *
+   * The arguments are all-zero UUIDs on purpose: if the refusal ever stops working, the
+   * call must not be capable of moving or copying anything real. `move_pack_category` and
+   * `duplicate_pack` take fewer arguments than `move_pack_item`, so the payloads are written
+   * out per function rather than shared.
    */
+  // Three separate calls rather than one table driven by `it.each`: the three RPCs have three
+  // different argument types, and a shared table would have to be widened to `any` to satisfy
+  // all of them — which would also stop the compiler noticing the day one of these signatures
+  // changes underneath the test.
   it('refuses an anonymous call to move_pack_item over PostgREST', async () => {
     const { error } = await anonClient().rpc('move_pack_item', {
-      p_pack_id: '00000000-0000-0000-0000-000000000000',
-      p_item_id: '00000000-0000-0000-0000-000000000000',
-      p_to_category_id: '00000000-0000-0000-0000-000000000000',
+      p_pack_id: NIL_UUID,
+      p_item_id: NIL_UUID,
+      p_to_category_id: NIL_UUID,
       p_runs: [] as unknown as Json,
     });
 
-    expect(error, 'the anon key reached the RPC').not.toBeNull();
+    expect(error, 'the anon key reached move_pack_item').not.toBeNull();
+  });
+
+  it('refuses an anonymous call to move_pack_category over PostgREST', async () => {
+    const { error } = await anonClient().rpc('move_pack_category', {
+      p_pack_id: NIL_UUID,
+      p_runs: [] as unknown as Json,
+    });
+
+    expect(error, 'the anon key reached move_pack_category').not.toBeNull();
+  });
+
+  it('refuses an anonymous call to duplicate_pack over PostgREST', async () => {
+    const { error } = await anonClient().rpc('duplicate_pack', { p_pack_id: NIL_UUID });
+
+    expect(error, 'the anon key reached duplicate_pack').not.toBeNull();
   });
 });
 
@@ -477,6 +510,17 @@ describe('a stranger cannot move or duplicate rows that are not theirs', () => {
     if (published.error || published.data?.[0]?.visibility !== 'public') {
       throw new Error('Fixture failed to publish the pack');
     }
+  });
+
+  // PUBLISHED FIXTURES ARE CLEANED UP; PRIVATE ONES NEED NOT BE. `tests/rls-anon.test.ts`
+  // asserts against an UNFILTERED anon select, which PostgREST caps at 1000 rows, so every
+  // public pack left behind by a previous run pushes that file's own fixture closer to
+  // falling off the page — a failure that looks like a policy regression and is not. A
+  // private pack is invisible to that select and costs nothing, which is why only this one
+  // is removed. Deleted rather than set back to private so the categories and items go with
+  // it through ON DELETE CASCADE.
+  afterAll(async () => {
+    await adminSql(`delete from public.packs where id = $1`, [tree.packId]);
   });
 
   it('refuses move_pack_item', async () => {

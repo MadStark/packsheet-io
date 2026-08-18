@@ -77,12 +77,19 @@ import { sortByPosition, type Positioned, type ReorderPlan } from './reorder';
  * the slot is already the answer — which is also why `fromIndex` is `null` rather than
  * `-1` for that case: absent, not "searched for and not found".
  *
- * THE RESULT CANNOT BE NEGATIVE, by construction rather than by a clamp. `insertAt` is at
- * least 0 and `fromIndex` at least 0, so the subtracting branch is reached only when
- * `insertAt > fromIndex >= 0`, i.e. when `insertAt >= 1`. That matters because `readIndex`
- * in `src/lib/packs/reorder-request.ts` refuses a negative outright rather than clamping
- * it, so a negative produced here would reach a visitor as a refused drag rather than as a
- * wrong one — and neither is a thing this function is allowed to produce.
+ * THE RESULT IS NON-NEGATIVE FOR EVERY CALL THE ISLAND MAKES, and that is a PRECONDITION on
+ * the caller rather than a property of this function — the distinction matters because the
+ * function does not check it and cannot: `dropTargetIndex(-1, null)` returns `-1`, and
+ * `dropTargetIndex(-5, 2)` returns `-5`. What holds is the caller's side. `insertAt` comes
+ * from `slotFor` or from a run length, so it is at least 0; `fromIndex` comes from `indexIn`,
+ * which returns `null` rather than `-1` for "not found", so where it is a number it is at
+ * least 0. Under those two facts the subtracting branch is reached only when
+ * `insertAt > fromIndex >= 0`, i.e. `insertAt >= 1`, and the subtraction cannot cross zero.
+ * That matters because `readIndex` in `src/lib/packs/reorder-request.ts` refuses a negative
+ * outright rather than clamping it, so a negative arriving here would reach a visitor as a
+ * refused drag rather than as a wrong one. Guarding it here instead would put a second
+ * opinion about the bottom of a list next to `clampTargetIndex`'s, which the next paragraph
+ * argues against for the top of one.
  *
  * AN OUT-OF-RANGE `insertAt` IS PASSED THROUGH UNCLAMPED, deliberately. `clampTargetIndex`
  * in `reorder.ts` already holds the honest reading of "index 9 of a 4-row category" and
@@ -102,8 +109,9 @@ export function dropTargetIndex(insertAt: number, fromIndex: number | null): num
 /**
  * The shape this module needs from a category: its own `id` and `position`, and its items,
  * each of which needs the same two. Structural rather than an import of `PackTreeRow` —
- * see `ReorderPackRows` in `src/lib/packs/reorder-request.ts` for the same choice and the
- * same argument.
+ * see `ReorderCategoryRows` in `src/lib/packs/reorder-request.ts`, which carries the
+ * "STRUCTURAL, DELIBERATELY" argument for the same choice (`ReorderPackRows` beside it is
+ * just the one-field wrapper).
  */
 export interface PositionedCategory extends Positioned {
   readonly pack_items: readonly Positioned[];
@@ -128,17 +136,26 @@ function repositioned<T extends Positioned>(row: T, positions: ReadonlyMap<strin
  * positions applied, the reparented item moved into its new category, and every run
  * re-sorted through `sortByPosition`.
  *
- * THIS IS THE ISLAND'S ONLY WAY TO CHANGE ITS OWN STATE, which is the whole point of it
- * existing. The tempting shape — splice the row out of one array and into another, and
+ * THIS IS THE ONLY WAY THE ISLAND EVER REARRANGES ITS TREE, which is the whole point of it
+ * existing. Not the only way it ever assigns to that ref — it initialises the ref from its
+ * props, and a failed round trip restores the pre-drag tree with a plain `tree.value =
+ * before` — but neither of those computes an order; one is given one and the other puts back
+ * one it already had. Every actual REARRANGEMENT goes through here. The tempting shape —
+ * splice the row out of one array and into another, and
  * separately compute a plan for the request — is two implementations of "what happens when
  * you drop an item on a category boundary" inside one component, and `reorder.ts`'s header
  * describes exactly how they drift: the screen shows one order and a reload shows another.
  * Going through the plan makes the optimistic render and the wire payload the same
  * decision, taken once.
  *
- * IT IS CALLED TWICE PER DRAG, WITH DIFFERENT PLANS AND THE SAME TREE. First with the
- * island's own prediction, to render the move the instant the pointer is released; then
- * with the plan the endpoint returns, which is a RESULT rather than a prediction and is
+ * IT IS CALLED TWICE PER SUCCESSFUL DRAG, WITH DIFFERENT PLANS AND THE SAME TREE — and once
+ * per drag that is not successful, which is the half worth stating because it is where the
+ * argument below actually earns its keep. First with the island's own prediction, to render
+ * the move the instant the pointer is released; then, ONLY for the `applied` outcome of
+ * `src/lib/packs/reorder-response.ts`'s seven, with the plan the endpoint returns. The other
+ * six carry no plan: three of them put `before` back and three keep the optimistic render
+ * with an error beside it, and in none of the six is this function called a second time.
+ * That second call, when it happens, takes a RESULT rather than a prediction and is
  * applied to the tree the request was computed against rather than to the optimistically
  * updated one — the plan's positions describe the rows as they were read, so applying it
  * on top of a tree that has already moved would apply the move twice. `reorder.ts`'s "BOTH

@@ -13,8 +13,8 @@
  * own layer, and it applies with more force here than to most of them: this is the one
  * place in the product where a request body from a browser is turned into a database
  * write with no form parser in between. `tests/packs-reorder-request.test.ts` calls every
- * rule below directly; the endpoint that uses them is left with authentication, two
- * awaits and a `Response`.
+ * rule below directly; the endpoint that uses them is left with authentication, three
+ * awaits (the body, the read, the RPC) and a `Response`.
  *
  * ---------------------------------------------------------------------------
  * THE WIRE CARRIES AN INTENT, NEVER A POSITION
@@ -44,8 +44,10 @@
  * non-finite index, which is the right behaviour for a pure function whose caller is the
  * island as well as the server, and the wrong behaviour for an HTTP handler, where it is a
  * 500 on a request that deserves a 4xx. `planReorderIntent` catches exactly those and
- * returns the message instead, so the endpoint has no `try` in it and no way to leak a
- * stack trace or a raw PostgREST string to a client.
+ * returns the message instead, so the endpoint's only `try` is the one around
+ * `await request.json()` — a body that is not JSON at all, which is the one failure this
+ * module cannot absorb because it happens before this module is handed anything. Past that
+ * line the endpoint has no way to leak a stack trace or a raw PostgREST string to a client.
  *
  * ---------------------------------------------------------------------------
  * NOT importing src/lib/auth/
@@ -184,10 +186,16 @@ function readId(body: Record<string, unknown>, key: string): string | null {
  *
  * EVERYTHING ELSE IS REFUSED RATHER THAN COERCED. A string, a fraction, a negative, `NaN`
  * and the infinities are none of them a stale index; they are a client that computed
- * something other than an index, and `clampTargetIndex` would silently turn three of the
- * five into "move it to the very top" — a real, wrong write. `Number.isSafeInteger` covers
- * the non-finite cases and the fractional ones in one test, and the `>= 0` is what stops a
- * negative being clamped into a position nobody dropped on.
+ * something other than an index. Handed straight to `clampTargetIndex` they would land in
+ * three different places, and only one of the three is loud: `'3'`, `NaN` and the
+ * infinities all fail its `Number.isFinite` guard and THROW (a `RangeError` the endpoint
+ * then has to launder into a message); `1.7` truncates to a perfectly valid `1`, so a
+ * client that computed a fraction gets a silently plausible move; and a negative is clamped
+ * to `0`, which is "move it to the very top" — a real, wrong write that nobody asked for
+ * and nothing reports. That last one is the case worth refusing here rather than downstream,
+ * and the fraction is worth refusing because a plausible wrong answer hides the client bug
+ * that produced it. `Number.isSafeInteger` covers the non-finite cases and the fractional
+ * ones in one test, and the `>= 0` is what stops the negative.
  */
 function readIndex(body: Record<string, unknown>): number | null {
   const raw = body[REORDER_FIELD.toIndex];

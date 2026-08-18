@@ -200,8 +200,13 @@ let packValuesOverride: PackFormValues | null = null;
 let categoryErrors: Readonly<Record<string, string>> = {};
 let categoryValues: PackCategoryFormValues = EMPTY_PACK_CATEGORY_FORM_VALUES;
 /** A rename that failed validation, scoped to the ONE category it was submitted for, so the
- *  message renders beside that category's own field rather than at the top of a page with
- *  ten forms on it. */
+ *  message renders beside that category's own field rather than at the top of the page.
+ *  There is no fixed number of forms to quote here, and that is the point: this file renders
+ *  eight of its own (seven POST — save pack, create category, add gear, add custom item,
+ *  duplicate, and the two delete-pack steps — plus the closet picker's GET filter), and
+ *  `src/components/PackContents.vue` adds two more per category and two per item. The count
+ *  grows with the pack, so one shared error slot at the top could not say which rename
+ *  failed. */
 let renameError: { readonly categoryId: string; readonly message: string } | null = null;
 let customErrors: Readonly<Record<string, string>> = {};
 let customValues: CustomPackItemFormValues = EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES;
@@ -270,10 +275,30 @@ const selfPath = pickerSearch === '' ? packPath(id) : `${packPath(id)}?${pickerS
 // POST: ten intents.
 //
 // Method discipline: this page answers GET and POST, nothing else — Astro returns 405 for
-// any other method, since no other handler is exported. EVERY state-changing branch
-// redirects with 303, so a refresh can never resubmit a mutation. The branches that do NOT
-// redirect are the two unconfirmed deletes and the validation failures, and none of them
-// has changed anything — which is the entire point of them.
+// any other method, since no other handler is exported. EVERY branch that SUCCEEDS in
+// changing something redirects with 303, so a refresh can never resubmit a mutation the
+// database accepted.
+//
+// FIVE KINDS OF BRANCH FALL THROUGH TO A RE-RENDER INSTEAD, and only the first three of
+// them are guaranteed to have changed nothing:
+//
+//   the two unconfirmed deletes  — the reveal half of category-delete and pack-delete,
+//                                  which issue no statement at all;
+//   the validation failures      — a parser said no before a client was touched;
+//   the missing-row refusals     — CATEGORY_MISSING_MESSAGE / ITEM_MISSING_MESSAGE, where
+//                                  the membership check refused before the write;
+//   the zero-row reports         — NOTHING_DELETED_MESSAGE, PACK_NOT_DELETED_MESSAGE,
+//                                  PARTIAL_ADD_MESSAGE: a statement ran and did less than
+//                                  was asked, so some of these HAVE written;
+//   the write failures           — GENERIC_WRITE_ERROR, DELETE_FAILED_MESSAGE,
+//                                  DUPLICATE_FAILED_MESSAGE, and the unknown-intent case.
+//
+// The last group is the reason DELETE_FAILED_MESSAGE is worded the way it is: a DELETE that
+// commits and then loses its response lands in exactly that branch with the rows already
+// gone. So "nothing has changed" is true of the reveal steps and the refusals, and is NOT a
+// property of falling through in general. What the 303 rule actually buys is narrower and
+// still worth having: no SUCCESSFUL mutation is ever left sitting behind a resubmittable
+// POST, so the duplicate a refresh could create is one this page never leaves reachable.
 // ---------------------------------------------------------------------------
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
@@ -420,7 +445,10 @@ if (Astro.request.method === 'POST') {
       customValues = rawCustomPackItemFormValues(form);
     } else {
       // Nothing on this path writes to gear_items — that is an acceptance criterion of
-      // PK-37 and createCustomPackItem asserts it directly. A one-off item is a pack_items
+      // PK-37. `createCustomPackItem` asserts nothing itself; it is a function, and what
+      // holds the criterion is `tests/packs-mutations.test.ts`, which reads the closet
+      // before and after the call and compares it. That module's own comment on
+      // `createCustomPackItem` attributes it the same way. A one-off item is a pack_items
       // row with a snapshot and no gear reference; putting it in the closet is PK-66's
       // deliberate, separate choice.
       const { error, count } = await createCustomPackItem(
@@ -544,9 +572,17 @@ if (Astro.request.method === 'POST') {
  * value is exactly what was removed, and must not come back: the moment two renderings of
  * one figure can disagree, one of them is lying and nothing on screen says which.
  *
- * It also decides which bucket each item is in, from `worn`/`consumable`, so the coloured
- * marker beside a row and the three subtotals in the summary can never contradict each
- * other — they are the same classification, read twice.
+ * It also decides which bucket each item is in, from `worn`/`consumable` — but note WHERE
+ * that guarantee applies, because it is not here. The coloured marker beside a row and the
+ * three subtotals above it are both rendered by PackContents, from PackContents' OWN
+ * `computeTotals` call over its own tree, which is what makes them one classification read
+ * twice and unable to contradict each other. THIS call is a second, independent caller over
+ * the tree as this request read it, and after a drag has landed in the island the two trees
+ * are deliberately not the same tree any more. That divergence is harmless only because of
+ * what this call is used for: an item COUNT for the delete confirmation at the bottom, and
+ * a reorder moves no item into or out of the pack. Anything else taken from this value would
+ * be a figure that goes stale the first time somebody drags a row, which is exactly the
+ * second summary strip that was removed from this page.
  *
  * It THROWS rather than returning a partial total for a malformed row (a quantity outside
  * its CHECK constraint, a snapshot whose weight is not a number, an item flagged both worn
@@ -756,11 +792,14 @@ const CARRIAGE_OPTION_CLASS =
          `draggable`, no drop target is rendered until the component mounts — see its own
          header. So there is never a window in which a handle is drawn and does nothing.
 
-         The last four props are the POST branch above, made visible: which rename failed,
+         The last THREE props are the POST branch above, made visible: which rename failed,
          which item's settings failed and with what the visitor typed, and which category
          has been asked about but not yet confirmed. The component decides none of them; it
          renders what this request already decided, which is what lets the same markup serve
-         a visitor with no JavaScript at all. */
+         a visitor with no JavaScript at all. `selfPath` above them is not one of those: it
+         is built from this URL's own query string near the top of the frontmatter, on every
+         request including a plain GET, and it is what the Cancel link of a revealed delete
+         goes back to. */
     }
     <PackContents
       client:visible

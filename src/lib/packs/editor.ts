@@ -54,8 +54,10 @@
 // ---------------------------------------------------------------------------
 
 /**
- * The ten forms `src/pages/packs/[id].astro` answers on one POST handler, told apart by a
- * hidden `intent` field — the same mechanism that page's gear siblings use for their two,
+ * The ten INTENTS `src/pages/packs/[id].astro` answers on one POST handler, told apart by a
+ * hidden `intent` field. Ten intents, not ten forms: several of them are rendered once per
+ * category or once per item, so the number of `<form>` elements on the page grows with the
+ * pack while this list stays fixed. Same mechanism that page's gear siblings use for their two,
  * and `BULK_FORM_FIELD.intent` in `src/lib/gear/bulk.ts` for the closet list's several.
  *
  * WHY THIS IS HERE RATHER THAN IN THE PAGE, which is where it started and where it belonged
@@ -98,8 +100,14 @@ export type PackIntent = (typeof PACK_INTENT)[keyof typeof PACK_INTENT];
  * about what a field is called.
  *
  * `gearItemId` IS REPEATED — one `<input type="checkbox" name="gear_item_id" value="…">`
- * per ticked closet row — hence `form.getAll(...)` in `parseGearItemIds` below, exactly as
- * `BULK_FORM_FIELD.id` is read in `src/lib/gear/bulk.ts`.
+ * per ticked closet row — so it has to be read with `form.getAll(...)` rather than
+ * `form.get(...)`, which would see only the first tick. That call is at the CALLER:
+ * `src/pages/packs/[id].astro:392` does `parseGearItemIds(form.getAll(PACK_EDITOR_FIELD.gearItemId))`.
+ * `parseGearItemIds` below takes the resulting array and never touches a `FormData` itself —
+ * which is what keeps it testable, since `vitest.config.ts:64` excludes the page that
+ * assembles the argument. `src/lib/gear/bulk.ts:198` reads `BULK_FORM_FIELD.id` the same way
+ * for the closet's own bulk actions, there from inside the parser because that one is handed
+ * the whole form.
  */
 export const PACK_EDITOR_FIELD = {
   categoryId: 'category_id',

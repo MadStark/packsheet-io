@@ -678,6 +678,12 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
    *  running. */
   const SELF_PATH = `/packs/${PACK_ID}?q=tarp`;
 
+  /** The per-row delete control, as it renders. The `sr-only` span is what distinguishes it
+   *  from every other "Delete category" on the page for somebody listening rather than
+   *  looking, and matching on it here means this marker cannot also match the confirmation
+   *  step's "Delete category and its items". */
+  const DELETE_CATEGORY_BUTTON = 'Delete category <span class="sr-only"';
+
   const tree: TreeCategory[] = [
     category(CATEGORY_ID, 0, [
       item(ITEM_ID, 0, {
@@ -823,8 +829,12 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     // Cancel goes back to the URL the page was on, picker query and all.
     expect(html).toContain(`href="${SELF_PATH}"`);
     // The confirmation replaces that category's own delete button and leaves the other
-    // category's alone: one plain "Delete category" left, not two.
-    expect(html.split('>Delete category</button>')).toHaveLength(2);
+    // category's alone: one plain "Delete category" left, not two. Matched on the
+    // visually-hidden suffix rather than on "</button>", because each of these buttons now
+    // carries the category name inside it — see the component's own note on why a page full
+    // of identically-named controls is a screen-reader problem, and why the visible label
+    // still has to come first (WCAG 2.5.3).
+    expect(html.split(DELETE_CATEGORY_BUTTON)).toHaveLength(2);
   });
 
   it('renders no confirmation at all when nothing has been asked about', async () => {
@@ -832,7 +842,7 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     expect(html).not.toContain('Confirm delete');
     expect(html).not.toContain('Delete category and its items');
     expect(html).not.toContain(hidden(BULK_FORM_FIELD.confirm, GEAR_DELETE_CONFIRMATION_VALUE));
-    expect(html.split('>Delete category</button>')).toHaveLength(3);
+    expect(html.split(DELETE_CATEGORY_BUTTON)).toHaveLength(3);
   });
 
   /** A failed rename renders beside the field it was typed into, not at the top of a page
@@ -863,6 +873,62 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     // The carriage the submission carried, not the stored `carried` — a re-render that
     // silently reverted it would invite the visitor to save the revert back.
     expect(html).toMatch(/name="carriage" value="worn"[^>]*checked/);
+  });
+
+  /**
+   * `aria-invalid` WITHOUT `aria-describedby` TELLS SOMEBODY THE FIELD IS WRONG AND NOT WHY.
+   * The category rename above has always paired the two; the item row did not until PK-37's
+   * independent review, and the failure is invisible to everyone who can see the red sentence
+   * sitting underneath. The message `<li>` carries an `id` per FAILED FIELD, so the control
+   * points at its own sentence rather than at the whole list.
+   */
+  it('describes an invalid item field by the message that explains it', async () => {
+    const html = await render({
+      itemError: {
+        itemId: ITEM_ID,
+        errors: { quantity: 'Enter a whole number greater than zero for quantity.' },
+        values: { quantity: '0', carriage: 'worn', packed: 'on' },
+      },
+    });
+
+    expect(html).toContain(`id="item-${ITEM_ID}-error-quantity"`);
+    expect(html).toMatch(
+      new RegExp(`aria-describedby="item-${ITEM_ID}-error-quantity"[^>]*aria-invalid="true"`),
+    );
+  });
+
+  /**
+   * WCAG 2.5.3, Label in Name. The visible label is "Qty"; the accessible name has to contain
+   * that string or a speech-input user saying "click Qty" cannot target the field. It read
+   * "Quantity of {item}" until PK-37's independent review — a name sharing no word with what
+   * is on screen.
+   */
+  it('starts the quantity field’s accessible name with its visible label', async () => {
+    const html = await render();
+    expect(html).toContain('aria-label="Qty for Tarp"');
+    expect(html).not.toContain('aria-label="Quantity of');
+  });
+
+  /**
+   * Two live regions, ALWAYS PRESENT. A region inserted together with its text has no previous
+   * state to differ from, and the announcement is commonly dropped — so `role="status"` and
+   * `role="alert"` are in the server output with nothing in them, waiting.
+   */
+  it('renders both live regions before there is anything to announce', async () => {
+    const html = await render();
+    expect(html).toContain('role="status"');
+    expect(html).toContain('role="alert"');
+  });
+
+  /**
+   * The repeated-name problem, pinned on the control the review named. A pack of forty items
+   * otherwise offers forty buttons called "Save" and nothing tells them apart out of context;
+   * the visible word still comes first, which is what keeps 2.5.3 satisfied.
+   */
+  it('distinguishes the per-row Save buttons by the row they belong to', async () => {
+    const html = await render();
+    expect(html).toContain('Save <span class="sr-only"');
+    expect(html).toContain('Rename <span class="sr-only"');
   });
 
   // CLAIM 2. `draggable` and the grip are gated on `onMounted`, which does not run during

@@ -244,8 +244,8 @@ export interface PackDuplicateResult extends PackRpcResult {
  * function issues exactly one statement, and `tests/packs-mutations.test.ts` asserts the
  * absence of a limit rather than leaving it to be true by accident.
  *
- * FOUR COLUMNS ARE DELIBERATELY NOT WRITTEN, and each has a reason that outlives this
- * function:
+ * FIVE COLUMNS ARE DELIBERATELY NOT WRITTEN, and each has a reason that outlives this
+ * function (the last two share one):
  *
  *   slug        Omitted so `packs.slug`'s own default mints a fresh opaque one
  *               (core_schema.sql:175). Deriving one from the name would leak the title of a

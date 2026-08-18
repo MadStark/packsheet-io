@@ -2,8 +2,11 @@
 --
 -- Nothing here adds a table, a column, a policy or an index. `20260810120000_core_schema.sql`
 -- already carries the whole model — `packs` / `pack_categories` / `pack_items`, their
--- composite foreign keys, their row level security policies, the `set_row_timestamps` and
--- `assert_parent_pack_unlocked` triggers — and this migration adds only the three
+-- composite foreign keys, their row level security policies, the triggers that run
+-- `set_row_timestamps()` and `assert_parent_pack_unlocked()` (those are the FUNCTION names;
+-- the triggers themselves are per-table and named for their table — `pack_items_
+-- set_row_timestamps`, `pack_items_assert_unlocked`, and the `pack_categories_*` pair) —
+-- and this migration adds only the three
 -- operations that need MORE THAN ONE STATEMENT to be correct, which is the only thing the
 -- ordinary Data API cannot express:
 --
@@ -59,8 +62,15 @@
 -- else, so there is no transform between the two that could be written wrong. It is
 -- consumed with `jsonb_to_recordset`, which is what turns a run's `updates` array into the
 -- relation an `update ... from` needs; reorder.ts's own header anticipates exactly that
--- ("one `update ... from jsonb_to_recordset(...)` per run"), which is the other half of why
--- the shape is left alone.
+-- shape, which is the other half of why it is left alone.
+--
+-- NOTE THAT THE RUNS ARE FLATTENED AT THE POINT OF THE WRITE. There is not one `update`
+-- per run: `jsonb_array_elements(p_runs) cross join lateral jsonb_to_recordset(r.value ->
+-- 'updates')` yields every pair of every run as one relation, and a single `update ...
+-- where i.id = u.id` applies the lot. That is point 1 below, taken seriously — the grouping
+-- is consumed by the authorisation checks ABOVE the write and must not reach the write's
+-- `where`, because there the run boundary would skip the one row whose parent has just
+-- changed.
 --
 -- `reparent` is DELIBERATELY NOT PASSED AS JSON. It arrives as two ordinary arguments —
 -- `p_item_id` and `p_to_category_id` — and they are required rather than optional. That is
@@ -572,9 +582,16 @@ begin
   -- than leaving the correctness of the copy resting on a planner rule a reader has to know.
   --
   -- `pg_catalog.gen_random_uuid`, qualified, because `extensions.gen_random_uuid` also
-  -- exists on this stack (pgcrypto, installed by the baseline into `extensions`) and
-  -- `search_path = ''` leaves only `pg_catalog` implicit. The two are equivalent; naming the
-  -- schema means the choice is visible instead of resolved.
+  -- exists on this stack and `search_path = ''` leaves only `pg_catalog` implicit. The
+  -- second one comes from pgcrypto, which NO migration in this repository installs —
+  -- `20260810000000_baseline.sql` creates only `citext` — and which is nonetheless present
+  -- because Supabase preinstalls it into `extensions` when it initialises a database
+  -- (`select extname, extnamespace::regnamespace from pg_extension` on the local stack lists
+  -- citext, pg_net, pg_stat_statements, pgcrypto, supabase_vault and uuid-ossp). That is
+  -- precisely why the qualification matters: the ambiguity is created by the platform rather
+  -- than by anything a reader of these migrations can see, so it will not go away by
+  -- auditing this directory. Since PG13 `gen_random_uuid()` is in core and the two are
+  -- equivalent; naming the schema means the choice is visible instead of resolved.
   --
   -- The `copied` CTE's output is not read by the outer query, and that is fine by
   -- definition: "data-modifying statements in WITH are executed exactly once, and always to
@@ -600,7 +617,8 @@ begin
   -- A SEPARATE STATEMENT, and it has to be one.
   --
   -- Folding this insert into the CTE above would put it in the same command as the category
-  -- insert, and `pack_items_assert_unlocked` — a BEFORE INSERT ROW trigger — resolves its
+  -- insert, and `pack_items_assert_unlocked` — `before insert or update ... for each row`,
+-- so it is the INSERT half of it that fires here — resolves its
   -- parent with `select c.pack_id from pack_categories c where c.id = new.pack_category_id`
   -- against the command's own snapshot. Sibling CTEs cannot see each other's output, so that
   -- lookup would return NULL, the trigger would find no pack to check, and it would wave the

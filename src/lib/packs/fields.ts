@@ -2,9 +2,13 @@
  * The shared vocabulary for pack list composition (PK-37), modelled on
  * `src/lib/gear/fields.ts`: the "what are the valid values" question kept in its own
  * separately-testable file, away from the "how does that turn into a PostgREST query"
- * question. Pure data and pure functions — no import that reaches an SDK, because the
- * pack editor's Vue island renders the trip-type picker and this module ships to the
- * browser with it (see `src/lib/packs/routes.ts`'s header for the full argument).
+ * question. Pure data and pure functions — no import that reaches an SDK, because this
+ * module ships to the browser: `src/components/PackContents.vue` imports its carriage
+ * exports (`PACK_ITEM_CARRIAGES` and the two label maps) for the per-item radio group, and
+ * that component is a hydrated island. The TRIP-TYPE half is not the reason — that picker is
+ * server-rendered in `src/pages/packs/[id].astro`'s own markup and the island never touches
+ * it — but a module ships or does not ship as a whole, so the rule covers everything in this
+ * file. See `src/lib/packs/routes.ts`'s header for the full argument.
  *
  * ---------------------------------------------------------------------------
  * THIS LIST IS NOT A CONSTRAINT, AND THE DIFFERENCE FROM `GEAR_STATUSES` IS THE POINT

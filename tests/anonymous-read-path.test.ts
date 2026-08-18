@@ -583,10 +583,16 @@ const AUTH_CONSUMERS: readonly string[] = [
   // any stranger's public pack for the id alone), readWeightSystem, and loadGearCloset
   // for the closet picker, which is the closet page's own query rather than a second read
   // grown here. On POST it answers ten intents: update() on `packs`, insert()/update()/
-  // delete() on `pack_categories` and `pack_items`, and one rpc('duplicate_pack') — the
-  // only RPC any allowlisted page calls, and `security invoker`, so it runs under the
-  // caller's own policies. Both destructive branches are two-step confirmations that write
-  // nothing on the first submission.
+  // delete() on `pack_categories` and `pack_items`, and one rpc('duplicate_pack') —
+  // `security invoker`, so it runs under the caller's own policies. It is not the only RPC
+  // on this list, and it never was: `src/pages/account/index.astro` reaches
+  // rpc('delete_own_account') through deleteOwnAccount, and `src/pages/packs/reorder.ts`
+  // three entries below calls rpc('move_pack_item') and rpc('move_pack_category'). What is
+  // true of all four is the property that matters here — every one is `security invoker`
+  // except `delete_own_account`, which is `SECURITY DEFINER` and says so at its own
+  // definition, and none of them is reachable without a session. Both of this page's
+  // destructive branches are two-step confirmations that write nothing on the first
+  // submission.
   //
   // THE FIRST ENTRY ON THIS LIST THAT HOSTS A HYDRATED COMPONENT, so it is the first that
   // cannot end "a page, never an island" — and the exception is worth reading carefully,
@@ -615,7 +621,7 @@ const AUTH_CONSUMERS: readonly string[] = [
   // own id and grants nothing to anything it imports (see checkAnonymousReadPath), so
   // `PackContents.vue` stands in front of Invariant A on its own account with no exemption
   // at all: its every import is a pure module — src/lib/packs/{routes,reorder,
-  // reorder-request,drag,editor,form,fields}.ts, src/lib/gear/bulk.ts (for the delete gate's
+  // reorder-request,reorder-response,drag,editor,form,fields}.ts, src/lib/gear/bulk.ts (for the delete gate's
   // own constants, and through it src/lib/gear/fields.ts), src/lib/{totals,units,money}.ts,
   // and `vue` and `lucide-vue-next` themselves — none of which reaches a Supabase client,
   // and an auth import added to any of them fails the build rather than shipping an auth

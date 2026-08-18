@@ -16,8 +16,10 @@
  * ---------------------------------------------------------------------------
  *
  * `vitest.config.ts:64` excludes `src/pages/` from the test run, because every file there
- * becomes a route. `src/lib/gear/form.ts`, `src/lib/packs/query.ts` and
- * `src/lib/packs/routes.ts` each make this argument for their own layer, and it is the
+ * becomes a route. `src/lib/gear/form.ts`, `src/lib/packs/query.ts`,
+ * `src/lib/packs/mutations.ts` and `src/lib/packs/reorder-request.ts` each make this
+ * argument for their own layer (`src/lib/packs/routes.ts` does NOT — its header argues
+ * dependency-freedom, which is a different rule for a different reason), and it is the
  * same argument here: a rule about what makes a pack, a category or a custom item
  * well-formed that is written in `.astro` frontmatter is a rule no test in this repository
  * can execute. PK-4's independent review found exactly that by mutation testing on the
@@ -317,8 +319,8 @@ export interface CustomPackItemFormValues extends PackItemFormValues {
  * A GENERIC WHERE `src/lib/gear/form.ts` HAS ONE HAND-WRITTEN UNION, and that is the one
  * structural departure from it worth flagging up front. That module parses exactly one
  * form and so has exactly one result type; this module parses four, and four copies of the
- * same three-branch union would be three opportunities for one of them to acquire a
- * slightly different `errors` type. The semantics are identical, field for field: on
+ * same two-branch `ok: true | ok: false` union would be three opportunities for one of them
+ * to acquire a slightly different `errors` type. The semantics are identical, field for field: on
  * failure, `values` carries back exactly what the visitor typed — unvalidated, untrimmed —
  * so the page re-renders the form with their own input still in it rather than clearing it
  * back to blank.
@@ -659,9 +661,15 @@ function parsePackItemFields(
   // (20260810120000_core_schema.sql:262)
   //
   // A BLANK QUANTITY IS NOT AN ERROR, following PK-63's treatment of the identical column on
-  // gear_items: the column carries a real default that direct-SQL and RPC write paths
-  // already rely on (duplicate_pack inserts without naming it), so a blank field is "the
-  // visitor did not say, use the default" rather than a stale or tampered request. A
+  // gear_items: the column carries a real default that a write path in this very ticket
+  // already relies on — `addGearItemsToCategory` (src/lib/packs/mutations.ts) inserts
+  // `user_id`, `pack_category_id`, `gear_item_id` and `position` and names no quantity at
+  // all, so every item added from the closet arrives at the default 1. (`duplicate_pack` is
+  // NOT such a path and must not be cited as one: it names `quantity` in its column list and
+  // copies the source row's value, because a copy that reset every quantity to 1 would be a
+  // different pack.) So a blank field here is "the visitor did not say, use the default"
+  // rather than a stale or tampered request, and it produces exactly what the closet-add
+  // path produces for the same column. A
   // NON-BLANK value that fails to parse is still refused — '0', '-1', '1.5', '1e3' and 'abc'
   // all produce QUANTITY_MESSAGE — so blank means "no answer" and malformed means "a wrong
   // answer", and only the first is forgiven.

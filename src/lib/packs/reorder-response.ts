@@ -196,11 +196,14 @@ export const REORDER_SAVED_MESSAGE = 'Order saved.';
  * in front of the Worker, a body that was not JSON, a `{ ok: false }` with the `message`
  * missing.
  *
- * IT IS THE SAME SENTENCE AS THE ENDPOINT'S OWN `REORDER_FAILED_MESSAGE`, deliberately and
- * not by import: `src/pages/packs/reorder.ts` is a route, so nothing may import from it, and
- * inventing a second wording for the identical situation would mean a visitor could see two
- * different sentences depending on whether the endpoint got far enough to write one. If one
- * is ever reworded the other should be too, which is what this paragraph is for.
+ * IT IS THE ENDPOINT'S OWN SENTENCE, AND NOW BY IMPORT RATHER THAN BY AGREEMENT.
+ * `src/pages/packs/reorder.ts` sets its `REORDER_FAILED_MESSAGE` from this constant. The
+ * direction is forced: nothing may import from a route, so the shared copy has to live on
+ * this side of the wire even though the endpoint is the one that usually writes it. Two
+ * spellings of the identical situation would mean a visitor sees a different sentence
+ * depending on whether the endpoint got far enough to put one in the body — which is not a
+ * distinction they can act on, and was previously held together only by a paragraph asking
+ * the next person to reword both.
  */
 export const REORDER_SAVE_FAILED_MESSAGE =
   'That move could not be saved. Reload the pack and try again.';

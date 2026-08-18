@@ -23,9 +23,11 @@
 // is for — see the note at the foot of the list about the action link that is not coming
 // back.
 import { GEAR_PATH } from '../lib/gear/routes';
-// Dependency-free, on exactly the same footing as GEAR_PATH above — see that module's own
-// header, which spells out that this component's ability to import it is one of the two
-// reasons it holds nothing else.
+// Dependency-free, on exactly the same footing as GEAR_PATH above. That module's header
+// names two things it must stay importable BY — src/middleware.ts and PK-37's reorder
+// island — and this component is neither of them; it is simply another beneficiary of the
+// same property, which is the point of the property. A nav that can name a destination
+// without acquiring a dependency is what keeps this file a plain .astro component.
 import { PACKS_PATH } from '../lib/packs/routes';
 import { ACCOUNT_PATH } from '../lib/auth-routes';
 // The wordmark's destination, which used to be a hard-coded "/" and is the single click

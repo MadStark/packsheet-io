@@ -11,7 +11,7 @@
  * ---------------------------------------------------------------------------
  *
  * `vitest.config.ts:64` excludes `src/pages/` from the test run, because every file
- * there becomes a route. `src/pages/account/index.astro:51-55` names the same reasoning
+ * there becomes a route. `src/pages/account/index.astro:111-115` names the same reasoning
  * for `src/lib/account-deletion.ts`, and `src/lib/gear/query.ts`'s own header repeats it
  * for the closet. The composition editor and the pack list are exactly the same shape of
  * problem: which columns to ask for, how to scope a read to its owner, and how to fold a
@@ -212,8 +212,9 @@ export type PackTreeRow = NonNullable<Awaited<ReturnType<typeof _packTreeQuery>>
  * echoed for `pack_items.position` at `:268`). `id` is a `uuid primary key`, always
  * present and always unique, which is what makes it a safe universal tie-break — and it
  * is the same trailing column the read indexes
- * (`pack_categories_pack_id_position_idx`, `pack_items_pack_category_id_position_idx`,
- * both at `:697`-`:699`) already carry, so this ordering comes back sorted from the index
+ * (`pack_categories_pack_id_position_idx` at `:697-698`,
+ * `pack_items_pack_category_id_position_idx` at `:699-700`) already carry, so this ordering
+ * comes back sorted from the index
  * rather than through a sort node.
  */
 export async function loadPackForEdit(client: PacksheetClient, userId: string, packId: string) {

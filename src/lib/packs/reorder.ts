@@ -87,10 +87,15 @@
  *   it makes the payload a copy of the pack and invites the endpoint to write columns the
  *   move never touched.
  *
- * Pairs grouped by run are exactly what an RPC taking a `jsonb` argument wants: one
- * `update ... from jsonb_to_recordset(...)` per run, one statement, one transaction, the
- * shape the migration's "rewrites the affected run of siblings in one statement" sentence
- * describes.
+ * Pairs grouped by run are exactly what an RPC taking a `jsonb` argument wants.
+ * `move_pack_item` takes `plan.runs` verbatim and applies it with ONE statement for ALL
+ * runs, not one per run: `update ... from jsonb_array_elements(p_runs) cross join lateral
+ * jsonb_to_recordset(r.value -> 'updates') ... where i.id = u.id`
+ * (`supabase/migrations/20260818000000_pack_composition_functions.sql`). The grouping is
+ * read BEFORE that statement, to check every `parentId` names a category of this pack, and
+ * is then deliberately flattened away — see the next paragraph for why the run boundary
+ * must not survive into the `where`. One statement, one transaction, which is what the
+ * migration's "rewrites the affected run of siblings in one statement" sentence asks for.
  *
  * THE UPDATES MUST BE MATCHED ON `id` ALONE — NOT ON `(parent, id)`. This is the one
  * thing about the shape that will bite an implementer who does not read this paragraph.
@@ -284,7 +289,8 @@ function clampTargetIndex(toIndex: number, maxIndex: number): number {
  * Refuses a row id that appears more than once across the runs a single move touches —
  * twice in one run, or once in each of two. Either way the resulting plan would give one
  * row two positions and the outcome would depend on the order the RPC applied the pairs
- * in. See the header's fourth throwing case.
+ * in. See the header's third throwing case (the header's four bullets are one clamping
+ * case and three throwing ones).
  */
 function assertDistinctIds(runs: readonly Run<Positioned>[]): void {
   const seen = new Set<string>();
@@ -301,7 +307,7 @@ function assertDistinctIds(runs: readonly Run<Positioned>[]): void {
 }
 
 /** Locates the row being moved, or throws. An id that is not in the run it was said to be
- *  in has no safe interpretation — see the header's third throwing case. */
+ *  in has no safe interpretation — see the header's second throwing case. */
 function indexOfRow(ordered: readonly Positioned[], id: string, parentId: string): number {
   const index = ordered.findIndex((row) => row.id === id);
   if (index === -1) {

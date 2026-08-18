@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, onTestFinished } from 'vitest';
 import { adminSql, createUser, type TestUser } from './support/local-database';
 import {
   addGearItemsToCategory,
@@ -1195,6 +1195,14 @@ describe('the RPC wrappers', () => {
   it('duplicates a pack and hands back the new id', async () => {
     const { user, packId } = await treeFixture('packs-rpc-duplicate');
     await user.client.from('packs').update({ visibility: 'public' }).eq('id', packId);
+    // Published for the length of this test only. An unfiltered anon select is capped at
+    // 1000 rows by PostgREST, and `tests/rls-anon.test.ts` asserts against one, so a public
+    // pack left behind here accumulates until that file's own fixture falls off the page.
+    // The COPY is private by construction (that is half of what this test asserts) and needs
+    // no such treatment.
+    onTestFinished(async () => {
+      await adminSql(`delete from public.packs where id = $1`, [packId]);
+    });
 
     const result = await duplicatePack(user.client, packId);
 

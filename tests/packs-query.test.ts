@@ -1,5 +1,10 @@
-import { describe, expect, it, beforeAll } from 'vitest';
-import { createUser, type TestUser, type PacksheetClient } from './support/local-database';
+import { describe, expect, it, beforeAll, afterAll, onTestFinished } from 'vitest';
+import {
+  adminSql,
+  createUser,
+  type TestUser,
+  type PacksheetClient,
+} from './support/local-database';
 import { createPack } from './support/fixtures';
 import {
   PACK_TREE_SELECT,
@@ -95,6 +100,15 @@ describe('loadPackForEdit: owner scoping', () => {
     // user's pack ends up public, rather than a row inserted by fiat.
     const victimPack = await createPack(victim, { visibility: 'public', itemCount: 1 });
     victimPackId = victimPack.packId;
+  });
+
+  // PUBLIC FIXTURES ARE REMOVED AGAIN; PRIVATE ONES ARE LEFT. `tests/rls-anon.test.ts`
+  // asserts against an UNFILTERED anon select, and PostgREST caps that at 1000 rows, so
+  // every public pack a previous run left behind pushes that file's own fixture towards
+  // falling off the page — a failure that reads as a policy regression and is not one. A
+  // private pack is invisible to that select and costs nothing.
+  afterAll(async () => {
+    await adminSql(`delete from public.packs where id = $1`, [victimPackId]);
   });
 
   it('excludes it for another user, even though the same query minus the owner filter includes it', async () => {
@@ -406,6 +420,12 @@ describe('loadPackList', () => {
     const victim = await createUser('packs-query-list-leak-victim');
     const attacker = await createUser('packs-query-list-leak-attacker');
     const victimPack = await createPack(victim, { visibility: 'public', itemCount: 1 });
+    // See the afterAll above: a public pack left behind erodes tests/rls-anon.test.ts's
+    // unfiltered, 1000-row-capped anon select. This one is scoped to the single test that
+    // needs it.
+    onTestFinished(async () => {
+      await adminSql(`delete from public.packs where id = $1`, [victimPack.packId]);
+    });
 
     const { packs, error } = await loadPackList(attacker.client, attacker.id);
     expect(error).toBeNull();

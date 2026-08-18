@@ -119,6 +119,7 @@ import { GripVertical } from 'lucide-vue-next';
 import {
   REORDER_FIELD,
   REORDER_TARGET,
+  REORDER_UNPLANNABLE_MESSAGE,
   planChangesAnything,
   type ReorderIntent,
 } from '../lib/packs/reorder-request';
@@ -178,8 +179,12 @@ interface ListCategory {
 }
 
 /** A rename that failed validation, scoped to the ONE category it was submitted for, so the
- *  message renders beside that category's own field rather than at the top of a page with
- *  nine forms on it. */
+ *  message renders beside that category's own field rather than at the top of the page. The
+ *  number of forms on that page is not a constant to quote — this component alone renders a
+ *  rename and a delete per category (three when a delete is being confirmed) and a save and
+ *  a remove per item, on top of the eight `src/pages/packs/[id].astro` renders itself — so it
+ *  grows with the pack, and one shared error slot at the top could not say which rename
+ *  failed. */
 interface RenameError {
   readonly categoryId: string;
   readonly message: string;
@@ -222,17 +227,16 @@ const props = defineProps<{
 }>();
 
 // ---------------------------------------------------------------------------
-// Copy. Never a raw PostgREST/Postgres string — the endpoint already collapses those into
-// sentences (see its REORDER_FAILED_MESSAGE), and everything a ROUND TRIP can produce is
-// `src/lib/packs/reorder-response.ts`'s, alongside the branch that produces it. The one
-// sentence left here belongs to a failure that never reaches a round trip at all.
+// Copy. NOT ONE SENTENCE IS SPELLED IN THIS FILE. Everything a round trip can produce is
+// `src/lib/packs/reorder-response.ts`'s, written beside the branch that produces it; the one
+// failure that never reaches a round trip — the shared engine refusing to plan at all — is
+// `REORDER_UNPLANNABLE_MESSAGE` in `src/lib/packs/reorder-request.ts`, IMPORTED above rather
+// than retyped. It used to be retyped here, byte for byte, which is the shape of duplication
+// that survives review precisely because it looks like nothing: the two copies read
+// identically until one of them is reworded, and then the same failure has two wordings
+// depending on whether it was caught on the client or on the server. `planReorderIntent`
+// returns that exact constant for the exact same refusal, so there is one string.
 // ---------------------------------------------------------------------------
-
-/** What the shared engine's own refusals become. `planItemMove` throws on an unknown or
- *  duplicated row id — a tree that has drifted from the database — and none of its messages,
- *  which name row ids, is worth showing to anybody. Same collapse, same reason, as
- *  REORDER_UNPLANNABLE_MESSAGE in `src/lib/packs/reorder-request.ts`. */
-const UNPLANNABLE_MESSAGE = 'That move no longer fits this pack. Reload the pack and try again.';
 
 const BUCKET_LABELS: Record<WeightBucket, string> = {
   base: 'Base weight',
@@ -296,7 +300,7 @@ const pending = shallowRef(false);
 /** The one status line under the list. `ReorderNotice` is imported rather than re-spelled as
  *  an inline object type: every value this ever holds comes out of `reorderNotice`, and two
  *  declarations of one shape is how the `'status'` arm ends up spelled `'success'` on one
- *  side. `UNPLANNABLE_MESSAGE` above is written into the same shape by `fail`. */
+ *  side. `REORDER_UNPLANNABLE_MESSAGE` is written into the same shape by `fail`. */
 const notice = shallowRef<ReorderNotice | null>(null);
 
 type Drag =
@@ -405,7 +409,17 @@ interface ItemRow {
   readonly unitWeightGrams: number;
   readonly linePrice: Money | null;
   readonly values: PackItemFormValues;
-  readonly errors: readonly string[];
+  /**
+   * The failed fields, as `(field, message)` pairs rather than as bare sentences.
+   *
+   * THE FIELD NAME IS WHAT MAKES THE ERROR ANNOUNCEABLE. Each message is rendered in a `<li>`
+   * whose `id` is built from the item id and this field name, and the control that failed
+   * points at exactly that `id` with `aria-describedby`. A flat `string[]` cannot express
+   * that: the list would still render, `aria-invalid="true"` would still be set, and a
+   * screen-reader user would be told the field is invalid and never told why — which is the
+   * state the category rename beside it has always avoided and the item row did not.
+   */
+  readonly errors: readonly { readonly field: string; readonly message: string }[];
   readonly quantityInvalid: boolean;
   readonly carriageInvalid: boolean;
 }
@@ -452,7 +466,10 @@ const rows = computed<CategoryRow[]>(() =>
           // The visitor's own rejected input for the one row that failed, the stored row for
           // every other.
           values: failed === null ? packItemToFormValues(item) : failed.values,
-          errors: failed === null ? [] : Object.values(failed.errors),
+          errors:
+            failed === null
+              ? []
+              : Object.entries(failed.errors).map(([field, message]) => ({ field, message })),
           quantityInvalid: failed?.errors.quantity !== undefined,
           carriageInvalid: failed?.errors.carriage !== undefined,
         };
@@ -462,6 +479,13 @@ const rows = computed<CategoryRow[]>(() =>
 );
 
 const draggable = computed(() => enabled.value && !pending.value);
+
+/** The notice split across the two permanent live regions in the template — see the comment
+ *  there for why the politeness is chosen by which element gets the text rather than by a
+ *  `role` that changes. Empty string rather than null so the region always renders a text
+ *  node and a reader observes a change rather than an insertion. */
+const statusText = computed(() => (notice.value?.kind === 'status' ? notice.value.text : ''));
+const errorText = computed(() => (notice.value?.kind === 'error' ? notice.value.text : ''));
 
 // ---------------------------------------------------------------------------
 // Drag plumbing
@@ -558,6 +582,33 @@ function overItemArea(event: DragEvent, categoryId: string, itemCount: number): 
   marker.value = { kind: 'item', categoryId, insertAt: itemCount };
 }
 
+/**
+ * Clears the drop indicator when the pointer leaves the list entirely.
+ *
+ * WITHOUT THIS THE INDICATOR STAYS DRAWN AT ITS LAST SLOT. Nothing else clears `marker`
+ * until a drop or a `dragend`: drag a row out of the list and over the page around it and
+ * the blue rule sits there naming a destination the pointer is no longer anywhere near, which
+ * is a promise the surface cannot keep — release there and `onDrop` never fires, so the move
+ * does not happen at the slot the line is pointing at.
+ *
+ * THE `relatedTarget` GUARD IS THE WHOLE OF IT, and it is why this is a function rather than
+ * `@dragleave="marker = null"`. `dragleave` fires on every crossing INSIDE the subtree too —
+ * every time the pointer moves from one row to the next, the outer element sees a leave for
+ * the row being left before it sees the enter for the row being entered. Clearing
+ * unconditionally would blank the indicator on every internal boundary and let it flicker
+ * back on the next `dragover`. `relatedTarget` names the node being ENTERED, so a leave whose
+ * destination is still inside this section is an internal crossing and is ignored. A null
+ * `relatedTarget` — the pointer left the document, or the browser declined to say — is
+ * treated as a real exit, which is the safe direction: the indicator disappears, and the next
+ * `dragover` puts it back.
+ */
+function onDragLeave(event: DragEvent): void {
+  const root = event.currentTarget as HTMLElement;
+  const entering = event.relatedTarget;
+  if (entering instanceof Node && root.contains(entering)) return;
+  marker.value = null;
+}
+
 function overCategory(event: DragEvent, index: number): void {
   if (drag.value?.kind !== 'category') return;
   event.preventDefault();
@@ -603,7 +654,7 @@ async function moveItem(
   const from = before.find((category) => category.id === fromCategoryId);
   const to = before.find((category) => category.id === toCategoryId);
   if (from === undefined || to === undefined) {
-    fail(UNPLANNABLE_MESSAGE);
+    fail(REORDER_UNPLANNABLE_MESSAGE);
     return;
   }
 
@@ -621,7 +672,7 @@ async function moveItem(
       toIndex,
     );
   } catch {
-    fail(UNPLANNABLE_MESSAGE);
+    fail(REORDER_UNPLANNABLE_MESSAGE);
     return;
   }
 
@@ -648,7 +699,7 @@ async function moveCategory(categoryId: string, insertAt: number): Promise<void>
   try {
     plan = planCategoryMove({ parentId: props.packId, rows: before }, categoryId, toIndex);
   } catch {
-    fail(UNPLANNABLE_MESSAGE);
+    fail(REORDER_UNPLANNABLE_MESSAGE);
     return;
   }
 
@@ -707,13 +758,17 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
   <!--
     One drop handler for the whole list — see `onDrop`. `dragend` fires on the source element
     whether the drag ended in a drop or was abandoned over a non-target, which is what clears
-    the indicator when somebody thinks better of it mid-drag.
+    the indicator when somebody thinks better of it mid-drag. `dragleave` covers the case in
+    between the two: the pointer is still down and has wandered off the list, where nothing
+    would otherwise take the indicator down — see `onDragLeave` for why it cannot simply
+    assign null.
   -->
   <section
     aria-labelledby="pack-contents-heading"
     class="mt-8"
     @drop.prevent="onDrop"
     @dragend="endDrag"
+    @dragleave="onDragLeave"
   >
     <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
       <h2 id="pack-contents-heading" class="text-xl">Categories</h2>
@@ -763,16 +818,37 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
       </div>
     </dl>
 
+    <!--
+      TWO PERMANENT LIVE REGIONS, AND THE PERMANENCE IS THE POINT. A live region has to be in
+      the accessibility tree BEFORE its content changes: an assistive technology announces the
+      DIFFERENCE between what a region held and what it now holds, so a region that is
+      inserted already carrying its text has no previous state to differ from and the
+      announcement is commonly dropped entirely. That is what `v-if="notice"` on a single
+      element did — the element and its sentence appeared in the same tick, and "Order saved."
+      often went unspoken. Both elements below are always rendered; only their text changes.
+
+      TWO OF THEM RATHER THAN ONE WITH A SWAPPING `role`, for the same reason: changing a
+      live region's role or politeness after it is in the tree is not reliably picked up.
+      Keeping one polite `status` and one assertive `alert` means the politeness is decided by
+      WHICH element receives the text, which is a change assistive technology does observe.
+      Six of the seven outcomes in `src/lib/packs/reorder-response.ts` are errors and belong
+      in the assertive one; only `applied` is a status.
+
+      An empty region is `sr-only` rather than hidden: `display: none` and `hidden` take a
+      region out of the tree, which is the failure this markup exists to avoid, restated.
+    -->
+    <p role="status" :class="statusText === '' ? 'sr-only' : 'text-ink-2 mt-4 text-sm'">
+      {{ statusText }}
+    </p>
     <p
-      v-if="notice"
-      :role="notice.kind === 'error' ? 'alert' : 'status'"
+      role="alert"
       :class="
-        notice.kind === 'error'
-          ? 'border-rust/40 bg-rust/10 text-ink mt-4 rounded-[var(--r-sm)] border px-4 py-3 text-sm'
-          : 'text-ink-2 mt-4 text-sm'
+        errorText === ''
+          ? 'sr-only'
+          : 'border-rust/40 bg-rust/10 text-ink mt-4 rounded-[var(--r-sm)] border px-4 py-3 text-sm'
       "
     >
-      {{ notice.text }}
+      {{ errorText }}
     </p>
 
     <!--
@@ -805,6 +881,25 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
         @dragstart="beginDrag($event, { kind: 'category', id: category.id })"
         @dragover="overCategory($event, categoryIndex)"
       >
+        <!--
+          NOTE THE ASYMMETRY WITH THE ITEM ROW BELOW, WHICH IS DELIBERATE AND IS THE PAIR TO
+          READ TOGETHER. This `dragstart` has NO `.stop`; the item `<li>`'s has one. Both
+          follow from the same fact: an item `<li>` is a DESCENDANT of the category `<li>`, so
+          a `dragstart` on an item bubbles here.
+
+          On the item, `.stop` is load-bearing. Without it every item drag would fire the item
+          handler and then this one, and this one would overwrite `drag` with
+          `{ kind: 'category' }` — after which `overItem` refuses to run (`drag.value?.kind
+          !== 'item'`), no item marker is ever set, and `onDrop` finds a category source with
+          no category marker and returns having done nothing. Item drags would silently stop
+          working, with no error anywhere.
+
+          Here, the absence is equally deliberate: only one element deep in this subtree can
+          be the `draggable` source at a time (see `grabbed`), so nothing bubbles into this
+          handler except the drag it is for. `overItem` is the mirror image on the `dragover`
+          side and gets its own eight lines there, because it has to make the decision at
+          runtime rather than in the template.
+        -->
         <div class="border-hairline flex flex-wrap items-end justify-between gap-4 border-b p-5">
           <!--
             The grip, and the only thing on this row that arms a drag. `aria-hidden` and not
@@ -815,6 +910,7 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           <span
             v-if="enabled"
             class="grip text-ink-3 shrink-0 self-center"
+            :class="{ busy: !draggable }"
             aria-hidden="true"
             @pointerdown="grab(category.id)"
             @pointerup="release"
@@ -848,7 +944,19 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                 {{ category.renameError }}
               </p>
             </div>
-            <button type="submit" :class="QUIET_BUTTON_CLASS">Rename</button>
+            <!--
+              THE NAME SAYS WHICH ROW, in the same way the remove-item control at the bottom
+              of an item row always has. A screen reader listing this page's controls reads
+              them out of context, and a pack with nine categories otherwise produces nine
+              buttons called "Rename" and nine called "Delete category" with nothing to tell
+              them apart. The distinguishing half is `sr-only` so the visible label stays the
+              single word the layout is built around — and because WCAG 2.5.3 (Label in Name)
+              requires the accessible name to CONTAIN the visible one, which it does: the
+              visible text is the first thing in the button and the context follows it.
+            -->
+            <button type="submit" :class="QUIET_BUTTON_CLASS">
+              Rename <span class="sr-only">{{ category.name }}</span>
+            </button>
           </form>
 
           <p class="text-ink-2 numeric text-sm">
@@ -864,7 +972,10 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           <form v-if="!category.confirmingDelete" method="post">
             <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
             <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
-            <button type="submit" :class="DANGER_BUTTON_CLASS">Delete category</button>
+            <!-- Named, for the reason the Rename button above gives. -->
+            <button type="submit" :class="DANGER_BUTTON_CLASS">
+              Delete category <span class="sr-only">{{ category.name }}</span>
+            </button>
           </form>
         </div>
 
@@ -947,11 +1058,27 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
             "
             @dragover="overItem($event, category.id, itemIndex)"
           >
+            <!--
+              `.stop` ON `dragstart` IS NOT TIDINESS. This `<li>` sits inside the category
+              `<li>`, which carries its own `dragstart`. Drag events bubble, so without the
+              modifier every item drag would call `beginDrag` twice — once with
+              `{ kind: 'item' }` and then, from the ancestor, with `{ kind: 'category' }`,
+              which wins because it runs second. The consequences are all silent: `overItem`
+              returns early because the drag is not an item drag, so no item marker is ever
+              set; `overCategory` does set a category marker; and `onDrop` sees a category
+              source with a category marker and moves a CATEGORY, or — if the pointer stayed
+              over items — matches neither pair and does nothing at all. Either way the
+              visitor drags an item and nothing they asked for happens.
+
+              The category `<li>` deliberately does NOT carry `.stop`; see the note beside its
+              own `dragstart` for why the two differ.
+            -->
             <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
               <p class="text-ink flex min-w-0 items-center gap-2 font-medium">
                 <span
                   v-if="enabled"
                   class="grip text-ink-3 shrink-0"
+                  :class="{ busy: !draggable }"
                   aria-hidden="true"
                   @pointerdown="grab(item.id)"
                   @pointerup="release"
@@ -980,6 +1107,21 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
               <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
               <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
 
+              <!--
+                THE ACCESSIBLE NAME STARTS WITH THE VISIBLE ONE, which is WCAG 2.5.3 (Label
+                in Name) and not a stylistic preference. The visible label is "Qty"; the
+                accessible name has to CONTAIN that string, or somebody driving the page by
+                voice who says "click Qty" targets a control whose name the speech engine
+                cannot match. It used to read "Quantity of {item}", which shares not one word
+                with what is on screen. The item name is still in there, because a page can
+                hold forty of these and "Qty" alone names none of them.
+
+                `aria-describedby` points at this row's own error message when there is one —
+                the pattern the category rename above has always used. Without it a screen
+                reader says "invalid entry" and stops, which is the announcement that tells a
+                visitor something is wrong and withholds the only thing that would let them
+                fix it.
+              -->
               <label class="text-ink-2 flex items-center gap-2 text-sm">
                 <span>Qty</span>
                 <input
@@ -987,7 +1129,10 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                   type="text"
                   inputmode="numeric"
                   :value="item.values.quantity"
-                  :aria-label="`Quantity of ${item.spokenName}`"
+                  :aria-label="`Qty for ${item.spokenName}`"
+                  :aria-describedby="
+                    item.quantityInvalid ? `item-${item.id}-error-quantity` : undefined
+                  "
                   :aria-invalid="item.quantityInvalid ? 'true' : undefined"
                   class="border-hairline bg-surface text-ink aria-invalid:border-rust w-16 rounded-[var(--r-sm)] border px-2 py-1 text-sm"
                 />
@@ -1008,11 +1153,18 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                   :class="CARRIAGE_OPTION_CLASS"
                   :title="PACK_ITEM_CARRIAGE_MEANINGS[carriage]"
                 >
+                  <!-- `aria-describedby` on each radio rather than on the fieldset: support
+                       for a description on a grouping element is inconsistent, and the
+                       invalid state is set here, so the explanation belongs on the same
+                       node as the thing it explains. -->
                   <input
                     type="radio"
                     :name="PACK_ITEM_FORM_FIELD.carriage"
                     :value="carriage"
                     :checked="carriage === item.values.carriage"
+                    :aria-describedby="
+                      item.carriageInvalid ? `item-${item.id}-error-carriage` : undefined
+                    "
                     :aria-invalid="item.carriageInvalid ? 'true' : undefined"
                   />
                   {{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}
@@ -1030,12 +1182,26 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                 Packed
               </label>
 
-              <button type="submit" :class="QUIET_BUTTON_CLASS">Save</button>
+              <!-- Named, for the reason the category Rename button gives: an item row per
+                   piece of gear means a pack of forty items otherwise offers forty buttons
+                   called "Save". -->
+              <button type="submit" :class="QUIET_BUTTON_CLASS">
+                Save <span class="sr-only">{{ item.spokenName }}</span>
+              </button>
             </form>
 
+            <!-- One `id` per FAILED FIELD, not one for the list: the quantity input and the
+                 carriage radios each point at their own message, so a screen reader reads
+                 the sentence belonging to the control it is on rather than every sentence on
+                 the row. See `ItemRow.errors` for why the field name is carried this far. -->
             <ul v-if="item.errors.length > 0" class="mt-2 space-y-1">
-              <li v-for="message in item.errors" :key="message" :class="ERROR_CLASS">
-                {{ message }}
+              <li
+                v-for="entry in item.errors"
+                :id="`item-${item.id}-error-${entry.field}`"
+                :key="entry.field"
+                :class="ERROR_CLASS"
+              >
+                {{ entry.message }}
               </li>
             </ul>
 
@@ -1066,17 +1232,33 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 
 <style scoped>
 /*
- * THE ONLY SHADOW IN THE PRODUCT, AND THE RULE ALLOWS EXACTLY THIS ONE. "Nothing casts a
- * shadow at rest. Elevation is expressed with --surface, --sunk and --hairline. Shadows are
- * reserved for transient overlays" (src/styles/tokens.css, CONTRIBUTING.md). A row under the
- * pointer mid-drag IS a transient overlay in the literal sense the rule means: it is lifted,
- * it is following a pointer, it is over the list rather than in it, and it is gone the moment
- * the button is released. Nothing else here casts one, at rest or otherwise, and the palette
- * defines no shadow token precisely because nothing was supposed to need one.
+ * THE ONLY SHADOW IN THE PRODUCT, AND IT IS A TOKEN. "Nothing casts a shadow at rest.
+ * Elevation is expressed with --surface, --sunk and --hairline. Shadows are reserved for
+ * transient overlays" (src/styles/tokens.css, CONTRIBUTING.md). The value lives in
+ * tokens.css as --shadow-drag, with a dark cut, because CONTRIBUTING.md's rule is that a
+ * colour the palette lacks gets RAISED rather than invented at a call site — and a black
+ * shadow at 22% is one of the values that most needs the dark cut it would not otherwise get.
+ *
+ * WHAT THIS IS ACTUALLY DRAWN ON, because an earlier version of this comment described a
+ * mechanism the browser does not have. It said the row was "lifted, following a pointer, over
+ * the list rather than in it". It is not. With native HTML5 drag the source element STAYS IN
+ * NORMAL FLOW for the whole gesture; what follows the pointer is a separate drag image the
+ * browser snapshots at `dragstart`, before this class lands, and which no CSS here can reach.
+ * So the shadow is painted on the in-flow row sitting in the list at 0.55 opacity — the row
+ * left behind, not the one in motion.
+ *
+ * IT IS STILL WITHIN THE RULE, and the honest reading is the narrow one. The rule bans
+ * shadows AT REST; the state this selector matches is the interval between `dragstart` and
+ * `dragend` and nothing else, cleared by `endDrag` on every exit including an abandoned drag.
+ * What the shadow does is mark WHICH row the gesture is carrying, on a list where the faded
+ * row and its neighbours are otherwise the same shape — the drag image is a snapshot the
+ * visitor is looking at, not a thing they are looking for. Nothing else on this surface casts
+ * a shadow, at rest or otherwise, and a second one is a reason to re-read the rule rather
+ * than to add a second token.
  */
 .dragging {
   opacity: 0.55;
-  box-shadow: 0 10px 24px rgb(0 0 0 / 0.22);
+  box-shadow: var(--shadow-drag);
 }
 
 /*
@@ -1120,6 +1302,23 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 .grip {
   display: inline-flex;
   cursor: grab;
+}
+
+/*
+ * WHILE A MOVE IS IN FLIGHT THE GRIP STOPS CLAIMING IT CAN BE GRABBED. `draggable` is gated
+ * on `!pending`, so for the length of a round trip `grab()` returns immediately and no row
+ * can be picked up — and a grip still drawing `cursor: grab` through that window is exactly
+ * the affordance-that-cannot-work this component's header argues against for the
+ * pre-hydration case. Same rule, second window.
+ *
+ * DIMMED AND RE-CURSORED RATHER THAN REMOVED, deliberately: `v-if`-ing the grip out would
+ * reflow every row in the pack the instant a drag lands and reflow them back when the
+ * response arrives, which is a far larger lie than a stale cursor. `progress` rather than
+ * `not-allowed`, because the state is "busy", not "refused" — it clears itself.
+ */
+.grip.busy {
+  cursor: progress;
+  opacity: 0.45;
 }
 
 .row.dragging {

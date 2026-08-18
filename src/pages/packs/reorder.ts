@@ -10,6 +10,7 @@ import {
   planChangesAnything,
   planReorderIntent,
 } from '../../lib/packs/reorder-request';
+import { REORDER_SAVE_FAILED_MESSAGE } from '../../lib/packs/reorder-response';
 
 // On-demand: this endpoint requires a session, reads a request body and writes
 // pack_items/pack_categories — none of which a prerendered file can do. It needs no entry
@@ -104,10 +105,21 @@ export const prerender = false;
  * neither of which a client has any use for.
  */
 
-/** Never a raw PostgREST/Postgres string; see the module comment. This one covers the read
- *  and the RPC alike, because from a client's side they are the same event — the move did
- *  not happen and the pack on screen is no longer trustworthy. */
-const REORDER_FAILED_MESSAGE = 'That move could not be saved. Reload the pack and try again.';
+/**
+ * Never a raw PostgREST/Postgres string; see the module comment. This one covers the read
+ * and the RPC alike, because from a client's side they are the same event — the move did not
+ * happen and the pack on screen is no longer trustworthy.
+ *
+ * IMPORTED, NOT DECLARED. The island needs the identical sentence as its fallback for a
+ * non-2xx whose body carried no message of its own — a 502 from a proxy in front of this
+ * Worker, a truncated body — and until this line it was spelled out in both places with a
+ * paragraph in each asking whoever reworded one to remember the other. That is a note, not a
+ * mechanism. `src/lib/packs/reorder-response.ts` is a lib module both sides may import (this
+ * route may import from `src/lib/`; nothing may import from a route, which is why the shared
+ * copy lives there and not here), so the string exists once and a reword cannot land on one
+ * side only.
+ */
+const REORDER_FAILED_MESSAGE = REORDER_SAVE_FAILED_MESSAGE;
 /** A pack this visitor does not own, a pack that no longer exists, and a malformed id all
  *  collapse here — the same collapse `loadPackForEdit` performs and for the same reason:
  *  none of the three is a distinction somebody probing this endpoint should be able to
