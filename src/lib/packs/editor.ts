@@ -7,13 +7,14 @@
  * neither that module nor `src/lib/packs/mutations.ts` can answer:
  *
  *   WHICH ROW IS THIS SUBMISSION ABOUT — the category being renamed, the item being saved,
- *   the closet items being added. These arrive as hidden fields and repeated checkboxes,
- *   not as form values, so they never pass through a `parse*Form` function.
+ *   the item being removed, the closet items being added. These arrive as hidden fields and
+ *   repeated checkboxes, not as form values, so they never pass through a `parse*Form`
+ *   function.
  *   WHAT POSITION DOES A NEW ROW TAKE. `createPackCategory` and `createCustomPackItem` both
  *   take `position` from their caller, deliberately — that module computes no ordering, and
- *   its own comment says the caller "expresses [append] by passing the current number of
- *   categories, a fact it already has from the tree it just rendered". This is where that
- *   fact is turned into a number.
+ *   its own comment says the caller "works it out from the run it just rendered, which is
+ *   the only place the current positions are known". This is where that run is turned into
+ *   a number.
  *
  * ---------------------------------------------------------------------------
  * WHY THIS IS A MODULE AND NOT THE PAGE'S FRONTMATTER
@@ -165,14 +166,28 @@ export function parseGearItemIds(values: readonly FormDataEntryValue[]): string[
 // ---------------------------------------------------------------------------
 
 /**
- * The two levels of the tree this module reads, structurally rather than by importing
+ * The three levels of the tree this module reads, structurally rather than by importing
  * `PackTreeRow` — see `ReorderPackRows` in `src/lib/packs/reorder-request.ts` for the same
- * choice and the same argument. All that is needed is a category's id and how many items
- * it holds.
+ * choice and the same argument.
+ *
+ * `position` IS CARRIED ON BOTH ROW TYPES, and it is the whole reason these interfaces are
+ * shaped this way rather than as `pack_items: readonly unknown[]`. The append functions
+ * below derive their answer from the highest position in the run, so a row type that hid
+ * the column would leave them nothing to derive it from — which is exactly the state this
+ * module was in when it counted rows instead (see `appendPosition`'s comment for the bug
+ * that produced). `PACK_TREE_SELECT` in `src/lib/packs/query.ts` already fetches
+ * `pack_categories(id, name, position, pack_items(id, …, position, …))`, so widening these
+ * types asks the read for nothing it was not already returning.
  */
+export interface EditorItemRows {
+  readonly id: string;
+  readonly position: number;
+}
+
 export interface EditorCategoryRows {
   readonly id: string;
-  readonly pack_items: readonly unknown[];
+  readonly position: number;
+  readonly pack_items: readonly EditorItemRows[];
 }
 
 export interface EditorPackRows {
@@ -180,18 +195,53 @@ export interface EditorPackRows {
 }
 
 /**
- * Where a newly created category goes: after every category the pack already has.
+ * One past the highest position in a run, or 0 for an empty one.
  *
- * A COUNT, NOT `max(position) + 1`, and the difference is deliberate. Positions are
- * reindexed dense on every move (`denseUpdates` in `src/lib/packs/reorder.ts`), so after
- * any drag the run is exactly `0..n-1` and the two answers agree. Where they DISAGREE is a
- * run that has never been dragged and was written with duplicate positions — legal, since
- * the column is deliberately not unique — and there the count is the honest answer: it
- * places the new row at the end of the ORDER a reader sees, which is what "add a category"
- * means, rather than at the end of a numbering nobody is looking at.
+ * `max(position) + 1`, NOT A COUNT, AND THE DIFFERENCE IS A BUG THIS FUNCTION EXISTS TO
+ * CLOSE. The count was wrong because DELETING LEAVES GAPS and nothing renumbers a run
+ * afterwards. Neither `deletePackCategory` nor `deletePackItem` in
+ * `src/lib/packs/mutations.ts` touches its siblings' positions, and no trigger in
+ * `supabase/migrations/20260810120000_core_schema.sql` does either — a delete is one
+ * statement against one row. So three categories at positions 0, 1, 2 with the first two
+ * deleted leave a single category still sitting at position 2, at which point a count
+ * answers 1: BELOW a row that is already there. `loadPackForEdit` reads
+ * `order(position).order(id)`, so the freshly appended category renders ABOVE the one it
+ * was supposed to follow, and nothing errors — `pack_categories.position` is
+ * `check (position >= 0)` and DELIBERATELY NOT UNIQUE (core_schema.sql:228), so 1 is a
+ * perfectly legal value for a row that has no business holding it.
+ *
+ * THE PREVIOUS COMMENT HERE DEFENDED THE COUNT AND WAS WRONG, and it is worth recording
+ * why rather than quietly deleting it: it reasoned only about DUPLICATE positions, where a
+ * count really is no worse than a maximum, and never about gaps. Duplicates are what a
+ * hand-written or imported run can contain; gaps are what ordinary use produces, every
+ * time somebody removes a row. It argued the rare case and missed the common one.
+ *
+ * A REINDEX AFTER EVERY DELETE WOULD BE THE OTHER FIX, AND IS THE WRONG ONE HERE. It turns
+ * a one-row delete into a whole-run rewrite for no benefit a reader can see — the ORDER is
+ * identical either way, because ties and gaps both resolve deterministically through
+ * `(position, id)` — and it would put a third implementation of the reindex rules outside
+ * `src/lib/packs/reorder.ts`, which that module's header forbids by name. Gaps are legal;
+ * appending has to cope with them.
+ *
+ * DUPLICATES STILL RESOLVE SENSIBLY. A run stored 0, 0, 0 answers 1, which is past every
+ * one of them, so the new row still lands last in reading order. That is the case the old
+ * comment was really about, and it is not lost by deriving from the maximum.
+ */
+function appendPosition(rows: readonly { readonly position: number }[]): number {
+  let next = 0;
+  for (const row of rows) {
+    if (row.position >= next) next = row.position + 1;
+  }
+  return next;
+}
+
+/**
+ * Where a newly created category goes: after every category the pack already has, in the
+ * ORDER a reader of that pack sees. See `appendPosition` for why that is one past the
+ * highest stored position rather than the number of categories.
  */
 export function categoryAppendPosition(pack: EditorPackRows): number {
-  return pack.pack_categories.length;
+  return appendPosition(pack.pack_categories);
 }
 
 /**
@@ -220,11 +270,41 @@ export function hasPackCategory(pack: EditorPackRows, categoryId: string): boole
  * category is not in this pack", which is a sentence a page can render and a state a
  * second tab genuinely produces by deleting a category while this one had it selected.
  *
- * Same append rule as `categoryAppendPosition`, for the same reason; `startPosition` on
- * `addGearItemsToCategory` is this number, and that function adds the index of each id to
- * it so a multi-item add lands in the order it was ticked.
+ * Same append rule as `categoryAppendPosition`, for the same reason — a category whose
+ * items are stored 0, 3, 7 because five were deleted answers 8, not 3; see
+ * `appendPosition`. `startPosition` on `addGearItemsToCategory` is this number, and that
+ * function adds the index of each id to it so a multi-item add lands in the order it was
+ * ticked, which stays true of a gapped run because the numbers it produces all sit past
+ * the end of it.
  */
 export function itemAppendPosition(pack: EditorPackRows, categoryId: string): number | null {
   const category = pack.pack_categories.find((candidate) => candidate.id === categoryId);
-  return category === undefined ? null : category.pack_items.length;
+  return category === undefined ? null : appendPosition(category.pack_items);
+}
+
+/**
+ * Whether `itemId` names an item of THIS pack — the item-level counterpart to
+ * `hasPackCategory`, and the check the `save-item` and `remove-item` branches of
+ * `src/pages/packs/[id].astro` were missing.
+ *
+ * WITHOUT IT, `ITEM_MISSING_MESSAGE` ("That item is no longer in this pack") could only
+ * ever fire for an id that failed to parse as a UUID — never once for the condition its
+ * own sentence names. A hand-edited or stale `item_id` naming an item of a DIFFERENT pack
+ * of the SAME visitor is not refused by anything else on that path: row level security
+ * permits it outright (`pack_items_update_own` / `pack_items_delete_own` ask for
+ * `user_id = (select auth.uid())` and an unlocked parent, neither of which distinguishes
+ * one of this visitor's packs from another), so the write lands — on the wrong pack — and
+ * the editor redirects as though it had saved. That is the same case the reorder migration
+ * refuses by name for its own payload ("ids from two different packs OF THE SAME USER,
+ * which RLS permits"), one table down.
+ *
+ * It is asked against a tree `loadPackForEdit` already fetched owner-scoped, so this is
+ * not an authorisation check and must not be read as one — see this module's header. What
+ * it decides is which PACK a submission is allowed to act on, which is a question ownership
+ * does not answer.
+ */
+export function hasPackItem(pack: EditorPackRows, itemId: string): boolean {
+  return pack.pack_categories.some((category) =>
+    category.pack_items.some((item) => item.id === itemId),
+  );
 }

@@ -729,6 +729,154 @@ describe('two concurrent reorders leave a valid, complete ordering', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A locked pack
+// ---------------------------------------------------------------------------
+
+/**
+ * REORDERING A LOCKED PACK IS REFUSED, AND THE REFUSAL IS REPORTED (independent review, B2).
+ *
+ * WHAT WAS BROKEN, IN THE ORDER IT MATTERS. `move_pack_item` compared the affected row count
+ * of its POSITION update against the number of pairs it was sent, and did NOT compare the
+ * affected row count of its RE-PARENT update against anything. So with `p_runs = []` — the
+ * "re-parents an item even when no position changes" case above, which is what dragging the
+ * only item of one category into an empty one produces — `0 <> 0` was false and the function
+ * returned success. On a locked pack it had moved nothing at all.
+ *
+ * WHY RLS DID NOT CATCH IT, WHICH IS THE PART THE MIGRATION'S OWN HEADER GOT WRONG. It
+ * claimed the trigger `assert_parent_pack_unlocked()` raises `pack % is locked` "on the first
+ * row they touch". `pack_items_update_own` (core_schema.sql:840) carries its
+ * `p.locked_at is null` clause in `USING`, which FILTERS: the statement reaches no row, so a
+ * BEFORE ROW trigger has nothing to fire on. Measured on this stack rather than argued: the
+ * re-parent UPDATE returns `row_count = 0` and raises nothing.
+ *
+ * THE THREE TESTS BELOW ARE NOT ONE TEST REPEATED. Each reaches a different guard, which is
+ * what makes each of them able to fail on its own:
+ *
+ *   empty runs, cross-category   Only the new re-parent check can see this. `v_pairs` is 0,
+ *                                so the position comparison passes whatever happened.
+ *   non-empty runs, same         Only the position comparison can see this. The re-parent is
+ *   category                     a legitimate no-op (`is distinct from` filters a move to the
+ *                                category the item is already in) and the new check correctly
+ *                                lets it through.
+ *   move_pack_category           The other function entirely, which has one write and no
+ *                                re-parent — the audit's result, asserted rather than assumed.
+ */
+describe('reordering a locked pack', () => {
+  let owner: TestUser;
+
+  beforeAll(async () => {
+    owner = await createUser('frozen-reorder');
+  });
+
+  it('refuses a re-parent whose position diff is empty, and writes nothing', async () => {
+    const tree = await createTree(owner, {
+      categories: [
+        { name: 'Solo', items: 1 },
+        { name: 'Empty', items: 0 },
+      ],
+      locked: true,
+    });
+    const [only] = tree.itemIds[0];
+
+    const plan = planItemMove(
+      await itemRun(tree.categoryIds[0]),
+      await itemRun(tree.categoryIds[1]),
+      only,
+      0,
+    );
+    // The premise, asserted rather than assumed: if this ever stops being empty the test
+    // silently becomes the "non-empty runs" case below and proves nothing about the
+    // re-parent check.
+    expect(plan.runs, 'the fixture no longer produces the empty-diff case').toEqual([]);
+
+    const { error } = await owner.client.rpc('move_pack_item', {
+      p_pack_id: tree.packId,
+      p_item_id: only,
+      p_to_category_id: tree.categoryIds[1],
+      p_runs: runsArgument(plan),
+    });
+
+    // 55000 (`object_not_in_prerequisite_state`), deliberately not the 23514 the trigger
+    // raises for the same condition — `src/pages/packs/reorder.ts` keys off this code to
+    // answer 409 instead of 500, and 23514 is also what `pack_items.position >= 0` raises.
+    expect(error, 'a locked pack accepted a move').not.toBeNull();
+    expect(error?.code).toBe('55000');
+
+    // Nothing moved. This is the assertion the old function passed while lying: the call
+    // returned `{ error: null }` and the item sat exactly here.
+    expect(await orderedItemIds(tree.categoryIds[0])).toEqual([only]);
+    expect(await orderedItemIds(tree.categoryIds[1])).toEqual([]);
+  });
+
+  it('refuses a same-category reorder, and writes nothing', async () => {
+    const tree = await createTree(owner, {
+      categories: [{ name: 'Shelter', items: 3 }],
+      locked: true,
+    });
+    const before = tree.itemIds[0];
+
+    const run = await itemRun(tree.categoryIds[0]);
+    const plan = planItemMove(run, run, before[2], 0);
+    expect(plan.runs.length, 'this case needs a non-empty position diff').toBeGreaterThan(0);
+
+    const { error } = await owner.client.rpc('move_pack_item', {
+      p_pack_id: tree.packId,
+      p_item_id: before[2],
+      p_to_category_id: tree.categoryIds[0],
+      p_runs: runsArgument(plan),
+    });
+
+    // It refused before this change too — the position comparison saw 0 of 3 — but said
+    // "refusing to commit a partial reindex", which names corruption that did not happen and
+    // gave the endpoint nothing to tell a visitor apart from a 500.
+    expect(error?.code).toBe('55000');
+    expect(await orderedItemIds(tree.categoryIds[0])).toEqual(before);
+  });
+
+  it('refuses a category reorder, and writes nothing', async () => {
+    const tree = await createTree(owner, {
+      categories: [
+        { name: 'One', items: 1 },
+        { name: 'Two', items: 1 },
+      ],
+      locked: true,
+    });
+
+    const plan = planCategoryMove(await categoryRun(tree.packId), tree.categoryIds[1], 0);
+
+    const { error } = await owner.client.rpc('move_pack_category', {
+      p_pack_id: tree.packId,
+      p_runs: runsArgument(plan),
+    });
+
+    expect(error?.code).toBe('55000');
+    expect(await orderedCategoryIds(tree.packId)).toEqual(tree.categoryIds);
+  });
+
+  /**
+   * The other half of the audit, and the reason `move_pack_category` gets no re-parent
+   * check: with nothing to apply there is nothing to refuse, so success is the honest
+   * answer even on a locked pack. Pinned because the tempting "fix" for the finding above
+   * is a blanket `if locked then raise` at the top of both functions, which would make this
+   * call fail — and would refuse a request that asks for no write at all.
+   */
+  it('accepts an empty plan on a locked pack, because an empty plan writes nothing', async () => {
+    const tree = await createTree(owner, {
+      categories: [{ name: 'Only', items: 1 }],
+      locked: true,
+    });
+
+    const { error } = await owner.client.rpc('move_pack_category', {
+      p_pack_id: tree.packId,
+      p_runs: [] as unknown as Json,
+    });
+
+    expect(error).toBeNull();
+    expect(await orderedCategoryIds(tree.packId)).toEqual(tree.categoryIds);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Duplicating
 // ---------------------------------------------------------------------------
 

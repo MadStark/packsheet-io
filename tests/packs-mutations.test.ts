@@ -10,8 +10,10 @@ import {
   deletePackCategory,
   deletePackItem,
   duplicatePack,
+  isPackLocked,
   movePackCategory,
   movePackItem,
+  PACK_LOCKED_ERRCODE,
   renamePack,
   renamePackCategory,
   setPackDescription,
@@ -1077,16 +1079,10 @@ describe('the RPC wrappers', () => {
     // The plan comes from the real planner. A hand-written [{id, position}] here would be a
     // third implementation of the ordering rules, in the test meant to prove there are two.
     const plan = planItemMove(run, run, before[1], 0);
-    const result = await movePackItem(
-      user.client,
-      user.id,
-      packId,
-      before[1],
-      categoryIds[0],
-      plan.runs,
-    );
+    const result = await movePackItem(user.client, packId, before[1], categoryIds[0], plan.runs);
 
     expect(result.error).toBeNull();
+    expect(result.locked).toBe(false);
     expect(await orderedItemIds(categoryIds[0])).toEqual([before[1], before[0]]);
   });
 
@@ -1097,14 +1093,7 @@ describe('the RPC wrappers', () => {
     const moving = (await orderedItemIds(categoryIds[0]))[0];
 
     const plan = planItemMove(from, to, moving, 0);
-    const result = await movePackItem(
-      user.client,
-      user.id,
-      packId,
-      moving,
-      categoryIds[1],
-      plan.runs,
-    );
+    const result = await movePackItem(user.client, packId, moving, categoryIds[1], plan.runs);
 
     expect(result.error).toBeNull();
     expect(await orderedItemIds(categoryIds[0])).not.toContain(moving);
@@ -1119,7 +1108,7 @@ describe('the RPC wrappers', () => {
     );
 
     const plan = planCategoryMove({ parentId: packId, rows }, categoryIds[1], 0);
-    const result = await movePackCategory(user.client, user.id, packId, plan.runs);
+    const result = await movePackCategory(user.client, packId, plan.runs);
 
     expect(result.error).toBeNull();
     const after = await adminSql<{ id: string }>(
@@ -1134,26 +1123,64 @@ describe('the RPC wrappers', () => {
     const stranger = await createUser('packs-rpc-stranger');
     const [itemId] = await orderedItemIds(categoryIds[0]);
 
-    const result = await movePackItem(
-      stranger.client,
-      stranger.id,
-      packId,
-      itemId,
-      categoryIds[0],
-      [],
-    );
+    const result = await movePackItem(stranger.client, packId, itemId, categoryIds[0], []);
 
     // The `for update` on `packs` inside the function is both the lock and the
     // authorisation check — a pack that is someone else's is simply not found there.
     expect(result.error).not.toBeNull();
     expect(result.error?.message).toMatch(/not yours/);
+    // NOT reported as locked. `locked` names one specific refusal a visitor can act on, and
+    // an authorisation failure is not it — telling a stranger "that pack is locked" would
+    // also confirm the pack exists.
+    expect(result.locked).toBe(false);
+  });
+
+  /**
+   * A LOCKED PACK, THROUGH THE WRAPPERS (independent review, B2).
+   *
+   * The database half of this lives in tests/pack-composition-rpc.test.ts, which proves the
+   * RPCs refuse and write nothing. What is asserted HERE is the classification the endpoint
+   * depends on: `isPackLocked` compares against `PACK_LOCKED_ERRCODE`, and this is the only
+   * place that comparison meets the database that raises the code. `src/pages/packs/reorder.ts`
+   * cannot be the place — `vitest.config.ts:64` excludes `src/pages/` — so without this test
+   * '55000' would be a string agreeing only with itself.
+   */
+  it('reports a locked pack as `locked` rather than as an ordinary failure', async () => {
+    const { user, packId, categoryIds } = await treeFixture('packs-rpc-locked');
+    const run = await itemRun(user.client, categoryIds[0]);
+    const before = await orderedItemIds(categoryIds[0]);
+    const plan = planItemMove(run, run, before[1], 0);
+
+    const locked = await user.client
+      .from('packs')
+      .update({ locked_at: new Date().toISOString() })
+      .eq('id', packId)
+      .select('id, locked_at');
+    if (locked.error || !locked.data?.[0]?.locked_at) {
+      throw new Error(`Fixture failed to lock pack: ${locked.error?.message ?? 'not locked'}`);
+    }
+
+    const item = await movePackItem(user.client, packId, before[1], categoryIds[0], plan.runs);
+    const category = await movePackCategory(user.client, packId, [
+      { parentId: packId, updates: [{ id: categoryIds[1], position: 0 }] },
+    ]);
+
+    expect(item.locked, 'a locked pack was not classified as locked').toBe(true);
+    expect(item.error?.code).toBe(PACK_LOCKED_ERRCODE);
+    expect(category.locked).toBe(true);
+    expect(category.error?.code).toBe(PACK_LOCKED_ERRCODE);
+    expect(isPackLocked(item.error)).toBe(true);
+
+    // And nothing moved, which is what makes the refusal worth reporting rather than
+    // swallowing: the order is exactly the one the fixture built.
+    expect(await orderedItemIds(categoryIds[0])).toEqual(before);
   });
 
   it('duplicates a pack and hands back the new id', async () => {
     const { user, packId } = await treeFixture('packs-rpc-duplicate');
     await user.client.from('packs').update({ visibility: 'public' }).eq('id', packId);
 
-    const result = await duplicatePack(user.client, user.id, packId);
+    const result = await duplicatePack(user.client, packId);
 
     expect(result.error).toBeNull();
     expect(result.id).not.toBeNull();
@@ -1195,7 +1222,7 @@ describe('the RPC wrappers', () => {
     const values = customInput({ name: 'Cosy socks', weight_grams: 88 });
     await createCustomPackItem(user.client, user.id, categoryId, values, 0, capturedAt);
 
-    const copy = await duplicatePack(user.client, user.id, packId);
+    const copy = await duplicatePack(user.client, packId);
     expect(copy.error).toBeNull();
 
     const rows = await adminSql<{ gear_item_id: string | null; snapshot: Record<string, unknown> }>(

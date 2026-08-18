@@ -113,9 +113,9 @@ beforeEach(() => {
   loadPackForEdit.mockReset();
   loadPackForEdit.mockResolvedValue({ data: PACK_ROWS, error: null });
   movePackItem.mockReset();
-  movePackItem.mockResolvedValue({ error: null });
+  movePackItem.mockResolvedValue({ error: null, locked: false });
   movePackCategory.mockReset();
-  movePackCategory.mockResolvedValue({ error: null });
+  movePackCategory.mockResolvedValue({ error: null, locked: false });
 });
 
 describe('authorisation', () => {
@@ -218,7 +218,7 @@ describe('the body', () => {
     await POST(contextFor(itemBody({ runs: hostilePlan, positions: hostilePlan, position: 0 })));
 
     expect(movePackItem).toHaveBeenCalledTimes(1);
-    expect(movePackItem).toHaveBeenCalledWith(CLIENT, USER.id, PACK_ID, ITEM_1, CATEGORY_A, [
+    expect(movePackItem).toHaveBeenCalledWith(CLIENT, PACK_ID, ITEM_1, CATEGORY_A, [
       {
         parentId: CATEGORY_A,
         updates: [
@@ -240,7 +240,6 @@ describe('applying a move', () => {
 
     expect(movePackItem).toHaveBeenCalledWith(
       CLIENT,
-      USER.id,
       PACK_ID,
       ITEM_1,
       CATEGORY_A,
@@ -255,7 +254,7 @@ describe('applying a move', () => {
       ),
     );
 
-    expect(movePackItem).toHaveBeenCalledWith(CLIENT, USER.id, PACK_ID, ITEM_1, CATEGORY_B, [
+    expect(movePackItem).toHaveBeenCalledWith(CLIENT, PACK_ID, ITEM_1, CATEGORY_B, [
       {
         parentId: CATEGORY_A,
         updates: [
@@ -296,7 +295,7 @@ describe('applying a move', () => {
     );
 
     expect(movePackItem).not.toHaveBeenCalled();
-    expect(movePackCategory).toHaveBeenCalledWith(CLIENT, USER.id, PACK_ID, [
+    expect(movePackCategory).toHaveBeenCalledWith(CLIENT, PACK_ID, [
       {
         parentId: PACK_ID,
         updates: [
@@ -340,6 +339,7 @@ describe('applying a move', () => {
         code: '42501',
         details: 'insufficient_privilege',
       },
+      locked: false,
     });
 
     const response = await POST(contextFor(itemBody()));
@@ -348,6 +348,56 @@ describe('applying a move', () => {
     const body = await bodyOf(response);
     expect(body.ok).toBe(false);
     expect(JSON.stringify(body)).not.toMatch(/not yours to reorder|42501|insufficient_privilege/);
+  });
+
+  /**
+   * A LOCKED PACK IS NOT A SERVER FAULT (independent review, B2).
+   *
+   * Two things had to change for this test to be possible to write. The RPC had to REFUSE at
+   * all — `move_pack_item` used to return success on a locked pack whenever `p_runs` was
+   * empty, because RLS filters the re-parent to zero rows instead of raising and nothing
+   * counted them (see the section at the end of
+   * `supabase/migrations/20260818000000_pack_composition_functions.sql`). And this endpoint
+   * had to stop mapping every RPC error to a 500, which reported a state the owner put the
+   * pack in — and can take it out of — as though the server had broken.
+   *
+   * 409 rather than 403 or 423: the same status the plan-refusal above answers, and for the
+   * same stated reason. The request was well formed and was refused by the state of the pack,
+   * which is the distinction a client can act on. `tests/packs-mutations.test.ts` is where
+   * `locked` is proved to be what the real database actually says; here it is a given, which
+   * is the point of mocking at this seam.
+   */
+  it('answers 409 and a locked-pack sentence rather than a 500, for both targets', async () => {
+    const lockedError = {
+      error: {
+        message: 'pack 1111 is locked; unlock it before reordering its contents',
+        code: '55000',
+        details: null,
+      },
+      locked: true,
+    };
+    movePackItem.mockResolvedValue(lockedError);
+    movePackCategory.mockResolvedValue(lockedError);
+
+    const item = await POST(contextFor(itemBody()));
+    const category = await POST(
+      contextFor({
+        [REORDER_FIELD.target]: REORDER_TARGET.category,
+        [REORDER_FIELD.packId]: PACK_ID,
+        [REORDER_FIELD.categoryId]: CATEGORY_B,
+        [REORDER_FIELD.toIndex]: 0,
+      }),
+    );
+
+    expect(item.status).toBe(409);
+    expect(category.status).toBe(409);
+
+    const body = await bodyOf(item);
+    expect(body.ok).toBe(false);
+    expect(String(body.message)).toMatch(/locked/i);
+    // Still never the RPC's own words, the house rule this route already follows for every
+    // other failure: the SQLSTATE and the raise's text name internals a client cannot use.
+    expect(JSON.stringify(body)).not.toMatch(/55000|unlock it before reordering/);
   });
 
   it('answers JSON, with a content type that says so', async () => {

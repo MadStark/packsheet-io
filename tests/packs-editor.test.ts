@@ -4,6 +4,7 @@ import {
   PACK_INTENT,
   categoryAppendPosition,
   hasPackCategory,
+  hasPackItem,
   itemAppendPosition,
   parseEntityId,
   parseGearItemIds,
@@ -11,27 +12,42 @@ import {
 } from '../src/lib/packs/editor';
 
 /**
- * `src/lib/packs/editor.ts` — the pack editor's two page-level decisions, tested where they
- * live rather than where they are used.
+ * `src/lib/packs/editor.ts` — the pack editor's page-level decisions, tested where they live
+ * rather than where they are used.
  *
- * Both would otherwise sit in `src/pages/packs/[id].astro`, which `vitest.config.ts:64`
- * excludes from collection, and both fail SILENTLY when they are wrong: an append position
- * computed as 0 puts every new row at the top of its run without erroring, and an unchecked
- * category id produces a write that affects nothing and reports nothing. PK-4's review
- * demonstrated that page frontmatter is where mutants survive; this file is the reason
- * these two do not live there.
+ * Every one of them would otherwise sit in `src/pages/packs/[id].astro`, which
+ * `vitest.config.ts:64` excludes from collection, and every one of them fails SILENTLY when
+ * it is wrong: an append position one short of the end puts a new row above a row already
+ * there without erroring, and an unchecked category or item id produces a write that affects
+ * nothing — or, worse, affects the right row of the wrong pack. PK-4's review demonstrated
+ * that page frontmatter is where mutants survive; this file is the reason these do not live
+ * there.
  */
 
 const CATEGORY_A = '22222222-2222-4222-8222-222222222222';
 const CATEGORY_B = '33333333-3333-4333-8333-333333333333';
 const GEAR_1 = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
 const GEAR_2 = 'aaaaaaaa-2222-4222-8222-aaaaaaaaaaaa';
+const ITEM_1 = 'bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb';
+const ITEM_2 = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+const ITEM_3 = 'bbbbbbbb-3333-4333-8333-bbbbbbbbbbbb';
 const UNKNOWN = '99999999-9999-4999-8999-999999999999';
 
+/** A pack whose runs are DENSE — positions 0..n-1 on both levels, which is what a pack
+ *  looks like after any drag (`denseUpdates` in `src/lib/packs/reorder.ts` reindexes every
+ *  run it touches). The gapped fixtures below are the other, equally ordinary, half. */
 const PACK: EditorPackRows = {
   pack_categories: [
-    { id: CATEGORY_A, pack_items: [{}, {}, {}] },
-    { id: CATEGORY_B, pack_items: [] },
+    {
+      id: CATEGORY_A,
+      position: 0,
+      pack_items: [
+        { id: ITEM_1, position: 0 },
+        { id: ITEM_2, position: 1 },
+        { id: ITEM_3, position: 2 },
+      ],
+    },
+    { id: CATEGORY_B, position: 1, pack_items: [] },
   ],
 };
 
@@ -111,6 +127,56 @@ describe('hasPackCategory', () => {
   });
 });
 
+/**
+ * THE ITEM-LEVEL COUNTERPART, AND THE ONE THE EDITOR WAS MISSING (independent review, B3).
+ *
+ * `src/pages/packs/[id].astro`'s `save-item` and `remove-item` branches checked only that
+ * `item_id` parsed as a UUID, so `ITEM_MISSING_MESSAGE` ("That item is no longer in this
+ * pack") could fire for a malformed id and never once for the condition it names. The gap
+ * that leaves is not blocked by anything downstream: an id naming an item of ANOTHER pack
+ * of the SAME visitor passes `pack_items_update_own` and `pack_items_delete_own` outright —
+ * both ask for `user_id = (select auth.uid())` and an unlocked parent, neither of which can
+ * tell one of this visitor's packs from another — so the write lands on the wrong pack and
+ * the editor redirects as though it had saved.
+ */
+describe('hasPackItem', () => {
+  it('recognises an item of this pack, whichever category holds it', () => {
+    expect(hasPackItem(PACK, ITEM_1)).toBe(true);
+    expect(hasPackItem(PACK, ITEM_3)).toBe(true);
+  });
+
+  it('refuses a well-formed id that names an item of another pack', () => {
+    expect(hasPackItem(PACK, UNKNOWN)).toBe(false);
+  });
+
+  // Two shapes of "this pack holds nothing": no categories at all, and categories that are
+  // all empty. Both are ordinary states of a pack somebody just started, and neither may
+  // answer true for an id that came in on a form.
+  it('refuses everything for a pack with no items', () => {
+    expect(hasPackItem({ pack_categories: [] }, ITEM_1)).toBe(false);
+    expect(
+      hasPackItem({ pack_categories: [{ id: CATEGORY_A, position: 0, pack_items: [] }] }, ITEM_1),
+    ).toBe(false);
+  });
+
+  // A category id is not an item id, and the two arrive on the same POST under different
+  // hidden field names. Crossing them would make `remove-item` delete against an id the
+  // pack does hold — just not as an item.
+  it('does not accept a category id of this pack', () => {
+    expect(hasPackItem(PACK, CATEGORY_A)).toBe(false);
+  });
+});
+
+/**
+ * THE APPEND POSITIONS, AND THE BUG THEY CARRIED (independent review, B1).
+ *
+ * Both were `rows.length`, which is right only while a run is dense. Nothing renumbers a
+ * run after a delete — `deletePackCategory`/`deletePackItem` are one statement against one
+ * row, and no trigger in the core schema touches the siblings — so gaps are what ordinary
+ * use produces, and a count is then strictly less than `max(position) + 1`. The failure is
+ * SILENT: `position` is `check (position >= 0)` and not unique, so the too-low number is
+ * accepted and the new row simply renders above rows it was meant to follow.
+ */
 describe('categoryAppendPosition', () => {
   it('puts a new category after the ones already there', () => {
     expect(categoryAppendPosition(PACK)).toBe(2);
@@ -122,6 +188,34 @@ describe('categoryAppendPosition', () => {
   it('puts the first category of an empty pack at zero', () => {
     expect(categoryAppendPosition({ pack_categories: [] })).toBe(0);
   });
+
+  /**
+   * THE REPRO, EXACTLY AS THE REVIEW STATED IT. Three categories at 0, 1, 2; delete the
+   * first two; one survivor sits at position 2. A count answers 1 — BELOW the row that is
+   * still there — and `loadPackForEdit`'s `order(position).order(id)` then renders the new
+   * category at the TOP of the pack.
+   */
+  it('appends past a gap left by deleting the rows in front', () => {
+    const gapped: EditorPackRows = {
+      pack_categories: [{ id: CATEGORY_A, position: 2, pack_items: [] }],
+    };
+
+    expect(categoryAppendPosition(gapped)).toBe(3);
+  });
+
+  // Duplicates are legal (core_schema.sql:228, "Deliberately NOT unique") and are the case
+  // the old comment argued for the count on. Deriving from the maximum does not lose it:
+  // 1 is still past all three, so the new row is still last in reading order.
+  it('appends past a run whose rows all share one position', () => {
+    const tied: EditorPackRows = {
+      pack_categories: [
+        { id: CATEGORY_A, position: 0, pack_items: [] },
+        { id: CATEGORY_B, position: 0, pack_items: [] },
+      ],
+    };
+
+    expect(categoryAppendPosition(tied)).toBe(1);
+  });
 });
 
 describe('itemAppendPosition', () => {
@@ -131,6 +225,43 @@ describe('itemAppendPosition', () => {
 
   it('puts the first item of an empty category at zero', () => {
     expect(itemAppendPosition(PACK, CATEGORY_B)).toBe(0);
+  });
+
+  /**
+   * The same defect one level down, and the one that shows up faster in real use: removing
+   * an item is a single click on this editor with no confirmation step, so a category that
+   * has had rows removed is the common case rather than the odd one.
+   */
+  it('appends past a gap left by removing items in front', () => {
+    const gapped: EditorPackRows = {
+      pack_categories: [
+        {
+          id: CATEGORY_A,
+          position: 0,
+          // Positions 0..4 with 0, 1 and 3 removed: two rows left, holding 2 and 4.
+          pack_items: [
+            { id: ITEM_1, position: 2 },
+            { id: ITEM_2, position: 4 },
+          ],
+        },
+      ],
+    };
+
+    // A count would answer 2, which is where ITEM_1 already sits.
+    expect(itemAppendPosition(gapped, CATEGORY_A)).toBe(5);
+  });
+
+  it('answers zero for an empty category however gapped its siblings are', () => {
+    const gapped: EditorPackRows = {
+      pack_categories: [
+        { id: CATEGORY_A, position: 7, pack_items: [{ id: ITEM_1, position: 9 }] },
+        { id: CATEGORY_B, position: 8, pack_items: [] },
+      ],
+    };
+
+    // Each category is its own run: the gaps in A say nothing about where B's first item
+    // goes, and reading the pack's positions instead of the category's would put it at 10.
+    expect(itemAppendPosition(gapped, CATEGORY_B)).toBe(0);
   });
 
   /**

@@ -7,6 +7,12 @@ import {
   loadPackList,
   type PackTreeRow,
 } from '../src/lib/packs/query';
+// The reorder engine and the RPC wrappers, because the read-back assertion below has to
+// reorder the pack THROUGH the paths the product uses rather than by writing positions
+// directly: a test that sets `position` by hand proves the ORDER BY works and says nothing
+// about whether a real drag ends up ordered the way it was left.
+import { planCategoryMove, planItemMove } from '../src/lib/packs/reorder';
+import { movePackCategory, movePackItem } from '../src/lib/packs/mutations';
 import { computeTotals, type PackTotals } from '../src/lib/totals';
 
 /**
@@ -180,6 +186,186 @@ describe('loadPackForEdit: the position/id ordering tie-break', () => {
     // test is not about telling the two categories apart.
     const withItems = data?.pack_categories.find((c) => c.pack_items.length > 0);
     expect(withItems?.pack_items.map((i) => i.id)).toEqual(sortedItemIds);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadPackForEdit — a real reorder survives a reload
+// ---------------------------------------------------------------------------
+
+/**
+ * THE ACCEPTANCE CRITERION, ON THE PATH A BROWSER RELOAD ACTUALLY TAKES (independent
+ * review, B4).
+ *
+ * Before this block, deleting BOTH `.order('position', ...)` calls from `loadPackForEdit`
+ * left the entire suite green. The tie-break block above cannot catch it: it forces every
+ * position to 0, so it exercises only the `id` half of `(position, id)` and is satisfied by
+ * a query that never sorted on `position` at all. Nothing else read a pack back after
+ * writing an order to it. "Reordering survives a reload" was the PR's headline claim and
+ * the one thing no test could fail on.
+ *
+ * WHAT MAKES THIS TEST BITE, AND WHY IT IS NOT AUTOMATIC. Both moves below are chosen so
+ * that the stored order DISAGREES with ascending id: each one sends the row with the
+ * LOWEST id to the end of its run. Strip `.order('position', ...)` and PostgREST answers
+ * from the surviving `.order('id', ...)` alone — ascending id — which is exactly the order
+ * these assertions say must not come back. Without that construction the two orders could
+ * coincide by luck (`gen_random_uuid()` decides), and the test would pass over a query that
+ * had stopped sorting. The precondition is asserted rather than assumed, so a fixture that
+ * stops producing the disagreement fails loudly instead of going quiet.
+ *
+ * THE ORDER IS WRITTEN THROUGH THE REAL RPCs, planned by the real planner. A test that
+ * UPDATEd `position` by hand would be asserting that PostgREST can sort integers. What is
+ * under test is the round trip: `planCategoryMove`/`planItemMove` decide the numbers,
+ * `move_pack_category`/`move_pack_item` apply them in one transaction, and this read is the
+ * next page load. Every one of those three is a place the order can be lost.
+ */
+describe('loadPackForEdit: an order written by a reorder comes back', () => {
+  /** The list after moving `id` to `toIndex` — the same result `planCategoryMove` and
+   *  `planItemMove` produce, computed independently here so the expectation is not the
+   *  planner's own opinion of what it did. */
+  function moveWithin(order: readonly string[], id: string, toIndex: number): string[] {
+    const next = order.filter((candidate) => candidate !== id);
+    next.splice(toIndex, 0, id);
+    return next;
+  }
+
+  let owner: TestUser;
+  let packId: string;
+  let expectedCategoryOrder: string[];
+  let reorderedCategoryId: string;
+  let expectedItemOrder: string[];
+
+  beforeAll(async () => {
+    owner = await createUser('packs-query-reorder-reload');
+
+    const { data: pack, error: packError } = await owner.client
+      .from('packs')
+      .insert({ name: 'Reordered' })
+      .select('id')
+      .single();
+    if (packError || !pack) {
+      throw new Error(`Fixture failed to insert pack: ${packError?.message}`);
+    }
+    packId = pack.id;
+
+    // Three categories at 0, 1, 2 — distinct and non-zero positions, so the ordering has
+    // real work to do rather than being satisfied by every row sharing a number.
+    const { data: categories, error: categoryError } = await owner.client
+      .from('pack_categories')
+      .insert([
+        { pack_id: packId, name: 'Shelter', position: 0 },
+        { pack_id: packId, name: 'Kitchen', position: 1 },
+        { pack_id: packId, name: 'Clothing', position: 2 },
+      ])
+      .select('id, position');
+    if (categoryError || categories?.length !== 3) {
+      throw new Error(`Fixture failed to insert categories: ${categoryError?.message}`);
+    }
+    // Sorted by the position we SENT, not by the order PostgREST returned them in: a
+    // multi-row insert makes no promise about that, and every index below assumes it did.
+    const categoryOrder = [...categories].sort((a, b) => a.position - b.position).map((c) => c.id);
+
+    const { data: gear, error: gearError } = await owner.client
+      .from('gear_items')
+      .insert(
+        Array.from({ length: 3 }, (_, index) => ({
+          name: `Gear ${index + 1}`,
+          weight_grams: 100 + index,
+        })),
+      )
+      .select('id');
+    if (gearError || gear?.length !== 3) {
+      throw new Error(`Fixture failed to insert gear: ${gearError?.message}`);
+    }
+
+    // Every item goes in ONE category, so the item-level assertion is about a run of three
+    // rather than about three runs of one — a run of one is ordered correctly by any query.
+    reorderedCategoryId = categoryOrder[0];
+    const { data: items, error: itemError } = await owner.client
+      .from('pack_items')
+      .insert(
+        gear.map((g, index) => ({
+          pack_category_id: reorderedCategoryId,
+          gear_item_id: g.id,
+          position: index,
+        })),
+      )
+      .select('id, position');
+    if (itemError || items?.length !== 3) {
+      throw new Error(`Fixture failed to insert items: ${itemError?.message}`);
+    }
+    const itemOrder = [...items].sort((a, b) => a.position - b.position).map((i) => i.id);
+
+    // THE MOVES. Each sends the lowest-id row of its run to the end, which is what makes
+    // the stored order differ from ascending id — see this block's comment.
+    const lowestCategory = [...categoryOrder].sort()[0];
+    const categoryPlan = planCategoryMove(
+      { parentId: packId, rows: categories },
+      lowestCategory,
+      categoryOrder.length - 1,
+    );
+    const categoryMove = await movePackCategory(owner.client, packId, categoryPlan.runs);
+    if (categoryMove.error) {
+      throw new Error(`Fixture failed to reorder categories: ${categoryMove.error.message}`);
+    }
+    expectedCategoryOrder = moveWithin(categoryOrder, lowestCategory, categoryOrder.length - 1);
+
+    const lowestItem = [...itemOrder].sort()[0];
+    const itemRun = { parentId: reorderedCategoryId, rows: items };
+    const itemPlan = planItemMove(itemRun, itemRun, lowestItem, itemOrder.length - 1);
+    const itemMove = await movePackItem(
+      owner.client,
+      packId,
+      lowestItem,
+      reorderedCategoryId,
+      itemPlan.runs,
+    );
+    if (itemMove.error) {
+      throw new Error(`Fixture failed to reorder items: ${itemMove.error.message}`);
+    }
+    expectedItemOrder = moveWithin(itemOrder, lowestItem, itemOrder.length - 1);
+  });
+
+  it('returns the categories in the order the reorder wrote, not in id order', () => {
+    // The premise. If these two ever agree, every assertion below passes for a query that
+    // dropped `position` entirely — so this failing is a broken TEST, not a broken read.
+    expect(
+      expectedCategoryOrder,
+      'the fixture stopped producing an order that disagrees with ascending id, so the assertion below could no longer tell a sorted read from an unsorted one',
+    ).not.toEqual([...expectedCategoryOrder].sort());
+  });
+
+  it('reads a reordered pack back in exactly the order that was written', async () => {
+    const { data, error } = await loadPackForEdit(owner.client, owner.id, packId);
+    expect(error).toBeNull();
+    expect(data).not.toBeNull();
+
+    expect(data?.pack_categories.map((category) => category.id)).toEqual(expectedCategoryOrder);
+
+    // Distinct and not all zero, stated as an assertion rather than trusted to the reindex:
+    // an order that came back right because every position happens to be 0 and the ids
+    // happen to be ascending would prove nothing about `position` being read at all.
+    const positions = data?.pack_categories.map((category) => category.position) ?? [];
+    expect(new Set(positions).size).toBe(positions.length);
+    expect(positions.some((position) => position !== 0)).toBe(true);
+  });
+
+  it('reads the items of a reordered category back in the order that was written', async () => {
+    expect(
+      expectedItemOrder,
+      'the fixture stopped producing an item order that disagrees with ascending id',
+    ).not.toEqual([...expectedItemOrder].sort());
+
+    const { data, error } = await loadPackForEdit(owner.client, owner.id, packId);
+    expect(error).toBeNull();
+
+    const category = data?.pack_categories.find((c) => c.id === reorderedCategoryId);
+    expect(category, 'the reordered category is missing from the tree').toBeDefined();
+    expect(category?.pack_items.map((item) => item.id)).toEqual(expectedItemOrder);
+
+    const positions = category?.pack_items.map((item) => item.position) ?? [];
+    expect(new Set(positions).size).toBe(positions.length);
+    expect(positions.some((position) => position !== 0)).toBe(true);
   });
 });
 

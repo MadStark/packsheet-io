@@ -108,10 +108,24 @@
 --
 --    `assert_parent_pack_unlocked()` takes the same lock from its own trigger, so a reorder
 --    and a `lock this pack` contend too — see core_schema.sql's "Rule 2, part two" for why
---    that trigger exists. It also means these functions need no `locked_at` check of their
---    own: the trigger raises `pack % is locked` on the first row they touch. That is
---    deliberate rather than an omission. A second copy of the rule here would be one more
---    place to forget when the rule changes.
+--    that trigger exists.
+--
+--    AN EARLIER VERSION OF THIS PARAGRAPH WENT ON TO CLAIM THAT THESE FUNCTIONS THEREFORE
+--    NEED NO `locked_at` CHECK OF THEIR OWN, BECAUSE "THE TRIGGER RAISES `pack % is locked`
+--    ON THE FIRST ROW THEY TOUCH". THAT WAS FALSE, and the way it was false is the reason
+--    the two reorder functions are redefined at the END of this file. The trigger is a
+--    BEFORE ROW trigger, so it only ever fires on a row the statement actually reached —
+--    and on a locked pack the statement reaches none. `pack_items_update_own` and
+--    `pack_categories_update_own` (core_schema.sql:840 and :784) carry their
+--    `p.locked_at is null` clause in `USING`, which FILTERS: the rows are not refused, they
+--    are not seen. So an UPDATE against a locked pack affects zero rows, raises nothing, and
+--    the trigger never runs. Measured on this stack, not reasoned about: a re-parent UPDATE
+--    on a locked pack returns `row_count = 0` with no exception.
+--
+--    That left `move_pack_item` able to report success having written nothing — see the
+--    section at the end of this file, which is where the check the paragraph above wrongly
+--    said was unnecessary now lives, and which explains why it is a diagnosis at the point
+--    of refusal rather than a second copy of the rule at the top.
 --
 -- 3. EVERY ID IN THE PAYLOAD IS PROVED TO BELONG TO THE CALLER AND TO THIS PACK. Row level
 --    security already confines every write below to the caller's own rows, so this is not
@@ -690,3 +704,428 @@ grant execute on function public.duplicate_pack(uuid) to authenticated;
 -- below rather than only the older one.
 comment on column public.pack_items.snapshot is
   'Either a frozen copy of a gear item — written by gear_item_snapshot() when the pack is locked (rule 2) or when the referenced gear item is deleted (rule 3) — or, since PK-37, the item itself for a one-off custom item authored in this pack with no gear row behind it. snapshot -> ''gear_item_id'' distinguishes them: a real gear id for a frozen copy, JSON null for an authored item (the gear_item_id COLUMN is null in both cases). captured_at means when the copy was taken in the first case, and when the item was created in the second.';
+
+-- ---------------------------------------------------------------------------
+-- THE TWO REORDER FUNCTIONS, CORRECTED: A REFUSED WRITE CAN NO LONGER REPORT SUCCESS
+-- ---------------------------------------------------------------------------
+--
+-- WHY THIS IS AT THE BOTTOM OF THE FILE RATHER THAN AN EDIT TO THE DEFINITIONS ABOVE. An
+-- applied migration is history and is not rewritten in place — the rule
+-- `20260817120000_gear_weight_in_grams.sql` follows when it REPLACES
+-- `private.gear_item_snapshot()` rather than editing the original definition, and the same
+-- rule this file already follows for `comment on column public.pack_items.snapshot`. The
+-- definitions above are what was applied; these are what supersede them, and a reader who
+-- runs the file top to bottom ends up with exactly what a fresh `supabase db reset`
+-- produces.
+--
+-- ---------------------------------------------------------------------------
+-- WHAT WAS WRONG
+-- ---------------------------------------------------------------------------
+--
+-- `move_pack_item` checked the affected row count of its POSITION update (point 4 of the
+-- header) and did not check the affected row count of its RE-PARENT update. With
+-- `p_runs = []` — a real and tested case, `tests/pack-composition-rpc.test.ts`'s "re-parents
+-- an item even when no position changes", which is what dragging the only item of one
+-- category into an empty one produces — `v_pairs` is 0 and `v_updated` is 0, so `0 <> 0` is
+-- false and the function returned success. If the re-parent had also affected nothing, that
+-- success was a claim about a transaction that wrote nothing at all.
+--
+-- IT IS NOT HYPOTHETICAL, AND THE MECHANISM IS THE ONE THE HEADER GOT WRONG. On a locked
+-- pack, `pack_items_update_own`'s `p.locked_at is null` sits in `USING`, so RLS FILTERS the
+-- row out instead of raising; the statement matches nothing, and `assert_parent_pack_unlocked`
+-- — a BEFORE ROW trigger — never fires, because there is no row for it to fire on. Measured
+-- on this stack rather than reasoned about: the re-parent UPDATE returns `row_count = 0` with
+-- no exception, and the old `move_pack_item` then returned success while the item stayed
+-- exactly where it was.
+--
+-- ---------------------------------------------------------------------------
+-- HOW IT IS FIXED, AND WHY NOT WITH A `locked_at` CHECK AT THE TOP
+-- ---------------------------------------------------------------------------
+--
+-- The obvious repair — refuse up front if `packs.locked_at is not null` — is the wrong shape
+-- twice over. It answers a question nobody asked (this function's job is to apply a plan, not
+-- to re-state rule 2, and rule 2 is already enforced by the policies), and it leaves the
+-- actual defect in place: a write that affected no rows for ANY OTHER reason would still be
+-- reported as a move that happened. So the check is on the OUTCOME of each write, and the
+-- lock is consulted only to explain an outcome already found wanting:
+--
+--   1. The re-parent's row count is taken. Zero is not automatically wrong — a same-category
+--      move is filtered out by `is distinct from` on purpose (see the definition above), and
+--      re-parenting an item to the category it is already in must not stamp `updated_at`. So
+--      zero rows is legitimate EXACTLY WHEN the item is already in the destination, and that
+--      is what is checked: `exists (... i.id = p_item_id and i.pack_category_id =
+--      p_to_category_id)`. If it is not there, the move did not happen and the function
+--      raises rather than returning.
+--   2. The position update's row count is compared against the number of pairs, exactly as
+--      before. That check was already correct; what changes is what it SAYS when it fires on
+--      a locked pack.
+--
+-- WHEN EITHER FINDS A WRITE THAT DID NOT HAPPEN, THE LOCK IS WHAT IT ASKS FIRST. `locked_at`
+-- is read once, at the top, off the row this function already reads and locks `for update` —
+-- no extra query, and it cannot change underneath the transaction, because anything that
+-- would set it has to take the same row lock (`assert_parent_pack_unlocked`, and the plain
+-- `update packs set locked_at` that fires it). A locked pack is an ORDINARY, EXPECTED,
+-- USER-ACTIONABLE state, so it gets a sentence of its own rather than being reported as a
+-- partial reindex — which is what the old code said, and which described corruption that had
+-- not occurred.
+--
+-- SQLSTATE 55000 (`object_not_in_prerequisite_state`), and DELIBERATELY NOT the
+-- `check_violation` (23514) that `assert_parent_pack_unlocked()` raises for the same
+-- underlying condition. `src/pages/packs/reorder.ts` keys off this code to answer a locked
+-- pack with a 409 and a sentence instead of a 500, and 23514 is also what every column CHECK
+-- on these tables raises — `pack_items.position >= 0` included, which an authenticated caller
+-- can trip deliberately by sending a negative position in `p_runs`. Sharing the code would
+-- make the endpoint tell that caller their pack is locked, which would be a lie the endpoint
+-- had no way to avoid.
+--
+-- ---------------------------------------------------------------------------
+-- THE SAME AUDIT, APPLIED TO move_pack_category
+-- ---------------------------------------------------------------------------
+--
+-- It has ONE write, and its row count was already checked, so there is no second statement a
+-- zero could be hiding. `p_runs = []` really is a no-op there — a category has no parent to
+-- change, so there is nothing a category move can consist of other than positions — and
+-- reporting success for it is honest rather than a hole. What it did NOT have was an honest
+-- MESSAGE: on a locked pack its one update is filtered to zero rows and it raised "reorder
+-- applied 0 of 2 positions — refusing to commit a partial reindex", naming a failure mode
+-- that did not happen. It gets the same diagnosis, for the same reason, and no re-parent
+-- check, because it has nothing to re-parent.
+
+create or replace function public.move_pack_item(
+  p_pack_id uuid,
+  p_item_id uuid,
+  p_to_category_id uuid,
+  p_runs jsonb
+)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  -- bigint, matching `get diagnostics ... = row_count`, so the comparisons below are between
+  -- two values of one type rather than between a count and a coerced integer.
+  v_pairs bigint;
+  v_updated bigint;
+  v_reparented bigint;
+  -- Read from the row this function locks anyway. Not a permission check — the `for update`
+  -- below is that — but the answer to "why did a write affect no rows", kept for the two
+  -- places that have to ask it.
+  v_locked_at timestamptz;
+begin
+  -- Point 2 of the header. First statement in the function, before anything is read, so the
+  -- whole verify-then-apply sequence sits inside one lock rather than validating against a
+  -- snapshot another session is about to move.
+  --
+  -- `for update` on `packs` is also an authorisation check and not only a lock: the row is
+  -- visible for locking only if the caller passes `packs_update_own`, so a pack that is
+  -- someone else's — including a PUBLIC pack of someone else's, which `packs_select_public`
+  -- would happily return for a plain read — is simply not found here.
+  --
+  -- `select ... into` rather than `perform`, so `locked_at` comes back with the lock. `found`
+  -- is set by both spellings and means the same thing: a row was located. It does NOT mean
+  -- the column was non-null, which matters because an unlocked pack's `locked_at` IS null.
+  -- `packs_update_own` has no `locked_at` clause (unlocking is a decision an owner may make),
+  -- so a LOCKED pack is found here too — which is what makes the diagnosis below possible at
+  -- all rather than turning into a second "not yours".
+  select p.locked_at
+    into v_locked_at
+    from public.packs p
+   where p.id = p_pack_id
+     and p.user_id = auth.uid()
+   for update;
+
+  if not found then
+    raise exception 'pack % is not yours to reorder', p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  -- The shape of the payload, checked before it is walked. `jsonb_array_elements` on a
+  -- scalar raises `cannot extract elements from a scalar`, which names neither this
+  -- function nor the argument that was wrong.
+  if p_runs is null or pg_catalog.jsonb_typeof(p_runs) <> 'array' then
+    raise exception 'p_runs must be the `runs` array from a reorder plan, got %',
+      coalesce(pg_catalog.jsonb_typeof(p_runs), 'null')
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_runs) as r
+     where (r.value ->> 'parentId') is null
+        or pg_catalog.jsonb_typeof(r.value -> 'updates') is distinct from 'array'
+  ) then
+    raise exception 'every run in p_runs needs a parentId and an updates array'
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  -- The destination. Required, always applied, never inferred — see "reparent IS
+  -- DELIBERATELY NOT PASSED AS JSON" in the header. A category whose `pack_id` is this pack
+  -- is necessarily the caller's own, because the pack itself was just proved to be.
+  if not exists (
+    select 1
+      from public.pack_categories c
+     where c.id = p_to_category_id
+       and c.pack_id = p_pack_id
+  ) then
+    raise exception 'category % is not in pack %', p_to_category_id, p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  -- The item being moved, proved to be in this pack BEFORE its parent is rewritten.
+  -- Without this, `update ... where id = p_item_id` under RLS would touch nothing for a
+  -- stranger's id and the function would report success having moved nothing.
+  if not exists (
+    select 1
+      from public.pack_items i
+      join public.pack_categories c on c.id = i.pack_category_id
+     where i.id = p_item_id
+       and c.pack_id = p_pack_id
+  ) then
+    raise exception 'item % is not in pack %', p_item_id, p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  -- Point 3, the first half: the runs name categories of THIS pack. `parentId` is not used
+  -- to find rows — point 1 — but it is the caller's own statement about which run each set
+  -- of numbers belongs to, and a plan whose runs point at another pack was computed against
+  -- the wrong siblings whatever its ids say.
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_runs) as r
+     where not exists (
+       select 1
+         from public.pack_categories c
+        where c.id = (r.value ->> 'parentId')::uuid
+          and c.pack_id = p_pack_id
+     )
+  ) then
+    raise exception 'a run in p_runs names a category that is not in pack %', p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  -- Point 3, the second half: every id being renumbered is an item of this pack. An id the
+  -- caller does not own fails this too — RLS makes it invisible, so the `not exists` holds.
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_runs) as r
+      cross join lateral pg_catalog.jsonb_to_recordset(r.value -> 'updates')
+        as u(id uuid, position integer)
+     where not exists (
+       select 1
+         from public.pack_items i
+         join public.pack_categories c on c.id = i.pack_category_id
+        where i.id = u.id
+          and c.pack_id = p_pack_id
+     )
+  ) then
+    raise exception 'p_runs renumbers an item that is not in pack %', p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  select count(*)
+    into v_pairs
+    from pg_catalog.jsonb_array_elements(p_runs) as r
+    cross join lateral pg_catalog.jsonb_to_recordset(r.value -> 'updates')
+      as u(id uuid, position integer);
+
+  -- The re-parent runs FIRST, so that by the time the positions land, every row named by
+  -- the destination run is actually in the destination. The two orders are equivalent for
+  -- the data — the position update matches on `id` alone and does not care where a row
+  -- lives — but this one leaves no intermediate state in which a category's rows and its
+  -- numbering disagree, which is the state anything reading these tables from a trigger
+  -- would see.
+  --
+  -- `is distinct from` because a same-category move passes the category the item is already
+  -- in: without the guard this would rewrite the row for nothing and stamp `updated_at`,
+  -- which is the column PK-20's optimistic concurrency compares against. A no-op write that
+  -- moves that timestamp is a conflict reported to a user who caused none.
+  update public.pack_items
+     set pack_category_id = p_to_category_id
+   where id = p_item_id
+     and pack_category_id is distinct from p_to_category_id;
+
+  get diagnostics v_reparented = row_count;
+
+  -- THE CHECK THIS FUNCTION SHIPPED WITHOUT. Zero rows here has two causes and they are
+  -- opposites: the guard above filtered a move to where the item already is (fine, and the
+  -- ordinary same-category case), or the write was refused and the item did not move (not
+  -- fine, and previously reported as success). The `exists` tells them apart by asking where
+  -- the row actually IS, now, inside this transaction — which is the only question whose
+  -- answer separates them. It reads through `pack_items_select_own`, which this same item
+  -- passed a few statements ago, so a false here means the row is somewhere else and not
+  -- that it became invisible.
+  if v_reparented = 0 and not exists (
+    select 1
+      from public.pack_items i
+     where i.id = p_item_id
+       and i.pack_category_id = p_to_category_id
+  ) then
+    if v_locked_at is not null then
+      raise exception 'pack % is locked; unlock it before reordering its contents', p_pack_id
+        using errcode = '55000';
+    end if;
+    raise exception
+      'item % was not moved into category % — refusing to report a move that did not happen',
+      p_item_id, p_to_category_id
+      using errcode = 'data_exception';
+  end if;
+
+  -- One statement for both runs. Point 1 in full: matched on `i.id = u.id` and on nothing
+  -- else. `r` and `u` are flattened here rather than applied run by run precisely because
+  -- the run boundary must not become a predicate; it did its job in the checks above.
+  update public.pack_items i
+     set position = u.position
+    from pg_catalog.jsonb_array_elements(p_runs) as r
+    cross join lateral pg_catalog.jsonb_to_recordset(r.value -> 'updates')
+      as u(id uuid, position integer)
+   where i.id = u.id;
+
+  get diagnostics v_updated = row_count;
+
+  -- Point 4. Three ways this can differ, and only the last two are corruption: the pack is
+  -- locked and RLS filtered every row out (an ordinary state, said plainly); a duplicated id,
+  -- so two pairs updated one row and which position won depends on the plan the executor
+  -- chose; or a row RLS declined for some other reason. `position >= 0` is left to the
+  -- column's own CHECK — core_schema.sql:228 argues that negatives are "just a reindex that
+  -- went wrong", and a constraint that aborts the transaction says so better than a
+  -- re-implementation here would.
+  if v_updated <> v_pairs then
+    if v_locked_at is not null then
+      raise exception 'pack % is locked; unlock it before reordering its contents', p_pack_id
+        using errcode = '55000';
+    end if;
+    raise exception
+      'reorder applied % of % positions in pack % — refusing to commit a partial reindex',
+      v_updated, v_pairs, p_pack_id
+      using errcode = 'data_exception';
+  end if;
+end;
+$$;
+
+comment on function public.move_pack_item(uuid, uuid, uuid, jsonb) is
+  'Re-parents one pack item to p_to_category_id and applies the positions in p_runs — `plan.runs` from planItemMove() in src/lib/packs/reorder.ts, verbatim — in one transaction under the caller''s own policies. Computes no positions itself. Raises SQLSTATE 55000 when the pack is locked, and refuses to return normally when either write affected no rows: see the section at the end of the migration that defines it.';
+
+create or replace function public.move_pack_category(
+  p_pack_id uuid,
+  p_runs jsonb
+)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  v_pairs bigint;
+  v_updated bigint;
+  v_locked_at timestamptz;
+begin
+  select p.locked_at
+    into v_locked_at
+    from public.packs p
+   where p.id = p_pack_id
+     and p.user_id = auth.uid()
+   for update;
+
+  if not found then
+    raise exception 'pack % is not yours to reorder', p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if p_runs is null or pg_catalog.jsonb_typeof(p_runs) <> 'array' then
+    raise exception 'p_runs must be the `runs` array from a reorder plan, got %',
+      coalesce(pg_catalog.jsonb_typeof(p_runs), 'null')
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_runs) as r
+     where (r.value ->> 'parentId') is null
+        or pg_catalog.jsonb_typeof(r.value -> 'updates') is distinct from 'array'
+  ) then
+    raise exception 'every run in p_runs needs a parentId and an updates array'
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  -- A run of categories is parented by the PACK. Anything else is a plan built from another
+  -- pack's rows, and applying it would renumber this one against siblings it does not have.
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_runs) as r
+     where (r.value ->> 'parentId')::uuid <> p_pack_id
+  ) then
+    raise exception 'a run in p_runs is parented by something other than pack %', p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(p_runs) as r
+      cross join lateral pg_catalog.jsonb_to_recordset(r.value -> 'updates')
+        as u(id uuid, position integer)
+     where not exists (
+       select 1
+         from public.pack_categories c
+        where c.id = u.id
+          and c.pack_id = p_pack_id
+     )
+  ) then
+    raise exception 'p_runs renumbers a category that is not in pack %', p_pack_id
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  select count(*)
+    into v_pairs
+    from pg_catalog.jsonb_array_elements(p_runs) as r
+    cross join lateral pg_catalog.jsonb_to_recordset(r.value -> 'updates')
+      as u(id uuid, position integer);
+
+  -- Matched on `id` alone here too. There is no re-parenting to make it load-bearing, but
+  -- writing it the other way would make the two functions differ for no reason a reader
+  -- could infer, and the day a category does gain a second parent-like column the safe
+  -- shape is the one already in place.
+  update public.pack_categories c
+     set position = u.position
+    from pg_catalog.jsonb_array_elements(p_runs) as r
+    cross join lateral pg_catalog.jsonb_to_recordset(r.value -> 'updates')
+      as u(id uuid, position integer)
+   where c.id = u.id;
+
+  get diagnostics v_updated = row_count;
+
+  -- This function's ONLY write, so unlike `move_pack_item` there is no second statement a
+  -- zero here could be hiding — which is the whole result of the audit recorded above. What
+  -- the lock changes is the sentence, not the refusal: a locked pack filters every row out
+  -- through `pack_categories_update_own`'s USING clause, and calling that "a partial reindex"
+  -- describes corruption that did not happen.
+  if v_updated <> v_pairs then
+    if v_locked_at is not null then
+      raise exception 'pack % is locked; unlock it before reordering its contents', p_pack_id
+        using errcode = '55000';
+    end if;
+    raise exception
+      'reorder applied % of % positions in pack % — refusing to commit a partial reindex',
+      v_updated, v_pairs, p_pack_id
+      using errcode = 'data_exception';
+  end if;
+end;
+$$;
+
+comment on function public.move_pack_category(uuid, jsonb) is
+  'Applies the category positions in p_runs — `plan.runs` from planCategoryMove() in src/lib/packs/reorder.ts, verbatim — to one pack, in one transaction under the caller''s own policies. Computes no positions itself. Raises SQLSTATE 55000 when the pack is locked: see the section at the end of the migration that defines it.';
+
+-- Re-issued rather than relied upon. The `create or replace`s above kept the ACL each
+-- function already carried, because neither SIGNATURE changed — but that is a fact about
+-- these two statements, not a property of the syntax. Alter an argument list and
+-- `create or replace` creates a SECOND function, born on a hosted project with the named
+-- `anon` grant an `alter default privileges` attaches, which is PK-57 exactly. See the
+-- revoke block beside the original definition of `move_pack_item` for why `from public`
+-- alone does not cover it.
+revoke all on function public.move_pack_item(uuid, uuid, uuid, jsonb)
+  from public, anon, service_role;
+grant execute on function public.move_pack_item(uuid, uuid, uuid, jsonb) to authenticated;
+
+revoke all on function public.move_pack_category(uuid, jsonb)
+  from public, anon, service_role;
+grant execute on function public.move_pack_category(uuid, jsonb) to authenticated;

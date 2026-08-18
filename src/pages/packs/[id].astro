@@ -66,6 +66,7 @@ import {
   PACK_INTENT,
   categoryAppendPosition,
   hasPackCategory,
+  hasPackItem,
   itemAppendPosition,
   parseEntityId,
   parseGearItemIds,
@@ -133,6 +134,57 @@ const DELETE_FAILED_MESSAGE =
   'We could not confirm whether that delete went through. Check your packs to see what is still there.';
 
 /*
+ * ---------------------------------------------------------------------------
+ * THE ZERO-ROW SENTENCES (independent review, B3)
+ * ---------------------------------------------------------------------------
+ *
+ * Every write below reports a `count` off its own `.select('id')`, and until this change
+ * every branch here destructured `{ error }` alone and redirected 303 whenever it was null.
+ * A write that touched NOTHING — a pack locked between this page rendering and the form
+ * submitting, a row a second tab deleted — went to the visitor as success. `count` is the
+ * only thing that can tell those apart: `src/lib/packs/mutations.ts`'s header sets out why,
+ * and the sentences below are what "distinguish them" means on this screen.
+ *
+ * THERE IS NO BLANKET SENTENCE, AND THERE MUST NOT BE, because a zero has different causes
+ * on different tables and a message that guesses wrong is worse than a vague one:
+ *
+ *   packs           `packs_update_own` / `packs_delete_own` (core_schema.sql:747, :752)
+ *                   carry NO `locked_at` clause — locking freezes a pack's CONTENTS, and an
+ *                   owner may still rename or delete the pack itself. So a zero here cannot
+ *                   be the lock; it is a pack that stopped existing. Saying "this pack may
+ *                   be locked" on these two branches would be false.
+ *   children,       `pack_categories_update_own` / `_delete_own` and their `pack_items`
+ *   UPDATE/DELETE   equivalents put `p.locked_at is null` in `USING`, which FILTERS rather
+ *                   than raising. Both causes are live: a locked pack and a vanished row.
+ *   children,       The same clause sits in `WITH CHECK` on the insert policies, which
+ *   INSERT          RAISES — and `assert_parent_pack_unlocked()` raises first, from a BEFORE
+ *                   INSERT ROW trigger. A locked pack therefore arrives as an `error`, never
+ *                   as a zero, and one INSERT of N rows cannot land partially. The zero
+ *                   checks on those branches are backstops with nothing known to reach them,
+ *                   which is why their sentence claims no cause.
+ *
+ * NONE OF THEM SAYS "UNLOCK IT AND TRY AGAIN". Whether this editor offers a lock control at
+ * all is PK-12's ticket; pointing at a button that does not exist yet is a promise this page
+ * cannot keep. Reporting the zero is this ticket's job, and hiding the controls is not — see
+ * that ticket, not this page, for the read-only editor.
+ */
+const NOTHING_SAVED_MESSAGE =
+  'Nothing was saved. That row may have been removed in another tab, or this pack may be locked. Reload the pack to see where it stands.';
+const NOTHING_DELETED_MESSAGE =
+  'Nothing was deleted. That row may already be gone, or this pack may be locked. Reload the pack to see what is still there.';
+const NOTHING_CREATED_MESSAGE =
+  'Nothing was created. Reload the pack to see what is there, then try again.';
+const PARTIAL_ADD_MESSAGE =
+  'Not everything was added to this pack. Reload the pack to see what is there.';
+const PACK_NOT_SAVED_MESSAGE =
+  'Nothing was saved. This pack may have been deleted in another tab. Check your packs to see what is still there.';
+const PACK_NOT_DELETED_MESSAGE =
+  'Nothing was deleted. This pack may already have been deleted in another tab. Check your packs to see what is still there.';
+/** The read failed, which is not the same event as "there is no such pack" and must not be
+ *  rendered as one — see the load below. */
+const PACK_LOAD_ERROR = 'Something went wrong loading this pack. Please try again in a moment.';
+
+/*
  * The ten intents this one POST handler answers are named in src/lib/packs/editor.ts, not
  * here. They moved the moment a second file started RENDERING forms that this handler reads:
  * the per-item and per-category forms live in src/components/PackContents.vue now, so the
@@ -186,9 +238,22 @@ const entryUnit = WEIGHT_ENTRY_UNIT[weightSystem];
 // A missing pack, another visitor's pack and a malformed id all collapse to one real 404,
 // exactly as src/pages/gear/[id].astro does: none of the three is a distinction a visitor
 // probing this URL should be able to tell apart from the outside.
+//
+// A FAILED READ IS NOT ONE OF THE THREE, and merging it into them was a defect this ticket's
+// independent review found. `loadError` is set when the request itself failed — the database
+// unreachable, a statement timeout, PostgREST refusing a malformed uuid — and none of that is
+// evidence about whether the pack exists. Collapsing it into the 404 tells the OWNER of a
+// perfectly real pack that it does not exist, during an incident, on the one screen where
+// that reads as "my trip is gone". src/pages/packs/reorder.ts:150-151 already separates the
+// two for the identical call, answering 500 for the error and 404 for the null; this is the
+// page agreeing with the endpoint rather than the endpoint being the odd one out. The 500
+// leaks nothing a 404 does not: it says the read failed, not whose pack it was.
 // ---------------------------------------------------------------------------
 const { data: pack, error: loadError } = await loadPackForEdit(client, user.id, id);
-if (loadError || pack === null) {
+if (loadError) {
+  return new Response(PACK_LOAD_ERROR, { status: 500 });
+}
+if (pack === null) {
   return new Response('Not found', { status: 404 });
 }
 
@@ -224,9 +289,12 @@ if (Astro.request.method === 'POST') {
       // comment for why the three fields this form edits are not three setters. The trip
       // type is passed through untouched, curated value or not: `packs.trip_type` carries
       // no CHECK constraint on purpose, and nothing here may branch on isPackTripType.
-      const { error } = await updatePack(client, user.id, id, result.values);
-      if (error) {
-        writeError = GENERIC_WRITE_ERROR;
+      const { error, count } = await updatePack(client, user.id, id, result.values);
+      // `count === 0` here is NOT a lock — `packs_update_own` has no `locked_at` clause, so
+      // an owner may always rename their own pack. It is a pack that stopped existing
+      // between the load at the top of this request and this statement.
+      if (error || count === 0) {
+        writeError = error ? GENERIC_WRITE_ERROR : PACK_NOT_SAVED_MESSAGE;
         packValuesOverride = rawPackFormValues(form);
       } else {
         return Astro.redirect(selfPath, 303);
@@ -241,15 +309,20 @@ if (Astro.request.method === 'POST') {
       // Appended, never inserted: `categoryAppendPosition` (src/lib/packs/editor.ts) is
       // where "at the end" is decided, because a wrong answer here is silent — position 0
       // is a legal value and every new category would simply appear at the top.
-      const { error } = await createPackCategory(
+      const { error, count } = await createPackCategory(
         client,
         user.id,
         id,
         result.values,
         categoryAppendPosition(pack),
       );
-      if (error) {
-        writeError = GENERIC_WRITE_ERROR;
+      // A backstop rather than a live case: an insert into a locked pack RAISES (the
+      // `locked_at is null` clause is in `pack_categories_insert_own`'s WITH CHECK, and
+      // `assert_parent_pack_unlocked()` raises before that), so it arrives as `error`. What
+      // is left for a zero to mean is nothing this page knows about, which is why the
+      // sentence names no cause.
+      if (error || count === 0) {
+        writeError = error ? GENERIC_WRITE_ERROR : NOTHING_CREATED_MESSAGE;
         categoryValues = rawPackCategoryFormValues(form);
       } else {
         return Astro.redirect(selfPath, 303);
@@ -266,8 +339,17 @@ if (Astro.request.method === 'POST') {
         message: Object.values(result.errors)[0] ?? GENERIC_WRITE_ERROR,
       };
     } else {
-      const { error } = await renamePackCategory(client, user.id, categoryId, result.values.name);
+      const { error, count } = await renamePackCategory(
+        client,
+        user.id,
+        categoryId,
+        result.values.name,
+      );
+      // Both causes are live on this one: `pack_categories_update_own` filters on an
+      // unlocked parent through its USING clause, and the category itself may have been
+      // deleted in another tab since this page rendered.
       if (error) writeError = GENERIC_WRITE_ERROR;
+      else if (count === 0) writeError = NOTHING_SAVED_MESSAGE;
       else return Astro.redirect(selfPath, 303);
     }
   } else if (intent === PACK_INTENT.deleteCategory) {
@@ -284,8 +366,16 @@ if (Astro.request.method === 'POST') {
       // possibly-stale number as though it were the write's own result.
       pendingCategoryDelete = categoryId;
     } else {
-      const { error } = await deletePackCategory(client, user.id, categoryId);
+      const { error, count } = await deletePackCategory(client, user.id, categoryId);
+      // THE ONE BRANCH WHERE `count` IS UNAMBIGUOUS, and it is worth saying why rather than
+      // applying the same rule everywhere without thinking. `deletePackCategory`'s count is
+      // 1 whether the category held nothing or twelve items — the cascade
+      // (`pack_items references pack_categories (user_id, id) on delete cascade`,
+      // core_schema.sql:303) is invisible to the statement's own result. So the count says
+      // nothing about HOW MUCH went, and everything about WHETHER the category itself did:
+      // 0 means this DELETE matched no row at all.
       if (error) writeError = DELETE_FAILED_MESSAGE;
+      else if (count === 0) writeError = NOTHING_DELETED_MESSAGE;
       else return Astro.redirect(selfPath, 303);
     }
   } else if (intent === PACK_INTENT.addGear) {
@@ -300,14 +390,22 @@ if (Astro.request.method === 'POST') {
     } else if (gearItemIds.length === 0) {
       writeError = NOTHING_SELECTED_MESSAGE;
     } else {
-      const { error } = await addGearItemsToCategory(
+      const { error, count } = await addGearItemsToCategory(
         client,
         user.id,
         categoryId,
         gearItemIds,
         position,
       );
+      // `count !== gearItemIds.length`, NOT `count === 0`, and the difference is the whole
+      // point of checking here at all. This is one statement inserting N rows: it either
+      // writes all of them or raises and writes none, and a locked pack raises rather than
+      // filtering (WITH CHECK, plus the BEFORE INSERT trigger), so "some of them landed" is
+      // not currently reachable. The honest check is still the one that compares what was
+      // written against what was asked for — `addGearItemsToCategory`'s own comment says so
+      // — because that is the check that stays correct the day this becomes two statements.
       if (error) writeError = GENERIC_WRITE_ERROR;
+      else if (count !== gearItemIds.length) writeError = PARTIAL_ADD_MESSAGE;
       else return Astro.redirect(selfPath, 303);
     }
   } else if (intent === PACK_INTENT.addCustomItem) {
@@ -325,15 +423,18 @@ if (Astro.request.method === 'POST') {
       // PK-37 and createCustomPackItem asserts it directly. A one-off item is a pack_items
       // row with a snapshot and no gear reference; putting it in the closet is PK-66's
       // deliberate, separate choice.
-      const { error } = await createCustomPackItem(
+      const { error, count } = await createCustomPackItem(
         client,
         user.id,
         categoryId,
         result.values,
         position,
       );
-      if (error) {
-        writeError = GENERIC_WRITE_ERROR;
+      // The same backstop as `create-category`, on the sibling table and for the same
+      // reason: `pack_items_insert_own` raises rather than filtering, so a zero here has no
+      // cause this page can name.
+      if (error || count === 0) {
+        writeError = error ? GENERIC_WRITE_ERROR : NOTHING_CREATED_MESSAGE;
         customValues = rawCustomPackItemFormValues(form);
       } else {
         return Astro.redirect(selfPath, 303);
@@ -342,7 +443,14 @@ if (Astro.request.method === 'POST') {
   } else if (intent === PACK_INTENT.saveItem) {
     const itemId = parseEntityId(form.get(PACK_EDITOR_FIELD.itemId));
     const result = parsePackItemForm(form);
-    if (itemId === null) {
+    // `hasPackItem` alongside the parse, exactly as the category branches pair
+    // `hasPackCategory` with theirs. Without it ITEM_MISSING_MESSAGE could only fire for an
+    // id that was not a UUID — never once for the condition its own sentence names — and a
+    // hand-edited or stale `item_id` naming an item of ANOTHER pack of this same visitor
+    // would be saved to that pack instead. RLS permits that outright: the update policy asks
+    // for `user_id = auth.uid()` and an unlocked parent, and both are true of every pack this
+    // visitor owns. See `hasPackItem`'s own comment.
+    if (itemId === null || !hasPackItem(pack, itemId)) {
       writeError = ITEM_MISSING_MESSAGE;
     } else if (!result.ok) {
       itemError = { itemId, errors: result.errors, values: rawPackItemFormValues(form) };
@@ -350,13 +458,21 @@ if (Astro.request.method === 'POST') {
       // Quantity, carriage and packed in ONE update. The two boolean columns arrive as a
       // pair out of carriageFlags, so there is no intermediate state where a row is worn
       // and still consumable — the state pack_items_worn_consumable_exclusive refuses.
-      const { error } = await updatePackItem(client, user.id, itemId, result.values);
+      const { error, count } = await updatePackItem(client, user.id, itemId, result.values);
+      // Both causes live, as on `rename-category`: `pack_items_update_own` filters on an
+      // unlocked parent, and the row may have been removed in another tab between the load
+      // above and this statement — which `hasPackItem` cannot rule out, because it reads the
+      // tree as it was when this request started.
       if (error) writeError = GENERIC_WRITE_ERROR;
+      else if (count === 0) writeError = NOTHING_SAVED_MESSAGE;
       else return Astro.redirect(selfPath, 303);
     }
   } else if (intent === PACK_INTENT.removeItem) {
     const itemId = parseEntityId(form.get(PACK_EDITOR_FIELD.itemId));
-    if (itemId === null) {
+    // See the `save-item` branch: the same missing membership check, in front of a DELETE,
+    // where writing to the wrong pack of the same visitor destroys a row instead of editing
+    // one.
+    if (itemId === null || !hasPackItem(pack, itemId)) {
       writeError = ITEM_MISSING_MESSAGE;
     } else {
       // ONE CLICK, NOT TWO, and this is the one destructive control on the page that is not
@@ -367,24 +483,33 @@ if (Astro.request.method === 'POST') {
       // nothing else holds a copy of, which is the distinction the gesture is spent on. See
       // src/pages/gear/index.astro's own note on not spending a typed-word confirmation on
       // deleting a tent.
-      const { error } = await deletePackItem(client, user.id, itemId);
+      const { error, count } = await deletePackItem(client, user.id, itemId);
       if (error) writeError = DELETE_FAILED_MESSAGE;
+      else if (count === 0) writeError = NOTHING_DELETED_MESSAGE;
       else return Astro.redirect(selfPath, 303);
     }
   } else if (intent === PACK_INTENT.duplicatePack) {
     // The RPC, in one transaction. The copy is private, unlocked and carries a fresh slug
     // whatever the original was — including when the original is LOCKED, which is the point
     // of the feature rather than an edge case. See duplicatePack's own comment.
-    const { id: copyId, error } = await duplicatePack(client, user.id, id);
+    // No `count` to read: an RPC returns the new pack's id or raises, so `copyId === null`
+    // with no error IS this write's zero-row case and was already handled here.
+    const { id: copyId, error } = await duplicatePack(client, id);
     if (error || copyId === null) writeError = DUPLICATE_FAILED_MESSAGE;
     else return Astro.redirect(packPath(copyId), 303);
   } else if (intent === PACK_INTENT.deletePack) {
     if (!confirmsGearDeletion(form.get(BULK_FORM_FIELD.confirm))) {
       pendingPackDelete = true;
     } else {
-      const { error } = await deletePack(client, user.id, id);
+      const { error, count } = await deletePack(client, user.id, id);
+      // As on `save-pack`: `packs_delete_own` has no `locked_at` clause, so a locked pack
+      // may still be thrown away by its owner (that function's own comment argues it). A
+      // zero here is a pack that was already gone, which is not the same as "deleted" and
+      // must not redirect as though the visitor's click did it.
       if (error) {
         writeError = DELETE_FAILED_MESSAGE;
+      } else if (count === 0) {
+        writeError = PACK_NOT_DELETED_MESSAGE;
       } else {
         // Back to the list, with nothing appended. The pack's absence from it is the
         // confirmation — the same reasoning src/pages/gear/[id].astro gives for not

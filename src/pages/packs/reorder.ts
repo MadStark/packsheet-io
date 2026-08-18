@@ -51,9 +51,26 @@ export const prerender = false;
  *    sentence instead of an exception; step 4 is what actually says no.
  *
  * Row level security sits under all four: every write policy on `pack_categories` and
- * `pack_items` requires `user_id = auth.uid()` AND an unlocked parent pack, so a locked
- * pack fails inside the transaction with the trigger's own `pack % is locked` rather than
- * needing a check here that would be a second copy of the rule.
+ * `pack_items` requires `user_id = auth.uid()` AND an unlocked parent pack.
+ *
+ * WHAT A LOCKED PACK ACTUALLY DOES, because an earlier version of this paragraph got it
+ * wrong and the mistake mattered. It claimed the write "fails inside the transaction with
+ * the trigger's own `pack % is locked`". It does not. Those policies carry the
+ * `p.locked_at is null` clause in their `USING`, which is a FILTER: the rows are not
+ * refused, they are not seen, so the UPDATE matches nothing, raises nothing, and
+ * `assert_parent_pack_unlocked` — a BEFORE ROW trigger — never fires, because there is no
+ * row for it to fire on. `move_pack_item` could therefore return success having moved
+ * nothing at all. It now counts what each of its two writes actually did and raises
+ * SQLSTATE 55000 when the pack turns out to be locked; the section at the end of
+ * `supabase/migrations/20260818000000_pack_composition_functions.sql` is where that lives
+ * and why.
+ *
+ * THAT ANSWER GETS A 409, NOT A 500. A locked pack is an ordinary, expected state the owner
+ * put it in and can take it out of — not a server fault, which is what every RPC error used
+ * to be reported as. It joins the other 409 below for the same reason that one exists: the
+ * request was well formed and was refused by the state of the pack, which is the distinction
+ * a client can act on. Hiding the drag handles on a locked pack is PK-12's job, not this
+ * endpoint's; answering honestly when one is dragged anyway is this endpoint's.
  *
  * ---------------------------------------------------------------------------
  * CSRF, AND WHY THERE IS NOTHING NEW HERE
@@ -96,6 +113,14 @@ const REORDER_FAILED_MESSAGE = 'That move could not be saved. Reload the pack an
  *  none of the three is a distinction somebody probing this endpoint should be able to
  *  tell apart from outside. */
 const PACK_MISSING_MESSAGE = 'That pack could not be found.';
+/** The one refusal on this route that names a state rather than a fault, and the only one a
+ *  visitor can do anything about without reloading. It says what to do because unlocking is
+ *  something the owner may do — `packs_update_own` has no `locked_at` clause, deliberately
+ *  (core_schema.sql's note on that column). It does NOT promise where the control is: hiding
+ *  or offering it on a locked pack is PK-12's ticket, and a sentence here pointing at a
+ *  button this ticket has not built would be a promise this file cannot keep. */
+const PACK_LOCKED_MESSAGE =
+  'That pack is locked, so its order cannot be changed. Unlock it to rearrange its contents.';
 
 function json(body: Record<string, unknown>, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -162,18 +187,16 @@ export const POST: APIRoute = async ({ locals, cookies, request, url, redirect }
   // the wrong way to express "nothing moved".
   if (!planChangesAnything(plan)) return json({ ok: true, ...plan }, 200);
 
-  const { error } =
+  const { error, locked } =
     intent.target === REORDER_TARGET.item
-      ? await movePackItem(
-          client,
-          user.id,
-          intent.packId,
-          intent.itemId,
-          intent.toCategoryId,
-          plan.runs,
-        )
-      : await movePackCategory(client, user.id, intent.packId, plan.runs);
+      ? await movePackItem(client, intent.packId, intent.itemId, intent.toCategoryId, plan.runs)
+      : await movePackCategory(client, intent.packId, plan.runs);
 
+  // Checked before `error`, not instead of it: `locked` is only ever true when `error` is
+  // set, and it is the one error on this path that describes a state rather than a fault.
+  // See the module comment. The 409 matches the `planned.ok` refusal above for the same
+  // reason — well-formed request, refused by the pack.
+  if (locked) return fail(PACK_LOCKED_MESSAGE, 409);
   if (error) return fail(REORDER_FAILED_MESSAGE, 500);
 
   // The plan as applied, for the island to re-render from. Spread rather than rebuilt, so

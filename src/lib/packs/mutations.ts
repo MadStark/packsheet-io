@@ -18,8 +18,14 @@
  * directly from `tests/packs-mutations.test.ts`.
  *
  * ---------------------------------------------------------------------------
- * EVERY FUNCTION TAKES `client` AND `userId` AND SCOPES ITS OWN WRITE TO THAT OWNER
+ * EVERY TABLE WRITE TAKES `client` AND `userId` AND SCOPES ITSELF TO THAT OWNER
  * ---------------------------------------------------------------------------
+ *
+ * TABLE writes — the three RPC wrappers at the bottom of this file take a `client` and no
+ * `userId`, because there is no query for an owner filter to attach to and the migration's
+ * own `where p.user_id = auth.uid() ... for update` is what authorises the call. That is
+ * argued where those wrappers are, not here, so this section can stay about the rule rather
+ * than about its one exception.
  *
  * Row level security already confines every statement below to the caller's own rows.
  * `packs_update_own` / `packs_delete_own` (core_schema.sql:747-754),
@@ -76,11 +82,29 @@
  * page that reports "1 item added" from the REQUEST rather than the RESULT can say that
  * about a write that touched nothing at all.
  *
- * THE LOCKED-PACK CASE MAKES THIS SHARPER HERE THAN IT IS FOR GEAR. Every write policy on
- * `pack_categories` and `pack_items` requires `p.locked_at is null`, so writing to a locked
- * pack is not an error — it is a silent zero-row result, which `tests/core-schema.test.ts`
- * asserts exactly. `count` is the only thing that distinguishes "your change was saved"
- * from "that pack is frozen and nothing happened".
+ * THE LOCKED-PACK CASE MAKES THIS SHARPER HERE THAN IT IS FOR GEAR, BUT ONLY FOR UPDATE AND
+ * DELETE — AND THE DIFFERENCE IS NOT COSMETIC. Every write policy on `pack_categories` and
+ * `pack_items` requires `p.locked_at is null`, and where that clause sits decides whether a
+ * refusal is loud or silent:
+ *
+ *   UPDATE and DELETE   The clause is in the policy's `USING`, which is a FILTER. The row
+ *                       is not refused, it is not seen — so the statement matches nothing
+ *                       and PostgREST answers `{ data: [], error: null, status: 200 }`.
+ *                       `tests/core-schema.test.ts` asserts exactly that shape, and
+ *                       `count` is the only thing that distinguishes "your change was
+ *                       saved" from "that pack is frozen and nothing happened".
+ *   INSERT              The clause is in `WITH CHECK`, which RAISES rather than filtering —
+ *                       there is no existing row to filter. And it does not even get that
+ *                       far: `assert_parent_pack_unlocked()` is a BEFORE INSERT ROW trigger
+ *                       (core_schema.sql:606-608) and fires first, raising
+ *                       `pack % is locked; unlock it before changing its contents` with
+ *                       SQLSTATE 23514. So an insert into a locked pack arrives at the
+ *                       caller as an `error`, never as a zero-row success.
+ *
+ * `count` is therefore load-bearing on the update and delete paths and a backstop on the
+ * insert ones. It is read the same way on all of them because "report what the write did"
+ * should not have two spellings — and because which of the two a given statement is depends
+ * on a policy clause's position, which is not something a call site can see.
  *
  * ---------------------------------------------------------------------------
  * WHAT THIS MODULE DOES NOT DO
@@ -150,6 +174,53 @@ export interface PackCreateResult extends PackMutationResult {
  */
 export interface PackRpcResult {
   readonly error: PostgrestError | null;
+}
+
+/**
+ * The SQLSTATE `move_pack_item` and `move_pack_category` raise when the pack is locked.
+ *
+ * `55000` is `object_not_in_prerequisite_state`, and it is raised by those two functions
+ * ALONE in this schema — deliberately not the `23514` (`check_violation`) that
+ * `assert_parent_pack_unlocked()` raises for the same underlying condition. The two-code
+ * split is argued in full at the end of
+ * `supabase/migrations/20260818000000_pack_composition_functions.sql`; the short version is
+ * that 23514 is also what every column CHECK on these tables raises, including
+ * `pack_items.position >= 0`, which an authenticated caller can trip on purpose by sending
+ * a negative position in `p_runs`. A reader that treated 23514 as "locked" would tell that
+ * caller their pack is frozen, which would be false and unavoidable.
+ *
+ * NAMED HERE RATHER THAN SPELLED AT THE CALL SITE because the call site is
+ * `src/pages/packs/reorder.ts`, which `vitest.config.ts:64` excludes from collection. A bare
+ * `error.code === '55000'` written there is a magic string no test can reach; `isPackLocked`
+ * below is called by `tests/packs-mutations.test.ts` against a real locked pack, so the code
+ * is checked against the database that raises it rather than against this file's memory
+ * of it.
+ */
+export const PACK_LOCKED_ERRCODE = '55000';
+
+/**
+ * What the two MOVE wrappers report: the error, and whether that error is the pack being
+ * locked.
+ *
+ * WHY THE CLASSIFICATION IS HERE AND NOT AT THE CALL SITE. A locked pack is an ORDINARY,
+ * EXPECTED, USER-ACTIONABLE state — the owner froze it, and unlocking it is a thing they may
+ * do — so a caller has to be able to say that in a sentence rather than reporting a server
+ * fault. This is the layer that knows what the database's answers mean; the endpoint above
+ * it knows what HTTP status a meaning deserves. Handing it a boolean rather than a SQLSTATE
+ * keeps the migration's error contract from leaking into a route.
+ *
+ * `duplicatePack` deliberately has no such flag: duplicating a LOCKED pack is allowed and is
+ * the point of the feature (see that function's comment), so "locked" is never an answer it
+ * can give and a field that was permanently false would invite a check that means nothing.
+ */
+export interface PackMoveResult extends PackRpcResult {
+  readonly locked: boolean;
+}
+
+/** Whether a PostgREST error is the reorder RPCs' locked-pack refusal. Exported so the one
+ *  place that compares against `PACK_LOCKED_ERRCODE` is a function a test can call. */
+export function isPackLocked(error: PostgrestError | null): boolean {
+  return error?.code === PACK_LOCKED_ERRCODE;
 }
 
 /** `duplicate_pack` returns the new pack's id, which is the only thing the caller can do
@@ -347,11 +418,14 @@ export async function deletePack(
  * module computes no ordering: `src/lib/packs/reorder.ts` owns every question of the form
  * "what happens when you drop this here", and the migration's header explains why a second
  * implementation of those rules in a second language is the failure that design prevents. A
- * new category goes at the end, which the caller expresses by passing the current number of
- * categories — a fact it already has from the tree it just rendered. Getting it wrong is
- * not corruption: `pack_categories.position` is `check (position >= 0)` and DELIBERATELY
- * NOT UNIQUE (core_schema.sql:228), so duplicates are an allowance rather than an edge
- * case, and they resolve deterministically on `id` in every read in this codebase.
+ * new category goes at the end, and the caller works it out from the run it just rendered,
+ * which is the only place the current positions are known — `categoryAppendPosition` in
+ * `src/lib/packs/editor.ts` is that calculation, and its own comment explains why it is one
+ * past the highest position rather than the number of categories. Getting it wrong is not
+ * corruption but it is not harmless either: `pack_categories.position` is
+ * `check (position >= 0)` and DELIBERATELY NOT UNIQUE (core_schema.sql:228), so a wrong
+ * number is accepted in silence and simply puts the new row somewhere nobody chose, with
+ * ties resolving on `id` in every read in this codebase.
  *
  * `user_id` IS WRITTEN EXPLICITLY, and here it is doing double duty. Besides the
  * insert-scoping argument in the module comment, `pack_categories.user_id` is DENORMALISED
@@ -461,10 +535,22 @@ export async function deletePackCategory(
  * `src/lib/gear/mutations.ts` gives for leaving `bulkSetCategory` and `bulkSetStatus`
  * unguarded.
  *
- * `count` IS READ OFF THE INSERT'S OWN RESULT, never `gearItemIds.length` — and this is one
- * of the two functions in this module where the two most easily disagree without an error
- * being raised. `pack_items_insert_own` requires the parent pack to be unlocked, and a
- * refusal is a silent zero-row insert rather than an exception.
+ * `count` IS READ OFF THE INSERT'S OWN RESULT, never `gearItemIds.length`. That is the
+ * module rule applied without an exception, and it is worth being exact about what it buys
+ * HERE, because the obvious reason is the wrong one: a locked parent does NOT produce a
+ * silent zero-row insert. `pack_items_insert_own` carries its `locked_at is null` clause in
+ * `WITH CHECK`, which raises rather than filtering, and `assert_parent_pack_unlocked()`
+ * raises before that from a BEFORE INSERT ROW trigger — see the module comment's table. Nor
+ * can this statement land partially: it is ONE insert of N rows, so it either writes all of
+ * them or raises and writes none.
+ *
+ * So with `error` null, `count` and `gearItemIds.length` agree today, and a caller checking
+ * `count !== gearItemIds.length` is checking something that cannot currently happen. It is
+ * still the right thing to report and the right thing for a caller to check, for the reason
+ * the module comment gives: `count` is what the write DID, and a number taken from the
+ * request is a claim about what was asked for. The day this becomes two statements, or the
+ * day a policy clause moves from `WITH CHECK` to `USING`, the honest number is already the
+ * one being returned.
  */
 export async function addGearItemsToCategory(
   client: PacksheetClient,
@@ -811,16 +897,25 @@ export async function deletePackItem(
  * its function needs and reports the error; none of them validates a payload, checks an
  * ownership, or reshapes a plan on the way through.
  *
- * WHY `userId` IS STILL A PARAMETER WHEN NO `.eq()` CAN USE IT. An RPC is one POST to one
- * function; there is no query for an owner filter to attach to. What replaces it is
+ * THEY TAKE NO `userId`, WHICH IS THE ONE PLACE THIS MODULE'S "EVERY FUNCTION TAKES `client`
+ * AND `userId`" RULE DOES NOT REACH — and the reason is that there is nothing here for one
+ * to do. An RPC is one POST to one function; there is no query for an owner filter to attach
+ * to, and the argument list is fixed by the function's signature. What replaces the filter is
  * stronger rather than weaker, and it is inside the migration: each function's first
- * statement is `select 1 from public.packs p where p.id = p_pack_id and p.user_id =
- * auth.uid() for update`, which is simultaneously the row lock and the authorisation check
- * — a pack that is someone else's, INCLUDING a public pack of someone else's that
+ * statement is `select ... from public.packs p where p.id = p_pack_id and p.user_id =
+ * auth.uid() ... for update`, which is simultaneously the row lock and the authorisation
+ * check — a pack that is someone else's, INCLUDING a public pack of someone else's that
  * `packs_select_public` would happily return for a plain read, is simply not found, and the
- * function raises `insufficient_privilege`. The parameter is kept so that every function in
- * this module takes the same pair and no caller has to remember which ones are different;
- * it is not, and must not be read as, the thing that authorises the call.
+ * function raises `insufficient_privilege`.
+ *
+ * THESE WRAPPERS USED TO TAKE ONE ANYWAY, for symmetry with the rest of the module, and the
+ * independent review was right to call it back: `astro check` reported all three as
+ * `'userId' is declared but its value is never read`, and the comment defending them had to
+ * warn in its own last sentence that the parameter "is not, and must not be read as, the
+ * thing that authorises the call". A parameter whose documentation exists to tell you it
+ * does nothing is worse than an asymmetry a reader can see. Renaming it `_userId` would have
+ * silenced the tool and kept the misdirection, which is the opposite of the trade worth
+ * making.
  *
  * WHY NOTHING IS VALIDATED HERE. `plan.runs` is passed VERBATIM — same key names, same
  * nesting, no reshaping on the wire — because the migration consumes exactly the shape
@@ -853,15 +948,23 @@ export async function deletePackItem(
  * row that gets locked and the scope every id is then checked against, and deriving it from
  * the first id in the plan would make the authorisation check circular — it would prove the
  * ids agree with each other, which is also what a scrambling bug does.
+ *
+ * `locked` IS REPORTED SEPARATELY FROM `error`, AND IS NOT A SECOND WAY OF SAYING THE SAME
+ * THING. It is true only for the migration's `55000` refusal, which means the pack is frozen
+ * and the caller's move was not applied — a state the owner can undo. Every other error is
+ * either a bug or an attack and gets the generic answer. Before PK-37's independent review
+ * this distinction did not exist BECAUSE THE REFUSAL DID NOT EITHER: on a locked pack, a
+ * cross-category move with an empty `runs` array returned success having written nothing,
+ * because RLS filtered the re-parent to zero rows and nothing counted them. See the section
+ * at the end of the migration.
  */
 export async function movePackItem(
   client: PacksheetClient,
-  userId: string,
   packId: string,
   itemId: string,
   toCategoryId: string,
   runs: readonly RunUpdate[],
-): Promise<PackRpcResult> {
+): Promise<PackMoveResult> {
   const { error } = await client.rpc('move_pack_item', {
     p_pack_id: packId,
     p_item_id: itemId,
@@ -873,25 +976,26 @@ export async function movePackItem(
     // would be the reshaping step the migration's payload-shape section exists to forbid.
     p_runs: runs as unknown as Json,
   });
-  return { error };
+  return { error, locked: isPackLocked(error) };
 }
 
 /** Applies a category reorder — one pack's categories, recomputed positions, one
  *  transaction. The same contract as `movePackItem` above with no re-parent: a category
  *  belongs to its pack and cannot move to another one, which is why `planCategoryMove`
  *  returns a plan whose `reparent` is always null and why this signature has no destination
- *  argument to mirror. */
+ *  argument to mirror. Its one write's row count was already checked before PK-37's review,
+ *  so what the corrected migration changes for THIS function is only what it says when that
+ *  check fires on a locked pack — see `locked` on `movePackItem`. */
 export async function movePackCategory(
   client: PacksheetClient,
-  userId: string,
   packId: string,
   runs: readonly RunUpdate[],
-): Promise<PackRpcResult> {
+): Promise<PackMoveResult> {
   const { error } = await client.rpc('move_pack_category', {
     p_pack_id: packId,
     p_runs: runs as unknown as Json,
   });
-  return { error };
+  return { error, locked: isPackLocked(error) };
 }
 
 /**
@@ -911,7 +1015,6 @@ export async function movePackCategory(
  */
 export async function duplicatePack(
   client: PacksheetClient,
-  userId: string,
   packId: string,
 ): Promise<PackDuplicateResult> {
   const { data, error } = await client.rpc('duplicate_pack', { p_pack_id: packId });
