@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   PACK_EDITOR_FIELD,
+  PACK_INTENT,
   categoryAppendPosition,
   hasPackCategory,
   itemAppendPosition,
@@ -155,5 +156,40 @@ describe('PACK_EDITOR_FIELD', () => {
       itemId: 'item_id',
       gearItemId: 'gear_item_id',
     });
+  });
+});
+
+describe('PACK_INTENT', () => {
+  /**
+   * Pinned for the same reason as the field names, and with one more edge to it: these
+   * strings are now WRITTEN in two files — `src/pages/packs/[id].astro`, which handles them,
+   * and `src/components/PackContents.vue`, which renders the per-row forms that carry them —
+   * and READ in one. A value that changes on one side only does not error: the handler's
+   * final `else` catches it and the visitor is told "something went wrong saving that
+   * change" about a form that looks perfectly ordinary. Both sides importing this object is
+   * what makes that impossible, and this test is what stops the object itself from being
+   * quietly re-spelled.
+   */
+  it('names the ten intents the pack editor posts', () => {
+    expect(PACK_INTENT).toEqual({
+      savePack: 'save-pack',
+      duplicatePack: 'duplicate-pack',
+      deletePack: 'delete-pack',
+      createCategory: 'create-category',
+      renameCategory: 'rename-category',
+      deleteCategory: 'delete-category',
+      addGear: 'add-gear',
+      addCustomItem: 'add-custom-item',
+      saveItem: 'save-item',
+      removeItem: 'remove-item',
+    });
+  });
+
+  // Ten forms, ten intents, told apart by this field alone. Two branches sharing a value is
+  // not a compile error and not a runtime one either: the first `else if` to match wins, and
+  // the other form silently does the first one's work.
+  it('gives every intent a value of its own', () => {
+    const values = Object.values(PACK_INTENT);
+    expect(new Set(values).size).toBe(values.length);
   });
 });

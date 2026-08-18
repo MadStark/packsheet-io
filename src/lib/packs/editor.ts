@@ -49,6 +49,42 @@
  */
 
 // ---------------------------------------------------------------------------
+// Intents
+// ---------------------------------------------------------------------------
+
+/**
+ * The ten forms `src/pages/packs/[id].astro` answers on one POST handler, told apart by a
+ * hidden `intent` field — the same mechanism that page's gear siblings use for their two,
+ * and `BULK_FORM_FIELD.intent` in `src/lib/gear/bulk.ts` for the closet list's several.
+ *
+ * WHY THIS IS HERE RATHER THAN IN THE PAGE, which is where it started and where it belonged
+ * while the page was the only thing that could read or write these strings. It is not a
+ * decision — there is nothing buried in naming ten strings, and nothing below branches on
+ * one. It is here because TWO FILES NOW RENDER FORMS THAT THIS ONE HANDLER READS: the page
+ * itself, and `src/components/PackContents.vue`, which holds the per-item and per-category
+ * forms so that the pack's order is rendered exactly once. A component spelling
+ * `'save-item'` by hand is a component that can spell it wrongly, and the failure would be
+ * silent in the worst way — an unrecognised intent falls through to "something went wrong"
+ * on a form that looks perfectly ordinary. Named once, imported by both, and reachable by
+ * `tests/packs-editor.test.ts`, which `vitest.config.ts:64` cannot say of anything under
+ * `src/pages/`.
+ */
+export const PACK_INTENT = {
+  savePack: 'save-pack',
+  duplicatePack: 'duplicate-pack',
+  deletePack: 'delete-pack',
+  createCategory: 'create-category',
+  renameCategory: 'rename-category',
+  deleteCategory: 'delete-category',
+  addGear: 'add-gear',
+  addCustomItem: 'add-custom-item',
+  saveItem: 'save-item',
+  removeItem: 'remove-item',
+} as const;
+
+export type PackIntent = (typeof PACK_INTENT)[keyof typeof PACK_INTENT];
+
+// ---------------------------------------------------------------------------
 // Field names
 // ---------------------------------------------------------------------------
 

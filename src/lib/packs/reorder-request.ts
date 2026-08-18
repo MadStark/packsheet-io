@@ -55,7 +55,7 @@
  * and a tree of rows, and returns a value. The rule and its two reasons are in
  * `src/lib/packs/routes.ts`'s header — Invariant A in `tests/anonymous-read-path.test.ts`
  * is an EDGE rule, and this module's own dependency (`./reorder`) is bundled into the
- * browser with PK-41's island.
+ * browser with PK-37's island, `src/components/PackContents.vue`.
  */
 
 import {
@@ -83,7 +83,7 @@ export const REORDER_TARGET = {
 
 export type ReorderTarget = (typeof REORDER_TARGET)[keyof typeof REORDER_TARGET];
 
-/** The field names a request body uses. Named here so the island that lands with PK-41
+/** The field names a request body uses. Named here so PK-37's island (`src/components/PackContents.vue`)
  *  and the parser that reads it cannot drift — the same job `PACK_FORM_FIELD` does for a
  *  `FormData`, for a body that happens to be JSON rather than a form. */
 export const REORDER_FIELD = {

@@ -7,10 +7,18 @@ export const prerender = false;
 
 import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
+// PK-37's pack contents — the categories, the items, their figures, their forms and, once
+// it hydrates, dragging to reorder them. The only component on this page that hydrates, and
+// the ONE rendering of this pack's order: the forms that edit a row live on that row rather
+// than in a second, server-rendered copy of the same list underneath, which is what used to
+// be here and what left the two halves of the page disagreeing after every drag. It imports
+// nothing but pure modules — see its own header, and the AUTH_CONSUMERS entry for this page
+// in tests/anonymous-read-path.test.ts, which spells out why hosting an island leaves this
+// page's own server module off the client pass.
+import PackContents from '../../components/PackContents.vue';
 import { createAuthClient } from '../../lib/auth';
 import { readWeightSystem } from '../../lib/profile';
 import { WEIGHT_ENTRY_UNIT, formatWeight } from '../../lib/units';
-import { formatMoney } from '../../lib/money';
 import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
 import { PACKS_PATH, packPath } from '../../lib/packs/routes';
 import { loadPackForEdit } from '../../lib/packs/query';
@@ -32,8 +40,6 @@ import {
   EMPTY_PACK_CATEGORY_FORM_VALUES,
   PACK_CATEGORY_FORM_FIELD,
   PACK_FORM_FIELD,
-  PACK_ITEM_FORM_FIELD,
-  packItemToFormValues,
   packToFormValues,
   parseCustomPackItemForm,
   parsePackCategoryForm,
@@ -57,13 +63,14 @@ import {
 } from '../../lib/packs/fields';
 import {
   PACK_EDITOR_FIELD,
+  PACK_INTENT,
   categoryAppendPosition,
   hasPackCategory,
   itemAppendPosition,
   parseEntityId,
   parseGearItemIds,
 } from '../../lib/packs/editor';
-import { WEIGHT_BUCKETS, computeTotals, type WeightBucket } from '../../lib/totals';
+import { computeTotals } from '../../lib/totals';
 // The closet picker reads the closet through the SAME module the closet page does — one
 // owner-scoped, filtered, paginated read of `gear_items`, not a second one grown here. See
 // loadGearCloset's own comment for why its `.eq('user_id', ...)` is load-bearing rather
@@ -125,27 +132,15 @@ const DUPLICATE_FAILED_MESSAGE = 'Something went wrong duplicating this pack. Pl
 const DELETE_FAILED_MESSAGE =
   'We could not confirm whether that delete went through. Check your packs to see what is still there.';
 
-/**
- * This page answers one POST handler for nine different forms, told apart by a hidden
- * `intent` field — the same mechanism src/pages/gear/[id].astro uses for its two, and
- * src/lib/gear/bulk.ts's BULK_FORM_FIELD.intent for the closet list's several. Not exported
- * from src/lib/packs/ because there is no decision buried in naming nine strings; the
- * decisions each branch reaches for (which ids, which positions, what counts as
- * confirmation) all live in modules a test can call, which is the line GearItemForm's own
- * "NO DECISION-MAKING LIVES HERE" draws and this page stays on the right side of.
+/*
+ * The ten intents this one POST handler answers are named in src/lib/packs/editor.ts, not
+ * here. They moved the moment a second file started RENDERING forms that this handler reads:
+ * the per-item and per-category forms live in src/components/PackContents.vue now, so the
+ * page and the component would otherwise each be spelling 'save-item' by hand. The decisions
+ * each branch below reaches for (which ids, which positions, what counts as confirmation)
+ * all live in modules a test can call, which is the line GearItemForm's own "NO
+ * DECISION-MAKING LIVES HERE" draws and this page stays on the right side of.
  */
-const PACK_INTENT = {
-  savePack: 'save-pack',
-  duplicatePack: 'duplicate-pack',
-  deletePack: 'delete-pack',
-  createCategory: 'create-category',
-  renameCategory: 'rename-category',
-  deleteCategory: 'delete-category',
-  addGear: 'add-gear',
-  addCustomItem: 'add-custom-item',
-  saveItem: 'save-item',
-  removeItem: 'remove-item',
-} as const;
 
 let writeError: string | null = null;
 let packErrors: Readonly<Record<string, string>> = {};
@@ -154,7 +149,7 @@ let categoryErrors: Readonly<Record<string, string>> = {};
 let categoryValues: PackCategoryFormValues = EMPTY_PACK_CATEGORY_FORM_VALUES;
 /** A rename that failed validation, scoped to the ONE category it was submitted for, so the
  *  message renders beside that category's own field rather than at the top of a page with
- *  nine forms on it. */
+ *  ten forms on it. */
 let renameError: { readonly categoryId: string; readonly message: string } | null = null;
 let customErrors: Readonly<Record<string, string>> = {};
 let customValues: CustomPackItemFormValues = EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES;
@@ -207,7 +202,7 @@ const pickerSearch = gearQueryToSearchParams(pickerQuery).toString();
 const selfPath = pickerSearch === '' ? packPath(id) : `${packPath(id)}?${pickerSearch}`;
 
 // ---------------------------------------------------------------------------
-// POST: nine intents.
+// POST: ten intents.
 //
 // Method discipline: this page answers GET and POST, nothing else — Astro returns 405 for
 // any other method, since no other handler is exported. EVERY state-changing branch
@@ -398,7 +393,7 @@ if (Astro.request.method === 'POST') {
       }
     }
   } else {
-    // Neither of the nine: a stale form from before a deploy, or a crafted request. Named
+    // Neither of the ten: a stale form from before a deploy, or a crafted request. Named
     // rather than silently ignored, exactly as the gear pages name an unrecognised intent.
     writeError = GENERIC_WRITE_ERROR;
   }
@@ -410,11 +405,19 @@ if (Astro.request.method === 'POST') {
 
 /**
  * EVERY NUMBER ON THIS PAGE COMES FROM HERE. `computeTotals` (src/lib/totals.ts) is the
- * product's one totals engine, and this page performs no summation of its own — not for the
- * pack, not for a category, not for a line. The duplication that rule prevents is specific:
- * two implementations of "what does this pack weigh" drift, and the way they drift is that
- * the editor and the /packs list disagree about a figure a visitor can see on both screens
- * one click apart.
+ * product's one totals engine, and neither this page nor the island it hosts performs any
+ * summation of its own — not for the pack, not for a category, not for a line. The
+ * duplication that rule prevents is specific: two implementations of "what does this pack
+ * weigh" drift, and the way they drift is that the editor and the /packs list disagree about
+ * a figure a visitor can see on both screens one click apart.
+ *
+ * IT IS CALLED TWICE FOR THIS SCREEN, WHICH IS TWO CALLERS AND NOT TWO ENGINES. The figures
+ * a visitor READS are rendered once, by PackContents, from the tree it holds — so they still
+ * say the truth after a drag has moved an item between two categories. This call answers the
+ * one question that is the page's own and not the list's: how much a delete would take with
+ * it, in the confirmation at the bottom. Rendering a second summary strip here from this
+ * value is exactly what was removed, and must not come back: the moment two renderings of
+ * one figure can disagree, one of them is lying and nothing on screen says which.
  *
  * It also decides which bucket each item is in, from `worn`/`consumable`, so the coloured
  * marker beside a row and the three subtotals in the summary can never contradict each
@@ -425,19 +428,10 @@ if (Astro.request.method === 'POST') {
  * and consumable). That is deliberate on its part and is not caught here: every one of
  * those states is unreachable through this product's own write paths, and a pack that
  * cannot be totalled is a pack this editor cannot honestly render. See "ABSENT IS A VALUE;
- * MALFORMED IS A DEFECT" in that module.
+ * MALFORMED IS A DEFECT" in that module. It is also what makes the island's own call safe:
+ * a tree that would throw never reaches it, because this call would have failed first.
  */
 const totals = computeTotals(pack);
-
-/** The raw `pack_items` rows by id, so each row's form can pre-fill from the item's own
- *  stored columns while every number beside it comes from `totals`. `packItemToFormValues`
- *  is what collapses `worn`/`consumable` back into the one carriage value the control
- *  offers — the read direction of `carriageFlags`, and the only one this page uses. */
-const itemRows = new Map(
-  pack.pack_categories.flatMap((category) =>
-    category.pack_items.map((item) => [item.id, item] as const),
-  ),
-);
 
 const packValues: PackFormValues = packValuesOverride ?? packToFormValues(pack);
 // Options derived from the value the FORM is about to show, not from the stored column, so
@@ -448,12 +442,13 @@ const packValues: PackFormValues = packValuesOverride ?? packToFormValues(pack);
 const tripTypeOptions = packTripTypeOptions(packValues.trip_type);
 const tripTypeLabel = packTripTypeLabel(pack.trip_type);
 
+// The two <select>s below offer these by NAME, so what they need from the tree is the pair
+// (id, name) and not its order — which is why they are read straight off the loaded pack
+// rather than from the island. A drag reorders the list on screen and does not touch these:
+// a category is picked from them by reading its name, and the option that names the category
+// a visitor means is the same option whether it is third in the list or first.
 const categories = pack.pack_categories;
 const packIsEmpty = categories.length === 0;
-const pendingCategory =
-  pendingCategoryDelete === null
-    ? null
-    : (categories.find((category) => category.id === pendingCategoryDelete) ?? null);
 
 // The picker's page of closet rows. A failure here degrades to an empty picker with a
 // notice rather than failing the whole page: the pack itself loaded, and refusing to render
@@ -476,34 +471,6 @@ const pickerPageHref = (target: number): string => {
   const search = gearQueryToSearchParams({ ...pickerQuery, page: target }).toString();
   return search === '' ? packPath(id) : `${packPath(id)}?${search}`;
 };
-
-/**
- * The three weight buckets, as copy and as colour.
- *
- * PAGE-LOCAL AND COMPILER-CHECKED. These are `Record<WeightBucket, string>`, so a fourth
- * bucket added to `WEIGHT_BUCKETS` fails to compile here rather than rendering unlabelled
- * and uncoloured — which is the property that makes a lookup table safe to keep in a page
- * where a `if (bucket === 'base')` chain would not be. They are copy and colour, not a
- * decision: nothing branches on them, and the classification itself is `classifyPackItem`'s
- * inside computeTotals.
- *
- * BLUE FOR BASE WEIGHT IS THE ONE NON-INTERACTIVE USE THE PALETTE ALLOWS (CONTRIBUTING.md,
- * and --w-base is literally `var(--blue)` in src/styles/tokens.css). The other two are
- * their own tokens with their own dark cuts; none of the three is decorative, each one
- * marks which total a number belongs to.
- */
-const BUCKET_LABELS: Record<WeightBucket, string> = {
-  base: 'Base weight',
-  worn: 'Worn',
-  consumable: 'Consumables',
-};
-const BUCKET_TEXT_CLASS: Record<WeightBucket, string> = {
-  base: 'text-w-base',
-  worn: 'text-w-worn',
-  consumable: 'text-w-cons',
-};
-
-const prices = [...totals.pricesByCurrency.values()];
 
 const LABEL_CLASS = 'text-ink-2 block text-sm';
 const INPUT_CLASS =
@@ -547,50 +514,14 @@ const CARRIAGE_OPTION_CLASS =
     }
 
     {
-      /* The summary. Base, worn and consumable are the partition computeTotals guarantees —
-         the three add up to the total by definition, not by coincidence — so they are
-         rendered together rather than as one figure with the others hidden behind a link. */
+      /* THE SUMMARY IS NOT HERE, AND ITS ABSENCE IS THE POINT. It used to be: a strip of
+         figures rendered from this page's own `totals`, with a second copy of the same
+         figures inside the island below it. Both were honest on load and only one of them
+         could stay honest after a drag, so the figures now live once, in PackContents, next
+         to the tree they are derived from and recomputed from it. They are still
+         computeTotals' and nothing else's, and they still cannot move when a row does —
+         reordering carries no weight across. */
     }
-    <section aria-labelledby="summary-heading" class={PANEL_CLASS}>
-      <h2 id="summary-heading" class="sr-only">Pack totals</h2>
-      <dl class="flex flex-wrap gap-x-10 gap-y-4">
-        {
-          WEIGHT_BUCKETS.map((bucket) => (
-            <div>
-              <dt class="text-ink-3 text-xs tracking-wide uppercase">{BUCKET_LABELS[bucket]}</dt>
-              <dd class={`numeric mt-1 text-lg font-medium ${BUCKET_TEXT_CLASS[bucket]}`}>
-                {formatWeight(totals[bucket], weightSystem)}
-              </dd>
-            </div>
-          ))
-        }
-        <div>
-          <dt class="text-ink-3 text-xs tracking-wide uppercase">Total</dt>
-          <dd class="numeric text-ink mt-1 text-lg font-medium">
-            {formatWeight(totals.total, weightSystem)}
-          </dd>
-        </div>
-        <div>
-          <dt class="text-ink-3 text-xs tracking-wide uppercase">Packed</dt>
-          <dd class="numeric text-ink mt-1 text-lg font-medium">
-            {totals.packedCount} / {totals.itemCount}
-          </dd>
-        </div>
-        {
-          /* One entry per currency, never a single number: src/lib/money.ts refuses to
-             invent an exchange rate, so a pack holding GBP and USD gear has two costs and
-             saying so is the only honest rendering. */
-          prices.length > 0 && (
-            <div>
-              <dt class="text-ink-3 text-xs tracking-wide uppercase">Cost</dt>
-              <dd class="numeric text-ink mt-1 text-lg font-medium">
-                {prices.map((money) => formatMoney(money)).join(' · ')}
-              </dd>
-            </div>
-          )
-        }
-      </dl>
-    </section>
 
     {
       /* Pack details. One form, three fields, one write — see updatePack's own comment for
@@ -654,328 +585,103 @@ const CARRIAGE_OPTION_CLASS =
     </section>
 
     {
-      /* The categories, in `position` then `id` order — applied by loadPackForEdit, which
-         is where that tie-break lives, because ties are legal (the column is deliberately
-         not unique) and the two sides have to agree on how they resolve.
+      /* THE ONE HYDRATED COMPONENT ON THIS PAGE, and the only JavaScript this editor has.
+         It is this pack's categories and items — the order, the figures and the per-row
+         forms — as ONE component rather than a drag surface sitting above a second,
+         server-rendered copy of the same list, which is what was here before and what left
+         the two disagreeing after every drag. Its own header opens with that argument.
 
-         REORDERING IS NOT ON THIS PAGE YET, and its absence is a decision rather than an
-         omission: PK-41's drag-and-drop island is pointer-only by design, and the endpoint
-         it posts to (PACK_REORDER_PATH) already exists. Until it lands, a category's place
-         is where it was created and an item's is where it was added — both appended at the
-         end, which is what makes the order predictable without a control. */
+         The tree it is handed is in `position` then `id` order, applied by loadPackForEdit,
+         which is where that tie-break lives: ties are legal (the column is deliberately not
+         unique) and both sides of a reorder have to resolve them the same way.
+
+         WHAT IS IN IT AND WHAT IS NOT. In: everything that is a rendering of the ordered
+         list — the categories, their items, their subtotals, the pack's own figures, and
+         every control that edits a row already in this pack (rename, delete category behind
+         its two-step reveal, quantity/carriage/packed, remove item). Out, and still plain
+         `.astro` above and below it: the pack details form, the "add category" form, the
+         closet picker, the one-off item form and the pack-level actions. None of those is a
+         rendering of the order — each either creates a row or acts on the pack as a whole.
+
+         IT DEGRADES TO THE EDITOR IT REPLACED. Astro server-renders the component, so the
+         controls inside it arrive as ordinary `<form method="post">` markup with hidden
+         intent and id fields, posting to this URL and answered by the branch above with the
+         same 303. With JavaScript off, that markup IS the editor, with none of its
+         capability removed — the claim tests/packs-drag.test.ts renders the component to
+         check rather than to assert in a comment.
+
+         `client:visible` RATHER THAN THE ALTERNATIVES, deliberately:
+
+           - NOT `client:load`. What hydration adds is dragging, and a drag needs the rows
+             on screen. Hydrating before they are visible buys nothing and competes for the
+             main thread with a page that also renders a paginated closet picker. Nothing is
+             lost by waiting, because every control in the list is a form the server answers
+             whether or not the bundle has run.
+           - NOT `client:only`. Two reasons, and the second is the one that matters. It
+             would leave a hole where the whole list is until the bundle runs — and forever
+             for a visitor whose JavaScript never arrives — which for a component that holds
+             the editing controls is not a degraded page but no page at all. And it removes
+             this page's import edge to the component from the emitted server module, which
+             is exactly the attribution hazard tests/anonymous-read-path.test.ts documents
+             at length (a `client:only` island is invisible to a route-rooted walk). Nothing
+             here depends on that edge, but keeping the ordinary one keeps this page the
+             simple case for every guardrail that reads the graph.
+
+         THE DRAG AFFORDANCES APPEAR WITH HYDRATION, not with the markup: no grip, no
+         `draggable`, no drop target is rendered until the component mounts — see its own
+         header. So there is never a window in which a handle is drawn and does nothing.
+
+         The last four props are the POST branch above, made visible: which rename failed,
+         which item's settings failed and with what the visitor typed, and which category
+         has been asked about but not yet confirmed. The component decides none of them; it
+         renders what this request already decided, which is what lets the same markup serve
+         a visitor with no JavaScript at all. */
     }
-    <section aria-labelledby="categories-heading" class="mt-10">
-      <h2 id="categories-heading" class="text-xl">Categories</h2>
+    <PackContents
+      client:visible
+      packId={pack.id}
+      categories={pack.pack_categories}
+      weightSystem={weightSystem}
+      selfPath={selfPath}
+      renameError={renameError}
+      itemError={itemError}
+      pendingCategoryDeleteId={pendingCategoryDelete}
+    />
 
-      {
-        packIsEmpty ? (
-          <div class="border-hairline bg-surface mt-4 rounded-[var(--r)] border px-6 py-12 text-center">
-            {/* A pack with no categories is a valid, ordinary state — a pack somebody made
-                a minute ago — and not an error. It renders as an invitation, and every
-                total above it reads zero, which is the truth about an empty pack. */}
-            <p class="text-ink-2">This pack has no categories yet.</p>
-            <p class="text-ink-3 mt-2 text-sm">
-              Categories are how a pack is grouped — Shelter, Sleep, Cooking, or whatever matches
-              the trip. Add one below, then fill it from your closet.
-            </p>
-          </div>
-        ) : (
-          <ul class="mt-4 space-y-6">
-            {totals.categories.map((categoryTotals) => (
-              <li class="border-hairline bg-surface rounded-[var(--r)] border">
-                <div class="border-hairline flex flex-wrap items-end justify-between gap-4 border-b p-5">
-                  <form method="POST" class="flex flex-1 flex-wrap items-end gap-3">
-                    <input type="hidden" name="intent" value={PACK_INTENT.renameCategory} />
-                    <input
-                      type="hidden"
-                      name={PACK_EDITOR_FIELD.categoryId}
-                      value={categoryTotals.id}
-                    />
-                    <div class="min-w-48 flex-1">
-                      <label for={`category-name-${categoryTotals.id}`} class={LABEL_CLASS}>
-                        Category name
-                      </label>
-                      <input
-                        id={`category-name-${categoryTotals.id}`}
-                        name={PACK_CATEGORY_FORM_FIELD.name}
-                        type="text"
-                        value={categoryTotals.name}
-                        aria-describedby={
-                          renameError?.categoryId === categoryTotals.id
-                            ? `category-name-error-${categoryTotals.id}`
-                            : undefined
-                        }
-                        aria-invalid={
-                          renameError?.categoryId === categoryTotals.id ? 'true' : undefined
-                        }
-                        class={INPUT_CLASS}
-                      />
-                      {renameError?.categoryId === categoryTotals.id && (
-                        <p id={`category-name-error-${categoryTotals.id}`} class={ERROR_CLASS}>
-                          {renameError.message}
-                        </p>
-                      )}
-                    </div>
-                    <button type="submit" class={QUIET_BUTTON_CLASS}>
-                      Rename
-                    </button>
-                  </form>
-
-                  <p class="text-ink-2 numeric text-sm">
-                    <span class={`font-medium ${BUCKET_TEXT_CLASS.base}`}>
-                      {formatWeight(categoryTotals.base, weightSystem)}
-                    </span>
-                    <span class="text-ink-3"> base of </span>
-                    <span class="text-ink font-medium">
-                      {formatWeight(categoryTotals.total, weightSystem)}
-                    </span>
-                  </p>
-
-                  {pendingCategoryDelete === categoryTotals.id ? null : (
-                    <form method="POST">
-                      <input type="hidden" name="intent" value={PACK_INTENT.deleteCategory} />
-                      <input
-                        type="hidden"
-                        name={PACK_EDITOR_FIELD.categoryId}
-                        value={categoryTotals.id}
-                      />
-                      <button type="submit" class={DANGER_BUTTON_CLASS}>
-                        Delete category
-                      </button>
-                    </form>
-                  )}
-                </div>
-
-                {/* The reveal half of the two-step, rendered in place of the row's own
-                    delete button and naming the cascade BEFORE it happens. pack_items
-                    references pack_categories ON DELETE CASCADE (core_schema.sql:303), so
-                    deleting a category takes every item in it; a visitor who only meant to
-                    tidy a heading has to be told that in the same breath as being asked.
-                    No client-side confirm() anywhere in this — see the identical reveal on
-                    the two gear pages, whose gate this shares. */}
-                {pendingCategory?.id === categoryTotals.id && (
-                  <div class="border-rust/40 bg-rust/10 border-b px-5 py-4">
-                    <h3 class="text-rust text-base">Confirm delete</h3>
-                    <p class="text-ink-2 mt-2 text-sm">
-                      Delete “{categoryTotals.name}” permanently?{' '}
-                      {categoryTotals.items.length === 0
-                        ? 'It holds no items.'
-                        : `Its ${categoryTotals.items.length} item${categoryTotals.items.length === 1 ? '' : 's'} will be removed from this pack with it.`}{' '}
-                      This cannot be undone. Your closet is not affected — a pack item points at
-                      your gear and never owns it.
-                    </p>
-                    <div class="mt-4 flex flex-wrap gap-3">
-                      <form method="POST">
-                        <input type="hidden" name="intent" value={PACK_INTENT.deleteCategory} />
-                        <input
-                          type="hidden"
-                          name={PACK_EDITOR_FIELD.categoryId}
-                          value={categoryTotals.id}
-                        />
-                        {/* Value from the same constant confirmsGearDeletion compares
-                            against, never a bare "1": the writer and the reader of this
-                            gate must not be able to drift apart. */}
-                        <input
-                          type="hidden"
-                          name={BULK_FORM_FIELD.confirm}
-                          value={GEAR_DELETE_CONFIRMATION_VALUE}
-                        />
-                        <button type="submit" class={CONFIRM_BUTTON_CLASS}>
-                          Delete category and its items
-                        </button>
-                      </form>
-                      <a
-                        href={selfPath}
-                        class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
-                      >
-                        Cancel
-                      </a>
-                    </div>
-                  </div>
-                )}
-
-                {categoryTotals.items.length === 0 ? (
-                  <p class="text-ink-3 px-5 py-6 text-sm">
-                    Nothing in here yet. Add something from your closet below, or a one-off item.
-                  </p>
-                ) : (
-                  <ul class="divide-hairline divide-y">
-                    {categoryTotals.items.map((item) => {
-                      // The stored row behind this line, for the controls; every NUMBER
-                      // beside them comes from `item`, which is computeTotals' own rollup.
-                      const row = itemRows.get(item.id);
-                      const values =
-                        itemError?.itemId === item.id
-                          ? itemError.values
-                          : row
-                            ? packItemToFormValues(row)
-                            : null;
-                      return (
-                        <li class="px-5 py-4">
-                          <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-                            <p class="text-ink min-w-0 font-medium">
-                              {/* `name` is null only for a row whose gear was deleted and
-                                  whose snapshot carried no name — unreachable through this
-                                  product's write paths, but ResolvedPackItem types it as
-                                  nullable and inventing a name here would be inventing
-                                  data. */}
-                              {item.name ?? 'Unnamed item'}
-                              {item.source === 'snapshot' && (
-                                <span class="text-ink-3 ml-2 text-xs font-normal">
-                                  one-off item
-                                </span>
-                              )}
-                            </p>
-                            <p class="numeric text-sm">
-                              <span class={`font-medium ${BUCKET_TEXT_CLASS[item.bucket]}`}>
-                                {formatWeight(item.lineWeightGrams, weightSystem)}
-                              </span>
-                              {item.quantity > 1 && (
-                                <span class="text-ink-3">
-                                  {' '}
-                                  ({formatWeight(item.unitWeightGrams, weightSystem)} each)
-                                </span>
-                              )}
-                              {item.linePrice !== null && (
-                                <span class="text-ink-3"> · {formatMoney(item.linePrice)}</span>
-                              )}
-                            </p>
-                          </div>
-
-                          {values !== null && (
-                            <form method="POST" class="mt-3 flex flex-wrap items-center gap-3">
-                              <input type="hidden" name="intent" value={PACK_INTENT.saveItem} />
-                              <input
-                                type="hidden"
-                                name={PACK_EDITOR_FIELD.itemId}
-                                value={item.id}
-                              />
-
-                              <label class="text-ink-2 flex items-center gap-2 text-sm">
-                                <span>Qty</span>
-                                <input
-                                  name={PACK_ITEM_FORM_FIELD.quantity}
-                                  type="text"
-                                  inputmode="numeric"
-                                  value={values.quantity}
-                                  aria-label={`Quantity of ${item.name ?? 'this item'}`}
-                                  aria-invalid={
-                                    itemError?.itemId === item.id && itemError.errors.quantity
-                                      ? 'true'
-                                      : undefined
-                                  }
-                                  class="border-hairline bg-surface text-ink aria-invalid:border-rust w-16 rounded-[var(--r-sm)] border px-2 py-1 text-sm"
-                                />
-                              </label>
-
-                              {/* ONE CONTROL, THREE OPTIONS — never two checkboxes. The
-                                  fourth combination two checkboxes make easiest to produce
-                                  (worn AND consumable) is refused by
-                                  pack_items_worn_consumable_exclusive and would make the
-                                  pack's own totals throw on read. A radio group cannot
-                                  express it at all: the browser itself refuses to let two
-                                  radios of one name be checked. See PACK_ITEM_CARRIAGES. */}
-                              <fieldset class="flex flex-wrap items-center gap-2">
-                                <legend class="sr-only">
-                                  How {item.name ?? 'this item'} is carried
-                                </legend>
-                                {PACK_ITEM_CARRIAGES.map((carriage) => (
-                                  <label
-                                    class={CARRIAGE_OPTION_CLASS}
-                                    title={PACK_ITEM_CARRIAGE_MEANINGS[carriage]}
-                                  >
-                                    <input
-                                      type="radio"
-                                      name={PACK_ITEM_FORM_FIELD.carriage}
-                                      value={carriage}
-                                      checked={carriage === values.carriage}
-                                      aria-invalid={
-                                        itemError?.itemId === item.id && itemError.errors.carriage
-                                          ? 'true'
-                                          : undefined
-                                      }
-                                    />
-                                    {PACK_ITEM_CARRIAGE_LABELS[carriage]}
-                                  </label>
-                                ))}
-                              </fieldset>
-
-                              <label class="text-ink-2 flex items-center gap-2 text-sm">
-                                <input
-                                  type="checkbox"
-                                  name={PACK_ITEM_FORM_FIELD.packed}
-                                  value="on"
-                                  checked={values.packed !== ''}
-                                  class="accent-blue"
-                                />
-                                Packed
-                              </label>
-
-                              <button type="submit" class={QUIET_BUTTON_CLASS}>
-                                Save
-                              </button>
-                            </form>
-                          )}
-
-                          {itemError?.itemId === item.id && (
-                            <ul class="mt-2 space-y-1">
-                              {Object.entries(itemError.errors).map(([, message]) => (
-                                <li class={ERROR_CLASS}>{message}</li>
-                              ))}
-                            </ul>
-                          )}
-
-                          <form method="POST" class="mt-2">
-                            <input type="hidden" name="intent" value={PACK_INTENT.removeItem} />
-                            <input type="hidden" name={PACK_EDITOR_FIELD.itemId} value={item.id} />
-                            <button
-                              type="submit"
-                              class="text-ink-3 hover:text-rust text-xs underline transition-colors"
-                            >
-                              Remove {item.name ?? 'this item'} from this pack
-                            </button>
-                          </form>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </li>
-            ))}
-          </ul>
-        )
-      }
-
-      <form method="POST" class={PANEL_CLASS}>
-        <input type="hidden" name="intent" value={PACK_INTENT.createCategory} />
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
-          <div class="flex-1">
-            <label for="new-category-name" class={LABEL_CLASS}>
-              New category <span aria-hidden="true" class="text-rust">*</span>
-            </label>
-            <input
-              id="new-category-name"
-              name={PACK_CATEGORY_FORM_FIELD.name}
-              type="text"
-              value={categoryValues.name}
-              placeholder="Shelter"
-              aria-required="true"
-              aria-describedby={categoryErrors.name ? 'new-category-error' : undefined}
-              aria-invalid={categoryErrors.name ? 'true' : undefined}
-              class={INPUT_CLASS}
-            />
-            {
-              categoryErrors.name && (
-                <p id="new-category-error" class={ERROR_CLASS}>
-                  {categoryErrors.name}
-                </p>
-              )
-            }
-          </div>
-          <button type="submit" class={PRIMARY_BUTTON_CLASS}>Add category</button>
+    {
+      /* Adding a category. Outside the island because it MAKES a row rather than rendering
+         one: categoryAppendPosition puts the new category at the end of the list above, and
+         the 303 this write redirects to is what draws it there. */
+    }
+    <form method="POST" class={PANEL_CLASS}>
+      <input type="hidden" name="intent" value={PACK_INTENT.createCategory} />
+      <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
+        <div class="flex-1">
+          <label for="new-category-name" class={LABEL_CLASS}>
+            New category <span aria-hidden="true" class="text-rust">*</span>
+          </label>
+          <input
+            id="new-category-name"
+            name={PACK_CATEGORY_FORM_FIELD.name}
+            type="text"
+            value={categoryValues.name}
+            placeholder="Shelter"
+            aria-required="true"
+            aria-describedby={categoryErrors.name ? 'new-category-error' : undefined}
+            aria-invalid={categoryErrors.name ? 'true' : undefined}
+            class={INPUT_CLASS}
+          />
+          {
+            categoryErrors.name && (
+              <p id="new-category-error" class={ERROR_CLASS}>
+                {categoryErrors.name}
+              </p>
+            )
+          }
         </div>
-      </form>
-    </section>
+        <button type="submit" class={PRIMARY_BUTTON_CLASS}>Add category</button>
+      </div>
+    </form>
 
     {
       /* Adding things. Both forms need a category to put something in, so both are hidden

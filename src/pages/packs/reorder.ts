@@ -74,8 +74,9 @@ export const prerender = false;
  * ---------------------------------------------------------------------------
  *
  * JSON, always, except for the signed-out redirect below. On success, the plan that was
- * actually applied — `runs` and `reparent` — because that is what the island (PK-41)
- * re-renders from when its own optimistic prediction and the server's answer disagree:
+ * actually applied — `runs` and `reparent` — because that is what the island (PK-37,
+ * src/components/PackContents.vue) re-renders from when its own optimistic prediction and
+ * the server's answer disagree:
  * `ReorderPlan` is a PREDICTION on the client and a RESULT here, from identical code, and
  * this is the side that gets written.
  *
