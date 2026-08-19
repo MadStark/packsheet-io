@@ -552,6 +552,51 @@
   }
 
   /*
+   * A FILE INPUT'S BUTTON, which is the one control the browser draws for us. It
+   * cannot be given .btn — `::file-selector-button` is a pseudo-element, not an
+   * element a class can land on — so the stamp is restated here rather than at the
+   * call site. That matters for one reason: the shadow is mixed from --shadow-ink
+   * like every other shadow on the site, and writing it out as a literal rgba() in
+   * a Tailwind arbitrary value would put a second, unlinked copy of that colour in
+   * the codebase.
+   */
+  .file-field {
+    display: block;
+    width: 100%;
+    color: var(--ink-2);
+    font-family: var(--font-system);
+    font-size: 13px;
+  }
+
+  .file-field::file-selector-button {
+    margin-right: 16px;
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--ink);
+    border-radius: var(--radius);
+    background-color: var(--note);
+    color: var(--ink);
+    font-family: var(--font-system);
+    font-size: 14px;
+    font-weight: 400;
+    cursor: pointer;
+    box-shadow: 1px 1px 0 rgba(var(--shadow-ink), 0.18);
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  .file-field::file-selector-button:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 2px 2px 0 rgba(var(--shadow-ink), 0.18);
+  }
+
+  .file-field::file-selector-button:active {
+    transform: none;
+    box-shadow: 0 0 0 rgba(var(--shadow-ink), 0.18);
+  }
+
+  /*
    * §6 — search alone is a bare underline in ink with an icon, no box. And it is
    * the SYSTEM voice: the test is "did the visitor write this onto their list" — a
    * category they typed is on the list, a search query is a question asked of the
@@ -661,6 +706,15 @@
     font-size: 14px;
     font-weight: 400;
     line-height: 1;
+    /*
+     * A SEGMENT NEVER WRAPS. It is a fixed 30px box, so a label that wraps to two
+     * lines does not make the control taller — it overflows it, and the control
+     * reads as broken. Caught on the account page, where "Imperial (oz · lb)" wrapped
+     * inside a narrow column. This is the same reasoning §3 gives for a table cell:
+     * a fixed-height row plus wrapping text is a defect, and the fix is to let the
+     * box be wider rather than to let the text fold.
+     */
+    white-space: nowrap;
     cursor: pointer;
     transition:
       background-color 0.15s ease,

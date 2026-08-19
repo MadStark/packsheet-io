@@ -157,35 +157,105 @@ const isClean = report !== null && gearImportIsClean(report);
   title="Import gear — Packsheet"
   description="Import gear items into your Packsheet closet from a JSON or JSONL file."
 >
+  {
+    /* PK-64 (Notebook Paper). A form and a list are two parts of the document (DESIGN.md
+       §2.3), so this is two sheets, not one: the first always carries the title and the
+       choose-a-file / paste-JSON form, and the second — only once a file has produced rows
+       — carries the preview ledger and the confirm button. Both error notes are siblings
+       ABOVE the sheets, never inside one (§2.5: a note may only lie directly on the paper).
+       See src/pages/gear/new.astro for the one-sheet-with-a-form precedent this borrows,
+       and src/pages/gear/index.astro for the ledger this borrows. */
+  }
   <GearNav />
-  <main class="mx-auto max-w-3xl px-6 py-10">
-    <h1 class="text-3xl">Import gear</h1>
-    <p class="text-ink-2 mt-2 text-sm">
-      Bring in gear from a Packsheet export, or from a JSON file you have written yourself. Nothing
-      is added to your closet until you have seen what it would add.
-    </p>
-
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
     {
       submissionError && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {submissionError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{submissionError}</p>
+        </div>
       )
     }
 
     {
       report?.fileError && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {report.fileError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{report.fileError}</p>
+        </div>
       )
     }
+
+    <div class="sheet">
+      <div class="sheet-body">
+        <p class="eyebrow">Gear</p>
+        <h1 class="page-title mt-2">Import gear</h1>
+        <p class="aside mt-2">all at once</p>
+        <p class="hint mt-2">
+          Bring in gear from a Packsheet export, or from a JSON file you have written yourself.
+          Nothing is added to your closet until you have seen what it would add.
+        </p>
+        <hr class="sheet-rule" />
+
+        <section aria-labelledby="choose-heading">
+          <h2 id="choose-heading" class="section-title">
+            {report === null ? 'Choose a file' : 'Try another file'}
+          </h2>
+
+          <form method="POST" enctype="multipart/form-data" class="mt-4 space-y-6">
+            <div>
+              <label for="import-file" class="field-label"> Upload a file </label>
+              <input
+                id="import-file"
+                type="file"
+                name={IMPORT_FORM_FIELD.file}
+                accept=".json,.jsonl,application/json,application/jsonl,text/plain"
+                class="file-field mt-1"
+              />
+              <p class="field-hint">
+                A Packsheet export, a JSON array of items, a single item, or JSONL with one item per
+                line. Up to {MAX_IMPORT_ITEMS} items.
+              </p>
+            </div>
+
+            <div>
+              <label for="import-text" class="field-label"> Or paste it in </label>
+              {
+                /* PRE-FILLED WITH WHAT WAS PASTED, when this render followed a paste. A page
+                   that says "fix the file and try again" while having just cleared the box the
+                   visitor typed into is asking them to retype what it already has —
+                   `src/lib/gear/form.ts` makes exactly this argument for the item form ("never
+                   clear a form someone has just filled in") and it applies identically here.
+                   Only for the paste path: a file input cannot be re-populated from the server,
+                   so a submission that came from a file leaves this empty rather than dumping
+                   the file's whole contents into a textarea the visitor never typed in. It is
+                   the visitor's own data, so it takes the written face like every other value
+                   they typed — `.field` gives it that. */
+              }
+              <textarea
+                id="import-text"
+                name={IMPORT_FORM_FIELD.text}
+                rows="6"
+                spellcheck="false"
+                class="field mt-1 block w-full"
+                placeholder={'{ "name": "Nemo Hornet 2P", "weight_grams": 907 }'}
+                >{pastedText}</textarea
+              >
+            </div>
+
+            <div class="flex items-center gap-3">
+              <button
+                type="submit"
+                name={IMPORT_FORM_FIELD.intent}
+                value={IMPORT_INTENT.preview}
+                class="btn"
+              >
+                Preview
+              </button>
+              <a href={GEAR_PATH} class="text-ink-2 hover:text-ink text-sm">Cancel</a>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>
 
     {
       /* THE PREVIEW. Rendered whenever a file parsed into rows at all, clean or not, so a
@@ -195,190 +265,139 @@ const isClean = report !== null && gearImportIsClean(report);
     }
     {
       previewRows.length > 0 && (
-        <section class="mt-8" aria-labelledby="preview-heading">
-          <h2 id="preview-heading" class="text-xl">
-            {isClean
-              ? readyHeading(previewRows.length)
-              : problemHeading(problemCount, previewRows.length)}
-          </h2>
-          <p class="text-ink-2 mt-2 text-sm">
-            {isClean
-              ? 'This is exactly what will be added. Check it, then import.'
-              : 'Nothing is imported while any item has a problem. Fix the file and try again.'}
-          </p>
+        <div class="sheet">
+          <div class="sheet-body">
+            <section aria-labelledby="preview-heading">
+              <h2 id="preview-heading" class="section-title">
+                {isClean
+                  ? readyHeading(previewRows.length)
+                  : problemHeading(problemCount, previewRows.length)}
+              </h2>
+              <p class="hint mt-2">
+                {isClean
+                  ? 'This is exactly what will be added. Check it, then import.'
+                  : 'Nothing is imported while any item has a problem. Fix the file and try again.'}
+              </p>
 
-          <div class="border-hairline mt-6 overflow-x-auto rounded-[var(--r-sm)] border">
-            <table class="w-full text-left text-sm">
-              <caption class="sr-only">
-                Every item in the file, with the values that would be saved and any problems found
-                in it
-              </caption>
-              <thead class="border-hairline bg-sunk border-b">
-                <tr>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    #
-                  </th>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    Item
-                  </th>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    Qty
-                  </th>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    Weight
-                  </th>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    Price
-                  </th>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    Status
-                  </th>
-                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
-                    Problem
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {previewRows.map((row) => (
-                  <tr class="border-hairline border-t align-top">
-                    <td class="text-ink-3 px-3 py-2 font-mono text-xs">{row.position}</td>
-                    <td class="text-ink px-3 py-2">{row.label}</td>
-                    {row.ok ? (
-                      <>
-                        {/* THE VALUES THAT WILL BE WRITTEN, not the ones in the file — read
-                            off the parsed GearItemInput, so every default this format
-                            applies is VISIBLE here rather than applied silently. An item
-                            with no weight_grams key shows "0 g", an item with no status
-                            shows "Owned", an item with no quantity shows "1". The page
-                            promises "nothing is added until you have seen what it would
-                            add"; a table of names and problems did not keep that promise,
-                            and the defaults were exactly the part a visitor could not have
-                            guessed. */}
-                        <td class="text-ink-2 px-3 py-2 font-mono text-xs">
-                          {row.values.quantity}
-                        </td>
-                        <td class="text-ink-2 px-3 py-2 font-mono text-xs">
-                          {row.values.weight_grams} g
-                        </td>
-                        <td class="text-ink-2 px-3 py-2 font-mono text-xs">
-                          {row.values.price === null
-                            ? '—'
-                            : `${row.values.price} ${row.values.currency}`}
-                        </td>
-                        <td class="text-ink-2 px-3 py-2">
-                          {GEAR_STATUS_LABELS[row.values.status]}
-                        </td>
-                        <td class="px-3 py-2">
-                          {/* A word, not only a colour or an icon: WCAG AA does not accept
-                              colour as the sole carrier of meaning, and this column is the
-                              one a visitor reads down to decide whether to import. */}
-                          <span class="text-ink-3">No problems</span>
-                        </td>
-                      </>
-                    ) : (
-                      <>
-                        {/* A row that did not validate has no values to show — showing the
-                            file's raw ones would be showing values that are not going to be
-                            written, in the columns that promise they are. */}
-                        <td class="text-ink-3 px-3 py-2" colspan="4">
-                          —
-                        </td>
-                        <td class="px-3 py-2">
-                          <ul class="text-rust space-y-1">
-                            {Object.entries(row.errors).map(([field, message]) => (
-                              <li>
-                                <span class="text-ink-3 font-mono text-xs">{field}</span> {message}
-                              </li>
-                            ))}
-                          </ul>
-                        </td>
-                      </>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              <div class="mt-6 overflow-x-auto">
+                <table class="ledger">
+                  <caption class="sr-only">
+                    Every item in the file, with the values that would be saved and any problems
+                    found in it
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">#</th>
+                      <th scope="col">Item</th>
+                      <th scope="col" class="text-right">
+                        Qty
+                      </th>
+                      <th scope="col" class="text-right">
+                        Weight
+                      </th>
+                      <th scope="col" class="text-right">
+                        Price
+                      </th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Problem</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewRows.map((row) => (
+                      <tr class={row.ok ? 'align-top' : 'row-retired align-top'}>
+                        <td class="numeric text-ink-3">{row.position}</td>
+                        <td class="text-ink">{row.label}</td>
+                        {row.ok ? (
+                          <>
+                            {/* THE VALUES THAT WILL BE WRITTEN, not the ones in the file — read
+                                off the parsed GearItemInput, so every default this format
+                                applies is VISIBLE here rather than applied silently. An item
+                                with no weight_grams key shows "0 g", an item with no status
+                                shows "Owned", an item with no quantity shows "1". The page
+                                promises "nothing is added until you have seen what it would
+                                add"; a table of names and problems did not keep that promise,
+                                and the defaults were exactly the part a visitor could not have
+                                guessed. */}
+                            <td class="numeric text-ink-2 text-right">{row.values.quantity}</td>
+                            <td class="numeric text-ink-2 text-right">
+                              {row.values.weight_grams} g
+                            </td>
+                            <td class="numeric text-ink-2 text-right">
+                              {row.values.price === null
+                                ? '—'
+                                : `${row.values.price} ${row.values.currency}`}
+                            </td>
+                            <td>{GEAR_STATUS_LABELS[row.values.status]}</td>
+                            <td>
+                              {/* A word, not only a colour or an icon: WCAG AA does not accept
+                                  colour as the sole carrier of meaning, and this column is the
+                                  one a visitor reads down to decide whether to import. System
+                                  voice: this is the app's own verdict on the row, not part of
+                                  the item's record. */}
+                              <span class="system text-ink-3">No problems</span>
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            {/* A row that did not validate has no values to show — showing the
+                                file's raw ones would be showing values that are not going to be
+                                written, in the columns that promise they are. */}
+                            <td class="text-ink-3" colspan="4">
+                              —
+                            </td>
+                            {/* THIS CELL WRAPS, and it is the only cell on the site that does.
+                                .ledger forbids wrapping because §3's 40px row is a hard
+                                rhythm: one folded cell turns a row into 60px and puts every
+                                hairline below it off the 20px cell. That rule is about DATA
+                                columns — a weight, a price, a name — where the fix is to drop
+                                a column rather than let one fold.
+
+                                A validation message is prose, not data. It has no fixed
+                                length, there is no column to drop, and the alternative to
+                                wrapping is clipping the sentence that tells the visitor what
+                                to fix. A problem row is already off the rhythm by design
+                                anyway: it carries a wash and a bar precisely because it is an
+                                exception. */}
+                            <td class="whitespace-normal">
+                              {/* The app is the one objecting, so this reuses .field-error's
+                                  own treatment — system voice, rust — rather than inventing a
+                                  second one for the same kind of message. */}
+                              <ul class="field-error space-y-1">
+                                {Object.entries(row.errors).map(([field, message]) => (
+                                  <li>
+                                    <span class="text-ink-3">{field}</span> {message}
+                                  </li>
+                                ))}
+                              </ul>
+                            </td>
+                          </>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {isClean && (
+                <form method="POST" class="mt-6">
+                  {/* The bytes the preview above was built from, re-posted. The server parses
+                      and validates them again from scratch — see the POST branch's own comment
+                      on why nothing but the file travels. */}
+                  <input type="hidden" name={IMPORT_FORM_FIELD.text} value={submittedText} />
+                  <button
+                    type="submit"
+                    name={IMPORT_FORM_FIELD.intent}
+                    value={IMPORT_INTENT.confirm}
+                    class="btn btn-primary"
+                  >
+                    Import {itemCount(previewRows.length)}
+                  </button>
+                </form>
+              )}
+            </section>
           </div>
-
-          {isClean && (
-            <form method="POST" class="mt-6">
-              {/* The bytes the preview above was built from, re-posted. The server parses
-                  and validates them again from scratch — see the POST branch's own comment
-                  on why nothing but the file travels. */}
-              <input type="hidden" name={IMPORT_FORM_FIELD.text} value={submittedText} />
-              <button
-                type="submit"
-                name={IMPORT_FORM_FIELD.intent}
-                value={IMPORT_INTENT.confirm}
-                class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-              >
-                Import {itemCount(previewRows.length)}
-              </button>
-            </form>
-          )}
-        </section>
+        </div>
       )
     }
-
-    <section class="mt-10" aria-labelledby="choose-heading">
-      <h2 id="choose-heading" class="text-xl">
-        {report === null ? 'Choose a file' : 'Try another file'}
-      </h2>
-
-      <form method="POST" enctype="multipart/form-data" class="mt-4 space-y-6">
-        <div>
-          <label for="import-file" class="text-ink block text-sm font-medium">
-            Upload a file
-          </label>
-          <input
-            id="import-file"
-            type="file"
-            name={IMPORT_FORM_FIELD.file}
-            accept=".json,.jsonl,application/json,application/jsonl,text/plain"
-            class="text-ink-2 file:border-hairline file:bg-surface file:text-ink-2 hover:file:text-ink mt-2 block w-full text-sm file:mr-4 file:rounded-[var(--r-sm)] file:border file:px-3 file:py-1.5 file:text-sm file:font-medium"
-          />
-          <p class="text-ink-3 mt-2 text-xs">
-            A Packsheet export, a JSON array of items, a single item, or JSONL with one item per
-            line. Up to {MAX_IMPORT_ITEMS} items.
-          </p>
-        </div>
-
-        <div>
-          <label for="import-text" class="text-ink block text-sm font-medium">
-            Or paste it in
-          </label>
-          {
-            /* PRE-FILLED WITH WHAT WAS PASTED, when this render followed a paste. A page
-               that says "fix the file and try again" while having just cleared the box the
-               visitor typed into is asking them to retype what it already has —
-               `src/lib/gear/form.ts` makes exactly this argument for the item form ("never
-               clear a form someone has just filled in") and it applies identically here.
-               Only for the paste path: a file input cannot be re-populated from the server,
-               so a submission that came from a file leaves this empty rather than dumping
-               the file's whole contents into a textarea the visitor never typed in. */
-          }
-          <textarea
-            id="import-text"
-            name={IMPORT_FORM_FIELD.text}
-            rows="6"
-            spellcheck="false"
-            class="border-hairline bg-surface text-ink mt-2 block w-full rounded-[var(--r-sm)] border px-3 py-2 font-mono text-xs"
-            placeholder={'{ "name": "Nemo Hornet 2P", "weight_grams": 907 }'}>{pastedText}</textarea
-          >
-        </div>
-
-        <div class="flex items-center gap-3">
-          <button
-            type="submit"
-            name={IMPORT_FORM_FIELD.intent}
-            value={IMPORT_INTENT.preview}
-            class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-          >
-            Preview
-          </button>
-          <a href={GEAR_PATH} class="text-ink-2 hover:text-ink text-sm">Cancel</a>
-        </div>
-      </form>
-    </section>
   </main>
 </Layout>

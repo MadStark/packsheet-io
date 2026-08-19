@@ -76,16 +76,35 @@ Both branches require their CI check to pass before merging.
 
 ## Design constraints worth knowing
 
-Two rules run through the whole codebase, and a pull request that breaks them will be asked
-to change:
+The site is built in the **Notebook Paper** design language, which is written down in
+[`docs/design/DESIGN.md`](docs/design/DESIGN.md). That file is the authority: it explains the
+materials, the rules that hold them together and the CSS recipes that produce them, and it
+records the failures behind the rules most likely to be undone by someone who does not know
+why they exist. Read it before designing a new surface.
+
+Its one-sentence thesis is worth knowing even if you read nothing else: **the app prints, and
+the visitor writes.** Two typefaces divide the page between them on that basis — Inter sets
+anything the app says, Klee One sets anything the visitor entered — and a decision that cannot
+be justified by that sentence is probably wrong.
+
+One rule runs through the whole codebase, and a pull request that breaks it will be asked to
+change:
 
 1. **Blue only ever marks something interactive, or a base weight.** Never decorative.
-2. **Nothing casts a shadow at rest.** Use the surface, sunk and hairline tokens for
-   elevation. Shadows are for transient overlays.
 
-Colours come from `src/styles/tokens.css`. If you need a colour that is not there, raise it
-in an issue rather than inventing one — the palette is maintained deliberately, including
-its contrast ratios.
+**A second rule used to sit here and no longer does**, recorded rather than silently dropped
+because it was true for months and people remember it. It read _"nothing casts a shadow at
+rest — use the surface, sunk and hairline tokens for elevation, shadows are for transient
+overlays."_ PK-64 superseded it. Notebook Paper's entire depth model **is** a shadow at rest:
+the corner curl of `DESIGN.md` §2.4 is the one trick that makes a flat white rectangle read as
+paper, and `--surface` and `--sunk` no longer exist. What survives is the intent — no uniform
+drop shadows, no elevation for its own sake, and every shadow mixed from `--shadow-ink` rather
+than from black, because a black shadow on warm paper reads as a hole.
+
+Colours come from `src/styles/tokens.css`, and that file's authority is `DESIGN.md` §14. If you
+need a colour that is not there, it belongs in `DESIGN.md` first — raise it in an issue rather
+than inventing one at a call site. The palette is maintained deliberately, including its
+contrast ratios, and several of its values exist _because_ the obvious choice failed AA.
 
 Two more that are less obvious:
 
