@@ -235,7 +235,20 @@
    * boxed banner.
    */
   .note-danger {
-    background-color: color-mix(in srgb, var(--rust) 5.5%, transparent);
+    /*
+     * MIXED OVER --note, NOT OVER transparent, and the difference is not cosmetic.
+     * A note is itself the white surface — it is a piece of paper lying on the
+     * paper — so a wash mixed with `transparent` does not tint the note, it
+     * REPLACES its background with a 94.5%-transparent one. The note then becomes
+     * see-through and you are looking straight through it at its own corner-curl
+     * pseudo-elements, which read as two grey slabs sticking out below it.
+     *
+     * The row-state washes further down mix over `transparent` on purpose, and
+     * that is the same reasoning rather than an inconsistency: a table row has no
+     * surface of its own and is already sitting on the sheet's white, so there the
+     * transparent mix composites over exactly the right colour.
+     */
+    background-color: color-mix(in srgb, var(--rust) 5.5%, var(--note));
     box-shadow: inset 3px 0 0 var(--rust);
   }
 
@@ -257,11 +270,33 @@
    * somewhere no ledger rule applies. Family only, so a size or weight set
    * alongside them survives.
    */
-  .written {
+  /*
+   * THE TWO VOICES AS ESCAPE HATCHES, and the doubled class is deliberate rather
+   * than a typo.
+   *
+   * These have to beat any component class that also sets a family — .field sets
+   * the written face, and `class="field system"` on a bulk-action select is exactly
+   * the pairing §4 asks for, because "Owned" there is an instruction to the app
+   * rather than part of an item's record. Written as a single class, `.system`
+   * would tie with `.field` on specificity and lose on source order, silently, with
+   * the markup reading as though it had worked.
+   *
+   * That is the third cascade bug of this shape found on this design: the prototype
+   * put a whole header row in the pen because a value class matched <th> as well as
+   * <td>, and put every form field in the system's voice because a `font:` shorthand
+   * reset the family later in the file. All three are the same failure — a rule that
+   * looks applied and is not — which is why this one is fixed here rather than
+   * worked around at the call site with an arbitrary-value utility.
+   *
+   * `.written.written` is (0,2,0) and wins. It is still overridable by a Tailwind
+   * utility, because the utilities layer beats the components layer regardless of
+   * specificity.
+   */
+  .written.written {
     font-family: var(--font-written);
   }
 
-  .system {
+  .system.system {
     font-family: var(--font-system);
   }
 
@@ -397,9 +432,12 @@
   /* Destructive swaps ink for rust on the same box: the same move as primary, so
      it needs no new shape. The wash is derived from --rust rather than written out
      as an rgba() literal the way the prototype had it. */
+  /* Mixed over --note for the same reason .note-danger is: .btn sets a white fill
+     and this replaces it, so mixing with `transparent` would make the button
+     94% see-through and let whatever is behind it show through the box. */
   .btn-danger {
     border-color: var(--rust);
-    background-color: color-mix(in srgb, var(--rust) 6%, transparent);
+    background-color: color-mix(in srgb, var(--rust) 6%, var(--note));
     color: var(--rust);
   }
 

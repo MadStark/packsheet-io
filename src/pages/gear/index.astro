@@ -70,16 +70,15 @@ import { loadGearOptions } from '../../lib/gear/options';
 // `deleteGearItems` rather than the bulkSoftDelete/undoBulkDelete pair: PK-60 dropped the
 // soft delete, the trash page and the undo banner, so a delete is now final.
 import { bulkSetCategory, bulkSetStatus, deleteGearItems } from '../../lib/gear/mutations';
-// `formatGearAcquiredOn` arrives with PK-61, which moved the "Added" column off
-// `created_at` and onto the visitor's own `acquired_on` date. `WEIGHT_UNITS` came in on
-// the same import block on staging and is deliberately NOT carried across: PK-62 removed
-// the weight-range fieldset that was its only consumer on this page.
-import {
-  formatGearAcquiredOn,
-  formatGearPrice,
-  formatGearStatus,
-  gearStatusMarker,
-} from '../../lib/gear/format';
+// `formatGearAcquiredOn` (PK-61) left this import with PK-64: the Notebook Paper
+// conversion dropped the Added column from this page's markup (see GEAR_LIST_COLUMNS's
+// own comment in src/lib/gear/fields.ts for why), and that formatter had no other call
+// site here. It stays exported from format.ts and covered by tests/gear-format.test.ts,
+// because `?sort=added` is still a live, bookmarkable URL — only the header and the cell
+// are gone. `WEIGHT_UNITS` came in on the same import block on staging and is
+// deliberately NOT carried across: PK-62 removed the weight-range fieldset that was its
+// only consumer on this page.
+import { formatGearPrice, formatGearStatus, gearStatusMarker } from '../../lib/gear/format';
 // PK-63: every link out of this list carries the current view as a return target, so
 // saving the item form lands the visitor back on the same filters, sort and page.
 import { gearFormHrefReturningTo } from '../../lib/gear/return-path';
@@ -398,6 +397,22 @@ function pageHref(target: number): string {
 // minutes ago. Rebuilding drops it, along with any stray `?utm_source=` and any parameter
 // a future feature adds elsewhere.
 const currentView = gearListPath(query);
+
+// ---------------------------------------------------------------------------
+// PK-64 (Notebook Paper): page-local presentation helpers. Both are pure display
+// decisions with no bearing on what any row IS, which is why they live here rather than
+// in src/lib/gear/ — unlike gearStatusMarker or formatGearStatus, getting either of
+// these "wrong" picks an odd colour or skips a right-align, never a wrong fact, so
+// neither carries a test of its own (the same reasoning GearStatusIcon's own comment
+// gives for leaving its SVG path data untested).
+// ---------------------------------------------------------------------------
+
+/** The GEAR_LIST_COLUMNS headers whose values are figures rather than words, so both the
+ *  header and its column of `<td>`s right-align — §7 ("figures are written, and
+ *  right-aligned"), the same pattern welcome.astro's specimen ledger sets for Weight. */
+function isNumericColumn(label: string): boolean {
+  return label === 'Qty' || label === 'Weight' || label === 'Price';
+}
 ---
 
 <Layout
@@ -405,89 +420,103 @@ const currentView = gearListPath(query);
   description="Search, filter and manage the gear in your Packsheet closet."
 >
   <GearNav />
-  <main class="mx-auto max-w-5xl px-6 py-10">
-    <div class="flex items-center justify-between gap-4">
-      <h1 class="text-3xl">Your gear closet</h1>
-      {
-        /* C1 (PK-4 review): a primary action in the heading row, rendered whether the
-           closet is empty or full. THIS IS NOW THE ONLY LINK TO GEAR_NEW_PATH ON THIS
-           PAGE'S CHROME — PK-62 removed GearNav's "Add item" link (see that file's own
-           comment for why), so this button is load-bearing rather than the second, more
-           prominent copy of a nav link it used to be. Do not remove it on the grounds
-           that the nav covers it; the nav no longer does. The empty state below carries
-           its own copy for the case where there is no table to put this above.
-           border-blue-deep matches the empty state's already-established button styling
-           rather than inventing a second vocabulary for "add an item". */
-      }
-      <div class="flex shrink-0 items-center gap-3">
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
+    <div class="sheet">
+      <div class="sheet-body">
+        <header class="flex items-start justify-between gap-6">
+          <div>
+            <p class="eyebrow">Gear</p>
+            <h1 class="page-title mt-2">Your gear closet</h1>
+            {
+              /* PK-64. The one written phrase this sheet is allowed (DESIGN.md §4's
+                .aside) — it sits beside the title of the visitor's own closet, which is
+                exactly the kind of thing the written voice is for. */
+            }
+            <p class="aside mt-2">everything, weighed once</p>
+          </div>
+          {
+            /* C1 (PK-4 review): a primary action in the heading row, rendered whether the
+               closet is empty or full. THIS IS NOW THE ONLY LINK TO GEAR_NEW_PATH ON THIS
+               PAGE'S CHROME — PK-62 removed GearNav's "Add item" link (see that file's own
+               comment for why), so this button is load-bearing rather than the second, more
+               prominent copy of a nav link it used to be. Do not remove it on the grounds
+               that the nav covers it; the nav no longer does. The empty state below carries
+               its own copy for the case where there is no table to put this above.
+               .btn-primary matches the empty state's already-established button styling
+               rather than inventing a second vocabulary for "add an item". */
+          }
+          <div class="flex shrink-0 items-center gap-3">
+            {
+              /* PK-65. The only route to the import page, and it is here rather than in
+                 GearNav for the reason that file's own comment gives for keeping the nav to
+                 DESTINATIONS: importing is something you do to your closet, from your closet,
+                 not a section of the product. Rendered as a quiet secondary action beside the
+                 primary one — "Add item" is what a visitor does daily and this is what they
+                 do once, so it must not compete with it. Unlike the export button, this is a
+                 plain link: it starts a page, not an action on a selection. */
+            }
+            <a href={GEAR_IMPORT_PATH} class="btn"> Import </a>
+            <a href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)} class="btn btn-primary">
+              Add item
+            </a>
+          </div>
+        </header>
+
         {
-          /* PK-65. The only route to the import page, and it is here rather than in
-             GearNav for the reason that file's own comment gives for keeping the nav to
-             DESTINATIONS: importing is something you do to your closet, from your closet,
-             not a section of the product. Rendered as a quiet secondary action beside the
-             primary one — "Add item" is what a visitor does daily and this is what they
-             do once, so it must not compete with it. Unlike the export button, this is a
-             plain link: it starts a page, not an action on a selection. */
+          /* DESIGN.md §9: an empty page has no figures to report, so the count above an
+             empty closet is hidden rather than showing zero — see closetIsEmpty below. A
+             load error leaves totalCount at its `count ?? 0` fallback, which is not a real
+             count either, so the figures are withheld there too. */
         }
-        <a
-          href={GEAR_IMPORT_PATH}
-          class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-        >
-          Import
-        </a>
-        <a
-          href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
-          class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-        >
-          Add item
-        </a>
+        {
+          !closetIsEmpty && !loadError && (
+            <dl class="ledger-figures mt-8">
+              <div>
+                <dt>Items</dt>
+                <dd class="numeric">{totalCount}</dd>
+              </div>
+            </dl>
+          )
+        }
       </div>
     </div>
 
     {
       bulkError && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {bulkError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{bulkError}</p>
+        </div>
       )
     }
 
     {
       /* PK-65: the only confirmation an import gets. `role="status"` rather than
          `role="alert"` — this is not an error and must not interrupt a screen reader
-         mid-sentence the way an assertive live region does. It is a hairline panel rather
-         than a coloured one because CONTRIBUTING reserves blue for interactive elements
-         and base weight, and there is no "success green" in tokens.css to reach for. */
+         mid-sentence the way an assertive live region does. It is a plain `.note` — the
+         one card DESIGN.md §2.5 allows to lie directly on the paper — rather than a
+         coloured one, because CONTRIBUTING reserves blue for interactive elements and
+         base weight, and there is no "success green" in tokens.css to reach for. */
     }
     {
       importedMessage && (
-        <p
-          role="status"
-          class="border-hairline bg-sunk text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {importedMessage}
-        </p>
+        <div class="note" role="status">
+          <p>{importedMessage}</p>
+        </div>
       )
     }
 
     {
       loadError && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {loadError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{loadError}</p>
+        </div>
       )
     }
 
     {
       loadError ? null : pendingDelete ? (
-        <div class="border-rust/40 bg-rust/10 mt-6 rounded-[var(--r)] border px-5 py-4">
-          <h2 class="text-rust text-lg">Confirm delete</h2>
+        <div class="note note-danger">
+          <h2 class="section-title text-rust">Confirm delete</h2>
           {/* Names the irreversibility in the same breath as the count, and then the
               one thing a visitor might reasonably fear losing along with the item: a
               pack that lists it. gear_items_snapshot_before_delete (core_schema.sql)
@@ -506,7 +535,7 @@ const currentView = gearListPath(query);
               wrong mechanic: three deleted items can sit on three DIFFERENT packs, and
               the trigger freezes each one separately, so there is no single "that pack"
               to point at. */}
-          <p class="text-ink-2 mt-2 text-sm">
+          <p class="hint mt-2">
             Delete {pendingDelete.ids.length} item{pendingDelete.ids.length === 1 ? '' : 's'}{' '}
             permanently? This cannot be undone.{' '}
             {pendingDelete.ids.length === 1
@@ -527,29 +556,31 @@ const currentView = gearListPath(query);
             {pendingDelete.ids.map((id) => (
               <input type="hidden" name={BULK_FORM_FIELD.id} value={id} />
             ))}
-            <button
-              type="submit"
-              class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"
-            >
+            <button type="submit" class="btn btn-danger">
               Delete permanently
             </button>
-            <a
-              href={`${GEAR_PATH}${Astro.url.search}`}
-              class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
-            >
+            <a href={`${GEAR_PATH}${Astro.url.search}`} class="btn">
               Cancel
             </a>
           </form>
         </div>
       ) : closetIsEmpty ? (
-        <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
-          <p class="text-ink-2">Your closet is empty.</p>
-          <a
-            href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
-            class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-          >
-            Add your first item
-          </a>
+        <div class="sheet">
+          {/* .blank stands in for .sheet-body — it carries the same padding and
+              isolation itself (paper.css's own comment on the class) — centred, with
+              real air, per DESIGN.md §9. Not a bordered box. */}
+          <div class="blank">
+            <p class="section-title">Your closet is empty.</p>
+            <p class="hint mt-2">
+              Add the first thing you carry and Packsheet will start keeping the arithmetic.
+            </p>
+            <a
+              href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
+              class="btn btn-primary mt-6"
+            >
+              Add your first item
+            </a>
+          </div>
         </div>
       ) : (
         <>
@@ -558,6 +589,10 @@ const currentView = gearListPath(query);
               Weight-range fieldsets, over a list that is a few hundred rows at most.
               Search and three status checkboxes replace the lot — brand is now a column
               sort instead of a checkbox per brand the visitor owns.
+
+              ONE SHEET, NO INNER BOXES (DESIGN.md §13): this used to be a bordered form
+              containing a bordered fieldset — PK-64 un-nests it. The form itself carries
+              no border or background of its own any more; `.sheet` is the only box.
 
               STILL A SINGLE GET FORM, so applying it is a plain, bookmarkable
               navigation. sort/dir are carried as hidden fields so changing the search
@@ -592,331 +627,387 @@ const currentView = gearListPath(query);
               document, so unticking two statuses means two reloads and two traversals. A
               visitor who would rather batch the changes can turn the script off; there is
               no in-page way to opt out. */}
-          <form
-            method="GET"
-            action={GEAR_PATH}
-            id="gear-filters"
-            class="border-hairline bg-surface mt-6 rounded-[var(--r)] border p-5"
-          >
-            <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-6">
-              <div class="flex-1">
-                <label for="q" class="text-ink-2 block text-sm">
-                  Search
-                </label>
-                <input
-                  id="q"
-                  name="q"
-                  type="search"
-                  value={query.search}
-                  placeholder="Search name or brand"
-                  class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
-                />
-              </div>
-
-              {/* A fieldset with an sr-only legend rather than no grouping at all: the
-                  three boxes are one control ("which statuses am I looking at"), and a
-                  screen reader needs that said once rather than inferred from three
-                  adjacent labels. The legend is visually hidden because the bar's whole
-                  point is to be lighter than what it replaced, and "Owned / Wishlist /
-                  Retired" beside a search field is self-describing on sight. */}
-              <fieldset class="sm:pb-2">
-                <legend class="sr-only">Status</legend>
-                <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
-                  {GEAR_STATUSES.map((status) => (
-                    <label class="text-ink flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        name="status"
-                        value={status}
-                        checked={checkedStatuses.includes(status)}
-                        class="accent-blue"
-                      />
-                      {formatGearStatus(status)}
+          <div class="sheet">
+            <div class="sheet-body">
+              <form method="GET" action={GEAR_PATH} id="gear-filters">
+                <div class="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="sm:max-w-md sm:flex-1">
+                    <label for="q" class="field-label">
+                      Search
                     </label>
-                  ))}
-                </div>
-                {/* The WCAG 3.2.2 advisory. Rendered unconditionally rather than only
-                    when scripting is on, because the server cannot know that — and the
-                    sentence stays true either way: with the script off, the Apply button
-                    is present and it is that button which updates the list. */}
-                <p class="text-ink-3 mt-1.5 text-xs">Changing a status updates the list.</p>
-              </fieldset>
-            </div>
+                    <div class="search mt-1">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="m21 21-4.3-4.3" />
+                      </svg>
+                      <input
+                        id="q"
+                        name="q"
+                        type="search"
+                        value={query.search}
+                        placeholder="Search name or brand"
+                      />
+                    </div>
+                  </div>
 
-            <input type="hidden" name="sort" value={query.sort} />
-            <input type="hidden" name="dir" value={query.direction} />
-
-            {/* Category, brand and the weight range: honoured by the query layer, with
-                no control on this page since PK-62. Re-emitted so that submitting this
-                form preserves them exactly as the sort headers and the pager already do,
-                instead of being the one path that silently discards them. The notice
-                below is what stops that from being an undisclosed filter. */}
-            {unsurfacedFilters.map(([name, value]) => (
-              <input type="hidden" name={name} value={value} />
-            ))}
-
-            {/* ALWAYS RENDERED, AND REMOVED BY THE SCRIPT BELOW ONCE IT HAS ACTUALLY
-                WIRED THE CHECKBOXES UP. This started as a <noscript> block, which was
-                wrong in a way worth recording so it does not come back: <noscript> keys
-                on SCRIPTING BEING ENABLED, not on this page's script having run. Those
-                are different conditions, and every way they diverge left all three
-                checkboxes as dead controls with no button and no feedback — a blocked or
-                404'd bundle after a deploy, a Content-Security-Policy that refuses the
-                script, an extension, or simply an exception thrown earlier in the same
-                bundle. Rendering the button unconditionally and deleting it only on the
-                success path inverts that: the worst case is now one redundant button,
-                not a filter bar that silently does nothing. */}
-            <button
-              type="submit"
-              id="gear-filters-apply"
-              class="border-blue-deep text-blue-deep hover:bg-blue-tint mt-4 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-            >
-              Apply
-            </button>
-
-            {/* THE ONLY DISCLOSURE, AND THE ONLY ESCAPE, for a filter with no control.
-                Without this, a visitor arriving on a bookmarked `?category=Shelter` — a
-                URL PK-4 shipped and this ticket removed the UI for — sees a closet
-                missing most of its gear with nothing on the page saying why, and the
-                "Clear filters" link in the no-results state never renders because the
-                filter DID match something. Deliberately not a reconstruction of the old
-                filter panel: it says the closet is filtered and offers one link that
-                removes every such filter, which is the whole of what a visitor can
-                usefully do about a control that no longer exists. */}
-            {closetIsSilentlyFiltered && (
-              <p role="status" class="text-ink-2 mt-4 text-sm">
-                This closet is filtered by settings this page no longer shows.{' '}
-                <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
-                  Clear filters
-                </a>
-              </p>
-            )}
-          </form>
-
-          {items.length === 0 ? (
-            <div class="border-hairline bg-surface mt-6 rounded-[var(--r)] border px-6 py-12 text-center">
-              <p class="text-ink-2">No items match these filters.</p>
-              <a
-                href={GEAR_PATH}
-                class="text-blue-deep hover:text-blue-ink mt-2 inline-block text-sm underline"
-              >
-                Clear filters
-              </a>
-            </div>
-          ) : (
-            <>
-              <form method="POST" class="mt-6">
-                <div class="border-hairline bg-surface overflow-x-auto rounded-[var(--r)] border">
-                  <table class="w-full text-left text-sm">
-                    <caption class="sr-only">Your gear closet</caption>
-                    <thead>
-                      <tr class="border-hairline text-ink-2 border-b">
-                        <th scope="col" class="px-3 py-2">
+                  {/* A fieldset with a visible legend rather than no grouping at all: the
+                      three boxes are one control ("which statuses am I looking at"), and a
+                      screen reader needs that said once rather than inferred from three
+                      adjacent labels. PK-64 gives the legend the same .field-label
+                      treatment as "Search" beside it, matching the reference design;
+                      "Owned / Wishlist / Retired" was already self-describing on sight,
+                      and the visible label now says what the group of three IS. */}
+                  <fieldset class="sm:shrink-0">
+                    <legend class="field-label">Status</legend>
+                    <div class="mt-1 flex flex-wrap items-center gap-x-5 gap-y-2">
+                      {GEAR_STATUSES.map((status) => (
+                        <label class="text-ink flex items-center gap-2 text-sm">
                           <input
                             type="checkbox"
-                            id="select-all"
-                            aria-label="Select all items on this page"
-                            class="accent-blue"
+                            name="status"
+                            value={status}
+                            checked={checkedStatuses.includes(status)}
+                            class="checkbox"
                           />
-                        </th>
-                        {GEAR_LIST_COLUMNS.map(({ key, label }) => (
-                          <th
-                            scope="col"
-                            aria-sort={key === null ? undefined : sortAriaSort(key)}
-                            class="px-3 py-2 font-medium"
-                          >
-                            {key === null ? (
-                              label
-                            ) : (
-                              <a href={sortHref(key)} class="hover:text-ink text-ink-2">
-                                {label}
-                                {sortIndicator(key)}
-                              </a>
-                            )}
-                          </th>
-                        ))}
-                        <th scope="col" class="px-3 py-2 font-medium">
-                          <span class="sr-only">Photo</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {items.map((item) => (
-                        <tr class="border-hairline hover:bg-sunk border-b last:border-b-0">
-                          <td class="px-3 py-2">
+                          {formatGearStatus(status)}
+                        </label>
+                      ))}
+                    </div>
+                    {/* The WCAG 3.2.2 advisory. Rendered unconditionally rather than only
+                        when scripting is on, because the server cannot know that — and the
+                        sentence stays true either way: with the script off, the Apply button
+                        is present and it is that button which updates the list. */}
+                    <p class="hint mt-1.5">Changing a status updates the list.</p>
+                  </fieldset>
+                </div>
+
+                <input type="hidden" name="sort" value={query.sort} />
+                <input type="hidden" name="dir" value={query.direction} />
+
+                {/* Category, brand and the weight range: honoured by the query layer, with
+                    no control on this page since PK-62. Re-emitted so that submitting this
+                    form preserves them exactly as the sort headers and the pager already do,
+                    instead of being the one path that silently discards them. The notice
+                    below is what stops that from being an undisclosed filter. */}
+                {unsurfacedFilters.map(([name, value]) => (
+                  <input type="hidden" name={name} value={value} />
+                ))}
+
+                {/* ALWAYS RENDERED, AND REMOVED BY THE SCRIPT BELOW ONCE IT HAS ACTUALLY
+                    WIRED THE CHECKBOXES UP. This started as a <noscript> block, which was
+                    wrong in a way worth recording so it does not come back: <noscript> keys
+                    on SCRIPTING BEING ENABLED, not on this page's script having run. Those
+                    are different conditions, and every way they diverge left all three
+                    checkboxes as dead controls with no button and no feedback — a blocked or
+                    404'd bundle after a deploy, a Content-Security-Policy that refuses the
+                    script, an extension, or simply an exception thrown earlier in the same
+                    bundle. Rendering the button unconditionally and deleting it only on the
+                    success path inverts that: the worst case is now one redundant button,
+                    not a filter bar that silently does nothing. */}
+                <button type="submit" id="gear-filters-apply" class="btn btn-primary mt-4">
+                  Apply
+                </button>
+
+                {/* THE ONLY DISCLOSURE, AND THE ONLY ESCAPE, for a filter with no control.
+                    Without this, a visitor arriving on a bookmarked `?category=Shelter` — a
+                    URL PK-4 shipped and this ticket removed the UI for — sees a closet
+                    missing most of its gear with nothing on the page saying why, and the
+                    "Clear filters" link in the no-results state never renders because the
+                    filter DID match something. Deliberately not a reconstruction of the old
+                    filter panel: it says the closet is filtered and offers one link that
+                    removes every such filter, which is the whole of what a visitor can
+                    usefully do about a control that no longer exists. */}
+                {closetIsSilentlyFiltered && (
+                  <p role="status" class="hint mt-4">
+                    This closet is filtered by settings this page no longer shows.{' '}
+                    <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
+                      Clear filters
+                    </a>
+                  </p>
+                )}
+              </form>
+            </div>
+          </div>
+
+          {items.length === 0 ? (
+            <div class="sheet">
+              <div class="blank">
+                <p class="text-ink text-sm font-medium">No items match these filters.</p>
+                <a
+                  href={GEAR_PATH}
+                  class="hint text-blue-deep hover:text-blue-ink mt-2 inline-block underline"
+                >
+                  Clear filters
+                </a>
+              </div>
+            </div>
+          ) : (
+            <div class="sheet">
+              <div class="sheet-body">
+                <form method="POST">
+                  <div class="overflow-x-auto">
+                    <table class="ledger">
+                      <caption class="sr-only">Your gear closet</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">
                             <input
                               type="checkbox"
-                              name={BULK_FORM_FIELD.id}
-                              value={item.id}
-                              aria-label={`Select ${item.name}`}
-                              class="accent-blue"
+                              id="select-all"
+                              aria-label="Select all items on this page"
+                              class="checkbox"
                             />
-                          </td>
-                          <td class="px-3 py-2">
-                            {/* THE RAGGED LEFT EDGE HERE IS DELIBERATE. `gap-1.5`
-                                applies BETWEEN children, so an owned row — which renders
-                                no icon at all — has its name start flush at the cell's
-                                padding while wishlist and retired rows are indented by the
-                                glyph. PK-62 accepts that and explicitly forbids evening it
-                                up with a spacer or a placeholder glyph.
-
-                                THE `gearStatusMarker` GUARD IS WHAT KEEPS OWNED UNMARKED
-                                HERE, and it has to live at this call site rather than in
-                                the component. GearStatusIcon draws all three statuses,
-                                because PK-63's radio group presents them as equal choices
-                                and an icon-less "Owned" option there would read as a bug.
-                                This list wants the opposite: owned is its unmarked default.
-                                Policy per caller, drawing in the component — see that
-                                file's own comment. */}
-                            <span class="flex items-center gap-1.5">
-                              {gearStatusMarker(item.status) && (
-                                <GearStatusIcon status={item.status} />
+                          </th>
+                          {GEAR_LIST_COLUMNS.map(({ key, label }) => (
+                            <th
+                              scope="col"
+                              aria-sort={key === null ? undefined : sortAriaSort(key)}
+                              class={isNumericColumn(label) ? 'text-right' : undefined}
+                            >
+                              {key === null ? (
+                                label
+                              ) : (
+                                <a href={sortHref(key)}>
+                                  {label}
+                                  {sortIndicator(key)}
+                                </a>
                               )}
-                              {/* THE ONLY PLACE A MALFORMED STATUS SURFACES ANYWHERE.
-                                  Removing the Status column took away the one cell that
-                                  rendered `item.status` as text, and `gearStatusMarker`
-                                  returns null for a value it does not recognise — so such
-                                  a row draws nothing, identical to `owned`. The trash page
-                                  used to render a status verbatim and was the fallback
-                                  this once pointed at; PK-60 deleted it, so this span is
-                                  now the whole of it. sr-only costs no layout, so the
-                                  ragged left edge is untouched; nothing renders here at
-                                  all for the three real statuses. */}
-                              {!isGearStatus(item.status) && (
-                                <span class="sr-only">{formatGearStatus(item.status)}</span>
-                              )}
-                              <a
-                                href={gearFormHrefReturningTo(gearItemPath(item.id), currentView)}
-                                class="text-blue-deep hover:text-blue-ink underline"
-                              >
-                                {item.name}
-                              </a>
-                            </span>
-                          </td>
-                          <td class="px-3 py-2">{item.brand ?? '—'}</td>
-                          <td class="px-3 py-2">{item.category ?? '—'}</td>
-                          <td class="numeric px-3 py-2">{item.quantity}</td>
-                          {/* PK-67: through the formatter, not `{weight} {unit}`. Every
-                              row is a gram figure now, so this cell is the one place the
-                              account's system turns it back into something to read — which
-                              is what makes the column comparable by eye, the complaint the
-                              ticket opens with. */}
-                          <td class="numeric px-3 py-2">
-                            {formatWeight(item.weight_grams, weightSystem)}
-                          </td>
-                          <td class="numeric px-3 py-2">
-                            {formatGearPrice(item.price, item.currency)}
-                          </td>
-                          <td class="numeric px-3 py-2">
-                            {formatGearAcquiredOn(item.acquired_on)}
-                          </td>
-                          <td class="px-3 py-2">
-                            {item.photo_path ? (
-                              <span
-                                class="border-hairline bg-sunk text-ink-3 inline-flex h-8 w-8 items-center justify-center rounded-[var(--r-sm)] border text-[10px] font-medium"
-                                aria-hidden="true"
-                              >
-                                IMG
-                              </span>
-                            ) : null}
-                            <span class="sr-only">
-                              {item.photo_path ? 'Has a photo' : 'No photo'}
-                            </span>
-                          </td>
+                            </th>
+                          ))}
+                          <th scope="col">
+                            <span class="sr-only">Photo</span>
+                          </th>
                         </tr>
+                      </thead>
+                      <tbody>
+                        {items.map((item) => {
+                          const marker = gearStatusMarker(item.status);
+                          return (
+                            <tr
+                              class={
+                                marker === 'wishlist'
+                                  ? 'row-wishlist'
+                                  : marker === 'retired'
+                                    ? 'row-retired'
+                                    : undefined
+                              }
+                            >
+                              <td>
+                                <input
+                                  type="checkbox"
+                                  name={BULK_FORM_FIELD.id}
+                                  value={item.id}
+                                  aria-label={`Select ${item.name}`}
+                                  class="checkbox"
+                                />
+                              </td>
+                              <td>
+                                {/* THE RAGGED LEFT EDGE HERE IS DELIBERATE. `gap-1.5`
+                                    applies BETWEEN children, so an owned row — which renders
+                                    no icon at all — has its name start flush at the cell's
+                                    padding while wishlist and retired rows are indented by the
+                                    glyph. PK-62 accepts that and explicitly forbids evening it
+                                    up with a spacer or a placeholder glyph.
+
+                                    THE `gearStatusMarker` GUARD IS WHAT KEEPS OWNED UNMARKED
+                                    HERE, and it has to live at this call site rather than in
+                                    the component. GearStatusIcon draws all three statuses,
+                                    because PK-63's radio group presents them as equal choices
+                                    and an icon-less "Owned" option there would read as a bug.
+                                    This list wants the opposite: owned is its unmarked default.
+                                    Policy per caller, drawing in the component — see that
+                                    file's own comment.
+
+                                    THE STRIKE ON A RETIRED NAME (DESIGN.md §7) carries the
+                                    same information as row-retired's wash and bar in a third,
+                                    non-colour form — §12's "colour is never the only signal". */}
+                                <span class="flex items-center gap-1.5">
+                                  {marker && <GearStatusIcon status={item.status} />}
+                                  {/* THE ONLY PLACE A MALFORMED STATUS SURFACES ANYWHERE.
+                                      Removing the Status column took away the one cell that
+                                      rendered `item.status` as text, and `gearStatusMarker`
+                                      returns null for a value it does not recognise — so such
+                                      a row draws nothing, identical to `owned`. The trash page
+                                      used to render a status verbatim and was the fallback
+                                      this once pointed at; PK-60 deleted it, so this span is
+                                      now the whole of it. sr-only costs no layout, so the
+                                      ragged left edge is untouched; nothing renders here at
+                                      all for the three real statuses. */}
+                                  {!isGearStatus(item.status) && (
+                                    <span class="sr-only">{formatGearStatus(item.status)}</span>
+                                  )}
+                                  <a
+                                    href={gearFormHrefReturningTo(
+                                      gearItemPath(item.id),
+                                      currentView,
+                                    )}
+                                    class={`text-blue-deep hover:text-blue-ink underline${item.status === 'retired' ? ' line-through' : ''}`}
+                                  >
+                                    {item.name}
+                                  </a>
+                                </span>
+                              </td>
+                              <td>{item.brand ?? '—'}</td>
+                              {/* NO CATEGORY DOT HERE, deliberately, and this is a departure
+                                  from the reference mockup — read before adding one back.
+
+                                  DESIGN.md §7 does put a 10px colour dot beside a category,
+                                  and the mockup shows one, because the mockup was drawn on
+                                  five invented categories that could be hand-mapped onto
+                                  tokens.css's ten fills. The real column is unconstrained
+                                  user-typed free text (see src/lib/gear/options.ts), so there
+                                  is no mapping to make. Deriving one — a keyword list, or a
+                                  hash of the category string — was tried and removed: it
+                                  gives two unrelated categories the same colour, changes a
+                                  category's colour when someone renames it, and encodes
+                                  nothing a reader can decode. §5 is explicit that colour is
+                                  semantic or absent and never decorative, and an arbitrary
+                                  colour is decorative by definition.
+
+                                  A real category→colour mapping is a product decision worth
+                                  its own ticket. Until it exists the name is set in ink,
+                                  which is honest. */}
+                              <td>{item.category ?? '—'}</td>
+                              <td class="numeric text-right">{item.quantity}</td>
+                              {/* PK-67: through the formatter, not `{weight} {unit}`. Every
+                                  row is a gram figure now, so this cell is the one place the
+                                  account's system turns it back into something to read — which
+                                  is what makes the column comparable by eye, the complaint the
+                                  ticket opens with. */}
+                              <td class="numeric text-right">
+                                {formatWeight(item.weight_grams, weightSystem)}
+                              </td>
+                              <td class="numeric text-right">
+                                {formatGearPrice(item.price, item.currency)}
+                              </td>
+                              <td>
+                                {/* The photo chip sits on --paper-deep, so its text takes
+                                    --ink-2 rather than --ink-3: tokens.css measures the
+                                    third ink at 4.11:1 on --paper-deep, which fails AA. */}
+                                {item.photo_path ? (
+                                  <span
+                                    class="bg-paper-deep text-ink-2 inline-flex h-6 items-center justify-center rounded px-1.5 text-[10px] font-medium"
+                                    aria-hidden="true"
+                                  >
+                                    IMG
+                                  </span>
+                                ) : null}
+                                <span class="sr-only">
+                                  {item.photo_path ? 'Has a photo' : 'No photo'}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div class="mt-6 flex flex-wrap items-center gap-3">
+                    <input
+                      id="bulk-category"
+                      name={BULK_FORM_FIELD.category}
+                      type="text"
+                      placeholder="New category"
+                      aria-label="New category for selected items"
+                      class="field w-40"
+                    />
+                    <button
+                      type="submit"
+                      name={BULK_FORM_FIELD.intent}
+                      value={BULK_INTENT.setCategory}
+                      class="btn"
+                    >
+                      Set category
+                    </button>
+
+                    {/* DESIGN.md §4: a bulk-action select is the SYSTEM voice, because
+                        "Owned" here is an instruction to the app, not part of an item's
+                        record — the opposite of the unit select `.field` was designed
+                        around. `.field` alone sets the written face and `.system` cannot
+                        win that tie by class alone (both are single-class rules in the
+                        same layer, and `.field`'s is the later one in paper.css), so the
+                        family is forced with a Tailwind utility, which — being in the
+                        utilities layer — beats both regardless of source order. */}
+                    <select
+                      id="bulk-status"
+                      name={BULK_FORM_FIELD.status}
+                      aria-label="New status for selected items"
+                      class="field system w-auto"
+                    >
+                      {GEAR_STATUSES.map((status) => (
+                        <option value={status}>{formatGearStatus(status)}</option>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div class="mt-4 flex flex-wrap items-center gap-3">
-                  <input
-                    id="bulk-category"
-                    name={BULK_FORM_FIELD.category}
-                    type="text"
-                    placeholder="New category"
-                    aria-label="New category for selected items"
-                    class="border-hairline bg-surface text-ink rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
-                  />
-                  <button
-                    type="submit"
-                    name={BULK_FORM_FIELD.intent}
-                    value={BULK_INTENT.setCategory}
-                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
-                  >
-                    Set category
-                  </button>
-
-                  <select
-                    id="bulk-status"
-                    name={BULK_FORM_FIELD.status}
-                    aria-label="New status for selected items"
-                    class="border-hairline bg-surface text-ink rounded-[var(--r-sm)] border px-2 py-1.5 text-sm"
-                  >
-                    {GEAR_STATUSES.map((status) => (
-                      <option value={status}>{formatGearStatus(status)}</option>
-                    ))}
-                  </select>
-                  <button
-                    type="submit"
-                    name={BULK_FORM_FIELD.intent}
-                    value={BULK_INTENT.setStatus}
-                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
-                  >
-                    Set status
-                  </button>
-
-                  {/* PK-65. Placed BEFORE the delete button, not after it: this toolbar
-                       ends with the one irreversible action in the closet, and putting a
-                       harmless button below it would mean a mis-aimed click at the bottom
-                       of the row lands on delete. Styled as a neutral secondary action
-                       like the two set-* buttons, deliberately not in blue — CONTRIBUTING
-                       reserves blue for interactive elements and base weight, and this
-                       toolbar has already established that vocabulary for its buttons. */}
-                  <button
-                    type="submit"
-                    name={BULK_FORM_FIELD.intent}
-                    value={BULK_INTENT.export}
-                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
-                  >
-                    Export selected
-                  </button>
-
-                  <button
-                    type="submit"
-                    name={BULK_FORM_FIELD.intent}
-                    value={BULK_INTENT.delete}
-                    class="border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
-                  >
-                    Delete selected
-                  </button>
-                </div>
-              </form>
-
-              <nav aria-label="Pagination" class="mt-4 flex items-center justify-between gap-4">
-                <p class="text-ink-2 text-sm">
-                  Showing {rangeStart}–{rangeEnd} of {totalCount}
-                </p>
-                <div class="flex gap-2">
-                  {page > 1 && (
-                    <a
-                      href={pageHref(page - 1)}
-                      class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm transition-colors"
+                    </select>
+                    <button
+                      type="submit"
+                      name={BULK_FORM_FIELD.intent}
+                      value={BULK_INTENT.setStatus}
+                      class="btn"
                     >
-                      Previous
-                    </a>
-                  )}
-                  {page < totalPages && (
-                    <a
-                      href={pageHref(page + 1)}
-                      class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm transition-colors"
+                      Set status
+                    </button>
+
+                    {/* PK-65. Placed BEFORE the delete button, not after it: this toolbar
+                         ends with the one irreversible action in the closet, and putting a
+                         harmless button below it would mean a mis-aimed click at the bottom
+                         of the row lands on delete. Styled as a neutral secondary action
+                         like the two set-* buttons, deliberately not in blue — CONTRIBUTING
+                         reserves blue for interactive elements and base weight, and this
+                         toolbar has already established that vocabulary for its buttons. */}
+                    <button
+                      type="submit"
+                      name={BULK_FORM_FIELD.intent}
+                      value={BULK_INTENT.export}
+                      class="btn"
                     >
-                      Next
-                    </a>
-                  )}
-                </div>
-              </nav>
-            </>
+                      Export selected
+                    </button>
+
+                    <button
+                      type="submit"
+                      name={BULK_FORM_FIELD.intent}
+                      value={BULK_INTENT.delete}
+                      class="btn btn-danger"
+                    >
+                      Delete selected
+                    </button>
+                  </div>
+                </form>
+
+                {/* PK-64: the pager moves inside the list sheet, separated from the bulk
+                    bar by a hairline rule — DESIGN.md §13 refuses text sitting directly on
+                    the paper, which is where this used to render. */}
+                <hr class="sheet-rule" />
+
+                <nav aria-label="Pagination" class="flex items-center justify-between gap-4">
+                  <p class="hint">
+                    Showing {rangeStart}–{rangeEnd} of {totalCount}
+                  </p>
+                  <div class="flex gap-2">
+                    {page > 1 && (
+                      <a href={pageHref(page - 1)} class="btn">
+                        Previous
+                      </a>
+                    )}
+                    {page < totalPages && (
+                      <a href={pageHref(page + 1)} class="btn">
+                        Next
+                      </a>
+                    )}
+                  </div>
+                </nav>
+              </div>
+            </div>
           )}
         </>
       )
