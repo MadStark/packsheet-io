@@ -33,6 +33,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { User } from '@supabase/supabase-js';
 import { ACCOUNT_PATH, AUTH_CALLBACK_PATH, SIGN_IN_PATH } from '../src/lib/auth-routes';
+import { GEAR_PATH } from '../src/lib/gear/routes';
+import { PACKS_PATH, PACK_REORDER_PATH, packPath } from '../src/lib/packs/routes';
 import { HOME_PATH } from '../src/lib/routes';
 
 // Hoisted by vitest above the import below, which is why `getUser` is declared through
@@ -268,6 +270,32 @@ describe('the no-edge-cache rule', () => {
   it('does not extend the site root’s rule to every path under it', async () => {
     expect(await cacheControl(contextFor('/pack/some-shared-pack'))).toBeNull();
     expect(await cacheControl(contextFor('/welcome/'))).toBeNull();
+  });
+
+  /**
+   * PK-37's three routes, and the reason they are asserted together: only ONE of them is a
+   * line in AUTH_ROUTE_PATHS. `/packs` is enumerated; the editor and the reorder endpoint
+   * are covered because they sit beneath it, which is the trade that list's own comment
+   * argues for and the specific reason src/lib/packs/routes.ts parks the endpoint at
+   * `/packs/reorder` rather than at a top-level `/api/...`. Move it out from under this
+   * root and nothing fails — it simply stops being covered — so the inheritance is asserted
+   * rather than left to be re-derived from two comments.
+   */
+  it.each([
+    ['the pack list', PACKS_PATH],
+    ['a pack editor', packPath('0f9b6c2e-1a3d-4b7e-8c2f-5d6e7a8b9c01')],
+    ['the reorder endpoint', PACK_REORDER_PATH],
+  ])('marks %s uncacheable even with no session', async (_label, path) => {
+    expect(await cacheControl(contextFor(path))).toBe('private, no-store');
+  });
+
+  // The separator arm for this root specifically: `/packsheet` must not inherit `/packs`.
+  // Harmless for caching, and the same bug that is not harmless where the auth choke-point
+  // check makes the identical comparison.
+  it('does not treat a path that merely starts with the packs root as one', async () => {
+    expect(await cacheControl(contextFor(`${PACKS_PATH}heet`))).toBeNull();
+    // And the closet root, which has the same shape of neighbour.
+    expect(await cacheControl(contextFor(`${GEAR_PATH}box`))).toBeNull();
   });
 
   // Sub-paths inherit, which is the behaviour AUTH_ROUTE_PATHS' own comment argues for:

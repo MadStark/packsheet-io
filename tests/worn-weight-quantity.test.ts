@@ -82,6 +82,9 @@ function packItem(overrides: Partial<PackTreeItem> = {}): PackTreeItem {
     consumable: false,
     packed: false,
     overrides: {},
+    // Required and nullable since PK-37's review, exactly as `price`/`currency` below:
+    // "this item has no frozen copy" is said rather than left to an absent key.
+    snapshot: null,
     gear_items: {
       name: 'Wool socks',
       weight_grams: WORN_UNIT_GRAMS,

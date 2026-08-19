@@ -261,6 +261,20 @@ export type Database = {
     }
     Functions: {
       delete_own_account: { Args: never; Returns: undefined }
+      duplicate_pack: { Args: { p_pack_id: string }; Returns: string }
+      move_pack_category: {
+        Args: { p_pack_id: string; p_runs: Json }
+        Returns: undefined
+      }
+      move_pack_item: {
+        Args: {
+          p_item_id: string
+          p_pack_id: string
+          p_runs: Json
+          p_to_category_id: string
+        }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never

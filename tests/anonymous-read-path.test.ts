@@ -476,7 +476,11 @@ function chokePointDir(root: string): string {
  *   3. It must be SERVER-ONLY. A page, an API route, middleware — never a component that
  *      hydrates. That is not a convention either: Invariant D fails the build if anything
  *      on this list turns up in the client Rollup pass, which is what makes the list safe
- *      to have at all rather than a hole in the middle of the guardrail.
+ *      to have at all rather than a hole in the middle of the guardrail. Note what this
+ *      does and does not forbid: an allowlisted PAGE may host an island, because an island
+ *      is its own client entry and the page's server module stays off the client pass. What
+ *      it forbids is the island itself being named here. `src/pages/packs/[id].astro` is
+ *      the first entry to rely on that distinction, and its comment works it through.
  *
  * Each entry carries a comment saying what that module does with auth. "Needs auth" is not
  * one; the next reader has to be able to tell whether the reason is still true.
@@ -564,6 +568,82 @@ const AUTH_CONSUMERS: readonly string[] = [
   // preview step reaches no database at all. A page, never an island — the file is read
   // and parsed on the server, and no `client:*` directive appears anywhere in it.
   'src/pages/gear/import.astro',
+  // The pack list (PK-37): reads Astro.locals.user to redirect a signed-out visitor to
+  // sign-in with `next` set; builds a request-scoped client via createAuthClient and
+  // issues one owner-scoped select through loadPackList — every pack this visitor owns
+  // with its categories, items and gear embedded, folded through computeTotals for the
+  // per-pack figures — plus readWeightSystem's single-row read of `profiles` for the unit
+  // those figures render in. On POST it insert()s one `packs` row through createPack and
+  // redirects 303 into the new pack's editor. No RPC, no privileged key, and a page,
+  // never an island: no `client:*` directive appears anywhere in it.
+  'src/pages/packs/index.astro',
+  // The pack composition editor (PK-37): reads Astro.locals.user the same way; builds a
+  // request-scoped client and issues three reads — loadPackForEdit (the pack tree,
+  // explicitly scoped to user_id because packs_select_public would otherwise hand back
+  // any stranger's public pack for the id alone), readWeightSystem, and loadGearCloset
+  // for the closet picker, which is the closet page's own query rather than a second read
+  // grown here. On POST it answers ten intents: update() on `packs`, insert()/update()/
+  // delete() on `pack_categories` and `pack_items`, and one rpc('duplicate_pack') —
+  // `security invoker`, so it runs under the caller's own policies. It is not the only RPC
+  // on this list, and it never was: `src/pages/account/index.astro` reaches
+  // rpc('delete_own_account') through deleteOwnAccount, and `src/pages/packs/reorder.ts`
+  // three entries below calls rpc('move_pack_item') and rpc('move_pack_category'). What is
+  // true of all four is the property that matters here — every one is `security invoker`
+  // except `delete_own_account`, which is `SECURITY DEFINER` and says so at its own
+  // definition, and none of them is reachable without a session. Both of this page's
+  // destructive branches are two-step confirmations that write nothing on the first
+  // submission.
+  //
+  // THE FIRST ENTRY ON THIS LIST THAT HOSTS A HYDRATED COMPONENT, so it is the first that
+  // cannot end "a page, never an island" — and the exception is worth reading carefully,
+  // because the phrase every other entry ends with is shorthand for rule 3 rather than the
+  // rule itself. What this page hosts is PK-37's pack contents,
+  // `src/components/PackContents.vue`, hydrated with `client:visible`: the pack's categories
+  // and items, their figures, the per-row forms that edit them, and — once it has mounted —
+  // dragging to reorder them. It is a large island and it got larger when the editor's own
+  // forms moved into it, so that the pack's order is rendered once rather than twice. NONE
+  // OF THAT CHANGES ANYTHING BELOW, and the reason is worth stating: what the rules here
+  // care about is which modules an island's graph reaches, not how much markup it holds.
+  //
+  // WHAT RULE 3 ACTUALLY REQUIRES, AND WHY THIS STILL SATISFIES IT. Invariant D does not
+  // ask whether a page renders an island; it asks whether an allowlisted module's own id
+  // turns up in the client Rollup pass (see checkAuthStaysOffTheClient). An island is a
+  // SEPARATE client entry: Astro compiles `PackContents.vue` and its imports as their own
+  // root, and this page's server module — the frontmatter that calls createAuthClient,
+  // loadPackForEdit and rpc('duplicate_pack') — is not part of that graph and is not
+  // transformed for the browser. The direction the data moves is what keeps that true: the
+  // page reads under the visitor's session and passes the RESULT down as ordinary props
+  // (the tree, the unit, and which row a failed submission named), so nothing the island
+  // renders requires it to import anything the page imports.
+  //
+  // AND THE ISLAND IS NOT COVERED BY THIS ENTRY, which is the half that keeps the
+  // arrangement sound rather than merely true. The allowlist is matched on the importer's
+  // own id and grants nothing to anything it imports (see checkAnonymousReadPath), so
+  // `PackContents.vue` stands in front of Invariant A on its own account with no exemption
+  // at all: its every import is a pure module — src/lib/packs/{routes,reorder,
+  // reorder-request,reorder-response,drag,editor,form,fields}.ts, src/lib/gear/bulk.ts (for the delete gate's
+  // own constants, and through it src/lib/gear/fields.ts), src/lib/{totals,units,money}.ts,
+  // and `vue` and `lucide-vue-next` themselves — none of which reaches a Supabase client,
+  // and an auth import added to any of them fails the build rather than shipping an auth
+  // SDK to a browser. That is the same edge rule that has always applied to islands,
+  // unchanged by this page being on the list, and it is why the forms moving into the
+  // component cost nothing here: what they brought with them are field names and one
+  // confirmation constant, which is exactly the kind of module that is safe to share. The
+  // fixture's `AllowlistedIsland.vue` case is the mirror image, kept red on purpose: an
+  // island that
+  // IS named on an allowlist, which is the mistake this entry must not become.
+  'src/pages/packs/[id].astro',
+  // The reorder endpoint (PK-37), named by PACK_REORDER_PATH: POST-only, no GET handler at
+  // all, so a prefetcher or a cross-site <img src> cannot reach it. Reads Astro.locals.user
+  // and redirects a signed-out caller to sign-in rather than acting; builds a
+  // request-scoped client via createAuthClient, re-reads the pack's own rows with
+  // loadPackForEdit under that session, recomputes the move from THOSE rows with
+  // planItemMove/planCategoryMove — the request body carries an intent (which row, which
+  // destination category, which index) and never a position — and calls
+  // rpc('move_pack_item') or rpc('move_pack_category'), each of which locks and re-checks
+  // the pack under the caller's own policies. Answers JSON; renders no markup and hydrates
+  // nothing, which is what keeps it off the client pass.
+  'src/pages/packs/reorder.ts',
 ];
 
 /** The allowlist as absolute ids, to be compared against graph keys. Entries are written

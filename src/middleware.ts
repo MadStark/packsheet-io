@@ -13,6 +13,10 @@ import {
 // comment, and src/lib/gear/routes.ts's, for why a path constant lives one door away
 // from the auth choke point rather than inside it.
 import { GEAR_PATH } from './lib/gear/routes';
+// Also dependency-free, and deliberately so — its own header explains that this import is
+// one of the two reasons it holds nothing but strings, the other being the reorder island
+// that ships it to the browser.
+import { PACKS_PATH } from './lib/packs/routes';
 import { HOME_PATH } from './lib/routes';
 // Also dependency-free, and load-bearing for what this file costs rather than for what
 // it decides: see the gate on the user lookup in `onRequest` below.
@@ -74,6 +78,21 @@ const AUTH_ROUTE_PATHS: readonly string[] = [
   // exists to prevent. One line here covers all of them, the same way ACCOUNT_PATH
   // covers every future `/account/` sub-page without each one earning its own entry.
   GEAR_PATH,
+  // PK-37's pack list, editor and reorder endpoint, added as one more deliberate line
+  // rather than inherited from a prefix. PACKS_PATH (`/packs`) lists the signed-in
+  // visitor's own packs and redirects a signed-out one to sign-in before rendering
+  // anything; `/packs/<id>` is that visitor's composition editor. Both are exactly the
+  // shape this rule exists for — a shared cache handing one visitor's packs to the next
+  // visitor — and both would be as wrong to cache as the closet is.
+  //
+  // AND THE REORDER ENDPOINT COMES WITH THEM, WITHOUT ITS OWN LINE. `/packs/reorder`
+  // (PACK_REORDER_PATH) sits under this root on purpose: src/lib/packs/routes.ts's own
+  // comment argues that an endpoint parked at a top-level `/api/...` would be a second
+  // root somebody has to remember to add here, whereas one under `/packs` inherits the
+  // rule — which is precisely the enumerated-roots-with-inherited-sub-paths trade this
+  // list's comment above sets out. One line covers all three routes, the same way
+  // ACCOUNT_PATH covers every `/account/` sub-page.
+  PACKS_PATH,
   // `/` — the site root, which stopped being a static landing page and became a router
   // that answers differently depending on who is asking (src/pages/index.astro). Its
   // response is a 302 whose Location is the visitor's session in one header, and a 302 is

@@ -202,27 +202,34 @@
  * ---------------------------------------------------------------------------
  *
  * `PackTreePack` and friends below are satisfied, without reshaping, by the result of
- * `packTreeQuery` in tests/support/local-database.ts — the single-round-trip select the
- * share page will issue once Ref 26 writes it.
+ * `PACK_TREE_SELECT` in `src/lib/packs/query.ts` — the single-round-trip select every
+ * reader of a pack tree issues: the composition editor's `loadPackForEdit`, the `/packs`
+ * list's `loadPackList`, and `packTreeQuery` in `tests/support/local-database.ts`, which
+ * stands in for PK-26's public share page until that page is written.
  *
- * That select (`PACK_TREE_SELECT`) currently lives in tests/support/ because the page
- * that will issue it does not exist yet, which is worth saying plainly rather than
- * leaving a reader to discover: production code is documenting its input contract by
- * pointing at a test helper. The pointer moves to the page's own module the day there is
- * one, and the compile-time assertion in tests/totals.test.ts moves with it — what must
- * not happen in the meantime is a second, hand-written select growing up beside it.
+ * That select used to live in tests/support/ because no production module read a pack
+ * yet — this comment used to say so, and named the day the pointer would move: "the day
+ * there is one". PK-37 is that day: `PACK_TREE_SELECT` and the compile-time assignability
+ * assertion both moved to `src/lib/packs/query.ts` and `tests/packs-query.test.ts`
+ * respectively. What must not happen now that it has a real home is the thing that was
+ * already true before — a second, hand-written select growing up beside it. Read
+ * `PACK_TREE_SELECT`'s own comment for why WIDENING it (as PK-37 did, for the editor's
+ * `description`/`trip_type`) is safe and NARROWING it is not — the assertion below pins
+ * only the narrow direction.
  *
  * The shape is a deliberate constraint on this module rather than a coincidence: an
  * engine whose input needs hand-mapping from the query result puts a second,
  * hand-written transcription of the schema between the database and the arithmetic,
  * and that transcription is exactly where a `worn` flag gets dropped. The
  * types are structural, so a wider select (extra columns, extra embeds) satisfies them
- * too; tests/totals.test.ts pins the assignability at compile time.
+ * too; tests/packs-query.test.ts pins the assignability at compile time.
  *
  * EVERY FIELD THIS ENGINE READS IS REQUIRED, INCLUDING THE NULLABLE ONES. `consumable`,
- * `packed`, `price` and `currency` are not optional properties below: the two flags are
- * required booleans and the two price fields are required but NULLABLE (`number | null`,
- * `string | null`), so a caller with no price must say `null` rather than omit the key.
+ * `packed`, `price`, `currency`, `snapshot` and `gear_items` are not optional properties
+ * below: the two flags are required booleans and the four others are required but NULLABLE
+ * (`number | null`, `string | null`, `Json | null`, `PackTreeGearItem | null`), so a caller
+ * with no price, no frozen copy or no surviving gear row must say `null` rather than omit
+ * the key.
  *
  * That is a correction, and the shape it replaces is worth recording because it looked
  * reasonable. The four were optional, defaulted with `?? false` / `?? null`, and
@@ -241,11 +248,25 @@
  *     pack that cost two thousand pounds. A partial map is worse than an empty one. An
  *     empty map is visibly nothing; a partial map is a confident wrong number.
  *
+ * `snapshot` AND `gear_items` WERE THE TWO THAT SURVIVED THAT CORRECTION, and PK-37's
+ * independent review was right that they should not have. They were optional on the
+ * argument that "absent and null mean the same thing here" — which is true of what the
+ * VALUES mean and false of what an optional property lets a QUERY do. A reviewer removed
+ * both from `PACK_TREE_SELECT` and `tsc --noEmit` still passed, so the sentence below about
+ * the assertion failing in both directions was, until this change, not true of these two
+ * columns. The defect that would have shipped is the same class the four above produced and
+ * worse in kind: with `snapshot` unfetched, every item of a LOCKED pack resolves from its
+ * live gear row instead of the frozen copy, so the pack silently stops being a record of
+ * what was carried and starts tracking whatever the closet says today — no error, no absent
+ * figure, just different numbers. With `gear_items` unfetched, an ordinary unlocked item has
+ * neither source and `resolvePackItem` throws, which is loud rather than silent but is still
+ * a query mistake that the compiler could have caught.
+ *
  * Making the fields required moves that from a runtime surprise to a compile error, and
- * the compile error lands in the right place: tests/totals.test.ts asserts that
+ * the compile error lands in the right place: tests/packs-query.test.ts asserts that
  * `PACK_TREE_SELECT`'s inferred row type is assignable to `PackTreePack`, which with no
  * optional properties left now fails in BOTH directions — when a select is too narrow, as
- * well as when one is narrowed later. `tests/support/local-database.ts` fetches all four.
+ * well as when one is narrowed later. `src/lib/packs/query.ts` fetches all six.
  */
 
 import type { Json } from './database.types';
@@ -297,11 +318,18 @@ export interface PackTreeGearItem {
  * this file touches them.
  *
  * `worn`, `consumable` and `packed` are all three required booleans, matching three
- * `boolean not null default false` columns. `snapshot` and `gear_items` stay optional
- * because for those two, absent and null genuinely mean the same thing — an item with no
- * frozen copy, an item whose gear has been deleted — and `pack_items_reference_or_snapshot`
- * guarantees they are never both missing at once, which is the case `resolvePackItem`
- * refuses by name.
+ * `boolean not null default false` columns.
+ *
+ * `snapshot` AND `gear_items` ARE REQUIRED AND NULLABLE, on exactly the argument
+ * `PackTreeGearItem` above makes for `price`/`currency`, and they were optional until
+ * PK-37's independent review. At RUNTIME absent and null are the same thing here and both
+ * are handled identically — an item with no frozen copy, an item whose gear has been
+ * deleted, and `pack_items_reference_or_snapshot` guarantees they are never both missing at
+ * once, which is the case `resolvePackItem` refuses by name. What an OPTIONAL property adds
+ * is a second reading, "the query did not ask", and that reading has a different right
+ * answer: a select that omits `snapshot` makes every item of a locked pack resolve from live
+ * gear, which is a wrong pack rather than a missing one. See the module comment's paragraph
+ * on the two that survived the first correction for what a reviewer verified with `tsc`.
  */
 export interface PackTreeItem {
   readonly id: string;
@@ -310,8 +338,8 @@ export interface PackTreeItem {
   readonly consumable: boolean;
   readonly packed: boolean;
   readonly overrides: Json;
-  readonly snapshot?: Json | null;
-  readonly gear_items?: PackTreeGearItem | null;
+  readonly snapshot: Json | null;
+  readonly gear_items: PackTreeGearItem | null;
 }
 
 /** One row of `pack_categories`, with its items. */

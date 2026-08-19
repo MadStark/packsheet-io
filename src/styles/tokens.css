@@ -81,6 +81,21 @@
   --w-cons: var(--ochre);
 
   /*
+   * The one shadow the palette defines, and the only one rule 2 above admits: the row a
+   * pointer is currently dragging (PK-37, src/components/PackContents.vue). It exists ONLY
+   * between `dragstart` and `dragend` — nothing in this product casts a shadow at rest, and
+   * a second `--shadow-*` token would be the moment to re-read rule 2 rather than to add one.
+   *
+   * It is a token rather than an inline value for the reason CONTRIBUTING.md gives: a colour
+   * invented at a call site is a colour with no dark cut and no reviewer. This one needs the
+   * dark cut. 22% black over --paper #f7f4ee reads as a soft lift; the same 22% over dark
+   * --paper #17130f is very nearly nothing, because a black shadow on a near-black ground
+   * has almost no contrast to spend. The dark blocks below raise it to 55% and tighten the
+   * spread, which is the smallest change that keeps the dragged row distinguishable.
+   */
+  --shadow-drag: 0 10px 24px rgb(0 0 0 / 0.22);
+
+  /*
    * Gear categories are fill-only: dots, bars and swatches, where WCAG imposes no
    * contrast requirement, and none of them has a dark cut. As text on dark --surface
    * #211c17, only --c-misc (4.62:1) and --c-cooking (4.99:1) clear AA; the other
@@ -136,6 +151,8 @@
     --worn-ink: #a794c6;
 
     --w-worn: var(--worn-ink);
+
+    --shadow-drag: 0 8px 20px rgb(0 0 0 / 0.55);
   }
 }
 
@@ -167,4 +184,6 @@
   --worn-ink: #a794c6;
 
   --w-worn: var(--worn-ink);
+
+  --shadow-drag: 0 8px 20px rgb(0 0 0 / 0.55);
 }
