@@ -143,34 +143,69 @@ if (Astro.request.method === 'POST') {
 ---
 
 <Layout title="Add gear — Packsheet" description="Add a new item to your Packsheet gear closet.">
-  <GearNav />
-  <main class="mx-auto max-w-2xl px-6 py-10">
-    <h1 class="text-3xl">Add gear</h1>
-    <p class="text-ink-2 mt-2 text-sm">
-      Photos aren't supported yet — that's a separate piece of work still to come.
-    </p>
+  {
+    /*
+    ONE SHEET, THE TITLE INSIDE IT (DESIGN.md §2.3, §8: "a form page is one sheet, with
+    the page title inside it") — a cover sheet carrying nothing but an <h1> is a second
+    sheet doing no work. See src/pages/gear/index.astro for the closest sibling of this
+    shape and sign-in.astro for the one-sheet form precedent.
 
+    BOTH BANNERS BELOW ARE SIBLINGS ABOVE THE SHEET, NEVER INSIDE IT (§2.5: a note may
+    only lie directly on the paper). GearItemForm used to render its own "Fix the
+    following before saving" summary from inside the sheet it is called from; that moved
+    out here — this page already holds the same `errors` it hands to GearItemForm as a
+    prop, so it renders the summary itself rather than the component reaching outside
+    its own sheet to do it. See GearItemForm's own comment on why that summary is gone
+    from it entirely, and 06-form-invalid.png for the placement this reproduces. */
+  }
+  <GearNav />
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
     {
       writeError && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {writeError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{writeError}</p>
+        </div>
       )
     }
 
-    <div class="mt-8">
-      <GearItemForm
-        weightSystem={weightSystem}
-        values={values}
-        errors={errors}
-        submitLabel="Add item"
-        cancelHref={returnPath ?? GEAR_PATH}
-        categories={categories}
-        next={returnPath ?? undefined}
-      />
+    {
+      Object.keys(errors).length > 0 && (
+        <div class="note note-danger" role="alert">
+          <p class="text-sm font-medium">Fix the following before saving:</p>
+          <ul class="mt-2 list-disc space-y-1 pl-5 text-sm">
+            {Object.values(errors).map((message) => (
+              <li>{message}</li>
+            ))}
+          </ul>
+        </div>
+      )
+    }
+
+    <div class="sheet">
+      <div class="sheet-body">
+        <p class="eyebrow">Gear</p>
+        <h1 class="page-title mt-2">Add gear</h1>
+        <p class="aside mt-2">weigh it once</p>
+        {
+          /* Real product-limitation copy, not the mockup's aside — kept in the system
+             voice (a `.hint`, not `.aside`) because this is the app explaining itself
+             rather than anything the visitor wrote. */
+        }
+        <p class="hint mt-2">
+          Photos aren't supported yet — that's a separate piece of work still to come.
+        </p>
+        <hr class="sheet-rule" />
+
+        <GearItemForm
+          weightSystem={weightSystem}
+          values={values}
+          errors={errors}
+          submitLabel="Add item"
+          cancelHref={returnPath ?? GEAR_PATH}
+          categories={categories}
+          next={returnPath ?? undefined}
+        />
+      </div>
     </div>
   </main>
 </Layout>
