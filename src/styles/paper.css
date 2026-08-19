@@ -1,0 +1,901 @@
+/*
+ * The Notebook Paper design language, as a component vocabulary.
+ *
+ * THE AUTHORITY IS DESIGN.md. This file is the port of the settled prototype
+ * (paperdesign/explore/parts/90-paper-r3.css) into the names the site's pages are
+ * written against. Section references below (§2.1, §6, …) point at DESIGN.md.
+ *
+ * WHAT THIS FILE OWNS, AND WHAT IT DOES NOT. Tailwind expresses layout — flex,
+ * grid, gaps, widths, the 30px gap between sheets — and that stays in the markup.
+ * What lives here is the part Tailwind cannot say (the curl pseudo-elements, the
+ * ground, the two voices) and the part that would otherwise be retyped on every
+ * page (the control vocabulary, the ledger).
+ *
+ * ONE VARIANT, NOT A MENU. The prototype was a switcher: six paper finishes, four
+ * system faces, three numeral treatments, all selected by [data-paper] /
+ * [data-sys] / [data-nums] prefixes. Every one of those is a closed decision —
+ * squared paper, Inter, written figures — so none of the prefixes survive here.
+ * §2.1 is explicit about why: a site that offers four finishes gets four finishes.
+ * The prototype also carried --font-body and --font-mono; neither exists any more.
+ * Everything it set in either is the SYSTEM voice, because there is no monospace
+ * family in this design (§4).
+ *
+ * NEVER USE THE `font:` SHORTHAND HERE. It resets font-family, so a later
+ * shorthand naming the system face silently beats an earlier written-face rule of
+ * equal specificity. That bug shipped twice in the prototype — it put every form
+ * field, and then every numeric field, in the system's voice while the visitor was
+ * the one writing in them. Set font-size / font-weight / line-height individually.
+ *
+ * @layer components, so a page-level Tailwind utility still wins. Note that layer
+ * order beats specificity: a utility in the utilities layer overrides anything
+ * here regardless of how specific the selector is.
+ */
+
+@layer components {
+  /* ==========================================================================
+     LAYERS — §2.1, §2.2
+
+     ALL THREE SIT AT z-index: 0 AND RELY ON DOM ORDER. Not one of them may go
+     negative. A negative-z descendant paints between the root element's
+     background and the in-flow backgrounds of its siblings, so the moment <body>
+     has a background of its own — and global.css gives it one, deliberately — that
+     background covers the ground and the paper disappears. No error, no warning,
+     just a blank page. §2.2 exists as its own section for exactly this reason.
+
+     .paper-page being a stacking context is also what keeps the curl shadows of
+     §2.4 working: their z-index:-1 pseudo-elements stay inside it and paint behind
+     their own sheets rather than falling out of the page entirely.
+     ====================================================================== */
+
+  .paper-ground {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    /*
+     * Squared — petits carreaux, the French exercise book, on the 20px cell. The
+     * pattern ink is a desaturated slate blue and never grey: real notebook
+     * printing is a pale blue-grey and the eye recognises it instantly, where a
+     * grey grid reads as a wireframe.
+     */
+    background:
+      linear-gradient(var(--grid-ink) 1px, transparent 1px) 0 0 / var(--cell) var(--cell),
+      linear-gradient(90deg, var(--grid-ink) 1px, transparent 1px) 0 0 / var(--cell) var(--cell),
+      var(--paper);
+  }
+
+  /*
+   * The grain is nearly invisible alone and stops the ground reading as a flat
+   * vector fill. It must never be strong enough to notice on the white sheets,
+   * which is what the low alpha inside the filter and the multiply blend buy.
+   */
+  .paper-grain {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.42;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 0.42 0 0 0 0 0.36 0 0 0 0 0.22 0 0 0 0.055 0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .paper-page {
+    position: relative;
+    z-index: 0;
+  }
+
+  /* §3 — the content column is 1000px INCLUDING its 40px side padding, so a
+     sheet's inner width is ~920px. */
+  .paper-col {
+    width: 100%;
+    max-width: 1000px;
+    margin-inline: auto;
+    padding-inline: 40px;
+  }
+
+  /* ==========================================================================
+     SURFACES — §2.3, §2.4, §2.5
+
+     Two physical layers and only two: the paper, and the white sheets lying on
+     it. Nothing is ever written directly on the paper, and no two papers overlap.
+     ====================================================================== */
+
+  /*
+   * NONE OF THESE MAY CREATE A STACKING CONTEXT. No transform, no isolation, no
+   * z-index, no filter on the element that owns a curl (§2.4). If it does, its own
+   * z-index:-1 pseudo-elements paint ABOVE its background and the card grows two
+   * grey slabs. This is also the mechanical reason nothing in this language is
+   * tilted: a rotation is a transform.
+   */
+  .sheet,
+  .strip,
+  .note {
+    position: relative;
+    background-color: var(--note);
+    border: 1px solid rgba(var(--shadow-ink), 0.08);
+  }
+
+  /* The sheet's ambient shadow, under the curl. A sheet is flat and straight; the
+     depth comes from shadow, never from a border or a colour. */
+  .sheet,
+  .strip {
+    box-shadow:
+      0 1px 2px rgba(var(--shadow-ink), 0.08),
+      0 6px 18px -6px rgba(var(--shadow-ink), 0.1);
+  }
+
+  /* A strip is a sheet with zero padding at a fixed height — the navigation bar,
+     and nothing else so far. Its inner row does its own padding in the markup. */
+  .strip {
+    height: 60px;
+    padding: 0;
+  }
+
+  /*
+   * §2.4 — THE CORNER CURL. The one trick that makes a flat rectangle read as
+   * paper: the shadow is deepest at the two bottom corners and fades toward the
+   * middle and the top edge, as if the sheet were resting on its centre and
+   * lifting very slightly at the corners. Two pseudo-elements inside the bottom of
+   * the box, rotated a couple of degrees in opposite directions, casting a blurred
+   * shadow that leaks out from under it.
+   *
+   * The height is capped so a very tall sheet does not grow a huge shadow, and the
+   * shadow colour is always the warm --shadow-ink, never black — a black shadow on
+   * warm paper looks like a hole.
+   */
+  .sheet::before,
+  .sheet::after,
+  .strip::before,
+  .strip::after,
+  .note::before,
+  .note::after {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    width: 40%;
+    max-height: 120px;
+  }
+
+  .sheet::before,
+  .sheet::after,
+  .strip::before,
+  .strip::after {
+    bottom: 14px;
+    height: 24%;
+    box-shadow: 0 12px 14px rgba(var(--shadow-ink), 0.2);
+  }
+
+  .sheet::before,
+  .strip::before {
+    left: 10px;
+    transform: rotate(-2.2deg);
+  }
+
+  .sheet::after,
+  .strip::after {
+    right: 10px;
+    transform: rotate(2.2deg);
+  }
+
+  /*
+   * The isolating wrapper inside a sheet, carrying the 40px padding (§3 — two
+   * cells, so the content lands on the grid). It is a stacking context, which the
+   * sheet itself must never be; the sheet's own curl stays outside it and behind
+   * the sheet.
+   */
+  .sheet-body {
+    position: relative;
+    isolation: isolate;
+    padding: 40px;
+  }
+
+  /* §2.6 — a section divider inside a sheet is a hairline with 40px above and
+     below. Nothing is boxed, and vertical rules do not exist. */
+  .sheet-rule {
+    border: 0;
+    border-top: 1px solid var(--hairline);
+    margin: 40px 0;
+  }
+
+  /*
+   * §2.5 — A NOTE MAY ONLY LIE DIRECTLY ON THE PAPER, never on a sheet and never
+   * hanging off one. No two papers overlap. That retires the note-on-a-sheet,
+   * which used to be the language's emphasis device; emphasis inside a sheet now
+   * comes from rules, size and position instead.
+   *
+   * In practice a note is a page-level interruption: an error banner, a delete
+   * confirmation. It carries a stronger curl than a sheet and no ambient shadow —
+   * .note-danger's inset bar occupies box-shadow, so an ambient value here would
+   * be wiped by it anyway.
+   */
+  .note {
+    padding: 24px 28px;
+  }
+
+  .note::before,
+  .note::after {
+    bottom: 12px;
+    height: 34%;
+    box-shadow: 0 16px 15px rgba(var(--shadow-ink), 0.3);
+  }
+
+  .note::before {
+    left: 10px;
+    transform: rotate(-3deg);
+  }
+
+  .note::after {
+    right: 10px;
+    transform: rotate(3deg);
+  }
+
+  /*
+   * §8, §9 — the alert, the error summary and the destructive confirmation are one
+   * treatment, not three: the 5.5% rust wash and the 3px inset rust bar that §7
+   * already defines for a row in a state. Nothing is filled and nothing is a
+   * boxed banner.
+   */
+  .note-danger {
+    background-color: color-mix(in srgb, var(--rust) 5.5%, transparent);
+    box-shadow: inset 3px 0 0 var(--rust);
+  }
+
+  /* ==========================================================================
+     TYPE — §4
+
+     THE CENTRE OF THE SYSTEM. Two faces, and which is which is not stylistic —
+     it is about who is speaking. The app PRINTS in Inter; the visitor WRITES in
+     Klee One. Figures are written, and they still align: Klee One's digits were
+     measured in the browser and are uniform width.
+
+     global.css already puts the system face on html and on h1–h3, and .numeric on
+     the written face at 14.5px. Nothing here repeats that.
+     ====================================================================== */
+
+  /*
+   * The two voices as explicit escape hatches, for the cases the element-scoped
+   * rules cannot reach: a system phrase inside a written run, or a written value
+   * somewhere no ledger rule applies. Family only, so a size or weight set
+   * alongside them survives.
+   */
+  .written {
+    font-family: var(--font-written);
+  }
+
+  .system {
+    font-family: var(--font-system);
+  }
+
+  /* A section label: 12px uppercase at .12em in the third ink. --ink-3 is #7a7468
+     and clears AA at this size on both the paper and the sheet; do not set it on
+     --paper-deep, where it measures 4.11:1 and fails. */
+  .eyebrow {
+    margin: 0;
+    font-family: var(--font-system);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .page-title {
+    margin: 0;
+    font-family: var(--font-system);
+    font-size: 34px;
+    font-weight: 600;
+    line-height: 40px;
+  }
+
+  .section-title {
+    margin: 0;
+    font-family: var(--font-system);
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 20px;
+  }
+
+  /*
+   * 19/30 rather than a multiple of the 20px cell, and recorded rather than
+   * fudged (§3). The rhythm governs RULES and section boundaries, which all still
+   * land on the cell; a 19px lead at 19/20 is unreadably tight and at 19/40 is a
+   * different page.
+   */
+  .lead {
+    margin: 0;
+    font-family: var(--font-system);
+    font-size: 19px;
+    font-weight: 400;
+    line-height: 30px;
+    color: var(--ink-2);
+  }
+
+  .hint {
+    margin: 0;
+    font-family: var(--font-system);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 20px;
+    color: var(--ink-2);
+  }
+
+  /*
+   * The one written phrase a sheet is allowed. It is still something the visitor
+   * wrote, so it takes the pen — one size up and in the second ink, which reads as
+   * an aside without a third family on the page to say so.
+   */
+  .aside {
+    margin: 0;
+    font-family: var(--font-written);
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 20px;
+    color: var(--ink-2);
+  }
+
+  /* ==========================================================================
+     CONTROLS — §6
+
+     Drawn on the sheet with the same pen as everything else, and ALL IN THE
+     SYSTEM VOICE: the hand never sets anything operable, because a button is the
+     app speaking. Motion is 150ms ease and lives only here; sheets and notes
+     never move (§11). global.css owns the reduced-motion collapse.
+     ====================================================================== */
+
+  /*
+   * A button is a 28px box with a 1px ink border, 6px radius, white fill, and a
+   * hard 1px offset shadow that reads as a stamp. Hover lifts it a pixel and grows
+   * the shadow to 2px; press drops it flat.
+   */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--ink);
+    border-radius: var(--radius);
+    background-color: var(--note);
+    color: var(--ink);
+    font-family: var(--font-system);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1;
+    text-decoration: none;
+    cursor: pointer;
+    box-shadow: 1px 1px 0 rgba(var(--shadow-ink), 0.18);
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.15s ease,
+      background-color 0.15s ease;
+  }
+
+  .btn:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 2px 2px 0 rgba(var(--shadow-ink), 0.18);
+  }
+
+  .btn:active {
+    transform: none;
+    box-shadow: 0 0 0 rgba(var(--shadow-ink), 0.18);
+  }
+
+  .btn:disabled,
+  .btn[aria-disabled='true'] {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  /* Primary swaps ink for deep blue and takes the blue tint — blue means
+     interactive, and is never decorative (§5). */
+  .btn-primary {
+    border-color: var(--blue-deep);
+    background-color: var(--blue-tint);
+    color: var(--blue-ink);
+  }
+
+  /* Destructive swaps ink for rust on the same box: the same move as primary, so
+     it needs no new shape. The wash is derived from --rust rather than written out
+     as an rgba() literal the way the prototype had it. */
+  .btn-danger {
+    border-color: var(--rust);
+    background-color: color-mix(in srgb, var(--rust) 6%, transparent);
+    color: var(--rust);
+  }
+
+  .btn-quiet {
+    border-color: var(--rule);
+    color: var(--ink-2);
+  }
+
+  /*
+   * A FIELD IS NOT A BUTTON. Same box — 1px ink, 6px radius, white fill — but
+   * NEVER the stamp shadow. The stamp is what says "press me"; borrowing it for a
+   * field makes every field look pressable, and that single distinction is what
+   * lets one box shape serve both without ambiguity.
+   *
+   * The value is WRITTEN, because you are the one typing it. Width is deliberately
+   * not set: a stacked form field wants w-full and a bulk-bar input does not, and
+   * that is a layout decision for the markup.
+   */
+  .field {
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--ink);
+    border-radius: var(--radius);
+    background-color: var(--note);
+    color: var(--ink);
+    appearance: none;
+    font-family: var(--font-written);
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 20px;
+    font-variant-numeric: tabular-nums;
+    transition: border-color 0.15s ease;
+  }
+
+  /* The PLACEHOLDER is the system voice even inside a written-face field: the form
+     is prompting you, you are not writing. */
+  .field::placeholder {
+    font-family: var(--font-system);
+    color: var(--ink-3);
+    opacity: 1;
+  }
+
+  textarea.field {
+    height: auto;
+    min-height: 72px;
+    padding: 8px 10px;
+  }
+
+  /*
+   * A unit select stays in the pen deliberately: it is not a value you typed, but
+   * it is half of a value you did — the closet renders "539 g" entirely in the
+   * hand, and setting the g in Inter would split one quantity across two voices.
+   * A bulk-action select is the opposite case and takes .system, because "Owned"
+   * there is an instruction to the app, not part of an item's record.
+   */
+  select.field {
+    padding-right: 28px;
+    background-image:
+      linear-gradient(45deg, transparent 50%, var(--ink) 50%),
+      linear-gradient(135deg, var(--ink) 50%, transparent 50%);
+    background-position:
+      calc(100% - 15px) 14px,
+      calc(100% - 10px) 14px;
+    background-size:
+      5px 5px,
+      5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  /* §8 — the field's own box turns rust with a faint inset. Nothing is filled: a
+     filled error field would be the only filled control on the page. */
+  .field[aria-invalid='true'] {
+    border-color: var(--rust);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--rust) 25%, transparent);
+  }
+
+  .field-label {
+    display: block;
+    font-family: var(--font-system);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .field-hint {
+    margin: 4px 0 0;
+    font-family: var(--font-system);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 20px;
+    color: var(--ink-2);
+  }
+
+  /* The app is the one objecting, so the message is the system voice. */
+  .field-error {
+    margin: 4px 0 0;
+    font-family: var(--font-system);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 20px;
+    color: var(--rust);
+  }
+
+  /* Enforcement stays server-side; the asterisk and aria-required are what
+     communicate it. */
+  .field-required {
+    margin-left: 2px;
+    color: var(--rust);
+  }
+
+  /*
+   * §6 — search alone is a bare underline in ink with an icon, no box. And it is
+   * the SYSTEM voice: the test is "did the visitor write this onto their list" — a
+   * category they typed is on the list, a search query is a question asked of the
+   * app and gone a moment later.
+   */
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .search svg {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    color: var(--ink-3);
+  }
+
+  .search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    background: none;
+    outline-offset: 4px;
+    font-family: var(--font-system);
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 20px;
+  }
+
+  .search input::placeholder {
+    color: var(--ink-3);
+    opacity: 1;
+  }
+
+  /*
+   * A 15px square in the same ink box at 3px radius. Checked, it FILLS WITH INK
+   * and shows a paper-coloured tick — the same "pressed fills with ink" move the
+   * segmented control uses, rather than a new idea.
+   *
+   * Applied to the <input> itself, so a label around it is plain markup. The tick
+   * is a background image rather than a pseudo-element, because pseudo-elements on
+   * a replaced element are not reliable across engines.
+   *
+   * 3px, not the 6px the prototype's comment claimed — its own value was 3px, and
+   * 3px is what §6 specifies.
+   */
+  .checkbox {
+    display: inline-block;
+    flex: none;
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    border: 1px solid var(--ink);
+    border-radius: 3px;
+    background-color: var(--note);
+    appearance: none;
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .checkbox:checked {
+    background-color: var(--ink);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 15 15'%3E%3Cpath d='M3.4 7.7l2.7 2.8 5.4-6' fill='none' stroke='%23fdfcf6' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: center;
+  }
+
+  /*
+   * §6 — A CHOICE OF THREE OR FEWER IS ONE SEGMENTED CONTROL, not a stack of
+   * radios. It says "exactly one of these is true", which a radio stack only
+   * implies. It is the button's box split by 1px ink dividers, so it costs no new
+   * shape; the selected segment fills with ink and its label and icon go
+   * paper-coloured.
+   *
+   * The icon reverses out because it inherits currentColor. If a page wants an
+   * accent on an UNSELECTED segment's icon, it must scope that to the unselected
+   * case — a plain colour utility on the <svg> would sit in the utilities layer and
+   * beat the checked rule below, leaving an ochre glyph on an ink fill.
+   */
+  .segmented {
+    display: inline-flex;
+    border: 1px solid var(--ink);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: 1px 1px 0 rgba(var(--shadow-ink), 0.18);
+  }
+
+  .segment {
+    position: relative;
+    display: inline-flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 12px;
+    border: 0;
+    border-left: 1px solid var(--ink);
+    background-color: var(--note);
+    color: var(--ink);
+    font-family: var(--font-system);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .segment:first-child {
+    border-left: 0;
+  }
+
+  /* The radio that drives a label-shaped segment. Kept in the layout so it stays
+     focusable and reachable; global.css's :focus-visible ring is what shows it. */
+  .segment input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .segment svg {
+    flex: none;
+    width: 15px;
+    height: 15px;
+  }
+
+  .segment:hover {
+    background-color: color-mix(in srgb, var(--ink) 4%, transparent);
+  }
+
+  .segment:has(input:checked),
+  .segment[aria-pressed='true'],
+  .segment[aria-current='true'] {
+    background-color: var(--ink);
+    color: var(--paper);
+  }
+
+  /* ==========================================================================
+     LISTS — §7
+
+     Tables are ledgers: no boxes, no borders as separators, rules horizontal and
+     1px only.
+     ====================================================================== */
+
+  .ledger {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+  }
+
+  .ledger th,
+  .ledger td {
+    padding: 0 10px;
+    text-align: inherit;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+
+  /* First column flush left, last flush right. */
+  .ledger th:first-child,
+  .ledger td:first-child {
+    padding-left: 0;
+  }
+
+  .ledger th:last-child,
+  .ledger td:last-child {
+    padding-right: 0;
+  }
+
+  /*
+   * THE HEADER ROW IS THE SYSTEM NAMING THE COLUMN, so it stays printed. This is
+   * the trap the exploration hit twice: a value class like .c-brand or .numeric
+   * matches <th> as well as <td>, which quietly put the whole header row in the
+   * written face. Every voice rule below is therefore scoped by ELEMENT to tbody
+   * or tfoot, never by a class that both can carry.
+   *
+   * 12px uppercase third ink on a 20px row, underlined in full ink — that
+   * underline is what gives a table its ledger feel without a box.
+   */
+  .ledger thead th {
+    height: 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--ink);
+    font-family: var(--font-system);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .ledger thead th a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .ledger thead th a:hover {
+    color: var(--ink);
+  }
+
+  /*
+   * The body is what the visitor wrote — names, brands, categories, and the
+   * figures — so it takes the pen. :where() drops this to a single-element
+   * specificity on purpose, so the .system escape hatch and .numeric both beat it
+   * without depending on where they sit in the file.
+   */
+  :where(.ledger tbody) td {
+    font-family: var(--font-written);
+  }
+
+  /* §3 — the 40px row is a hard rhythm, not a minimum. One wrapped cell turns a
+     40px row into 60 and puts every hairline below it off the 20px cell, so
+     nothing wraps; if the columns do not fit, a column goes. */
+  .ledger tbody tr {
+    height: 40px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .ledger tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .ledger tbody tr:hover {
+    background-color: color-mix(in srgb, var(--ink) 4%, transparent);
+  }
+
+  /* §7 — a totals row is separated by an ink rule, its LABEL in the system voice
+     at 500 and its figures written. The label inherits the system face from html;
+     the figures carry .numeric, which global.css sets to the written face. Klee One
+     ships 400 and 600 only, so a written figure here renders at 400 — which is the
+     intent: the label is what is emphasised. */
+  .ledger tfoot td {
+    height: 40px;
+    border-top: 1px solid var(--ink);
+    font-weight: 500;
+  }
+
+  /*
+   * A ROW'S STATE IS SHOWN AT ITS LEFT EDGE AND ACROSS THE ROW: a 5.5% wash of
+   * the state's colour and a 3px bar of it at the left edge. The row's status icon
+   * and, for retired, the strike through the name carry the same information in
+   * shape rather than hue, so nothing here depends on colour alone (§12).
+   *
+   * THERE IS NO .row-owned, AND THAT IS THE POINT. In a closet where most items
+   * are owned, a mark on every owned row is the most repeated thing in the table
+   * and says nothing. Mark the exceptions only.
+   */
+  .row-wishlist {
+    background-color: color-mix(in srgb, var(--ochre) 5.5%, transparent);
+    box-shadow: inset 3px 0 0 var(--ochre);
+  }
+
+  .row-retired {
+    background-color: color-mix(in srgb, var(--rust) 5.5%, transparent);
+    box-shadow: inset 3px 0 0 var(--rust);
+  }
+
+  /* Hovering a marked row deepens its own wash rather than replacing it with the
+     ink one — otherwise the row-state rules, which are less specific than
+     `.ledger tbody tr:hover`, lose the row's colour for as long as the pointer is
+     over it. */
+  .ledger tbody tr.row-wishlist:hover {
+    background-color: color-mix(in srgb, var(--ochre) 9%, transparent);
+  }
+
+  .ledger tbody tr.row-retired:hover {
+    background-color: color-mix(in srgb, var(--rust) 9%, transparent);
+  }
+
+  /*
+   * §7 — HEADLINE FIGURES SIT FLAT INSIDE THEIR SHEET: a hairline above, the label
+   * above the figure, and hairlines between figures. Not a note, not a second
+   * surface — that is the no-overlap rule of §2.5 applied to what used to be the
+   * emphasis device.
+   *
+   * The vertical hairlines between figures are the single sanctioned exception to
+   * "vertical rules do not exist in this language" (§2.6).
+   *
+   * Expects a <dl> of groups, each a <dt> label over a <dd> figure.
+   */
+  .ledger-figures {
+    display: flex;
+    flex-wrap: wrap;
+    margin: 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .ledger-figures > * {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-right: 40px;
+    padding-right: 40px;
+    border-right: 1px solid var(--hairline);
+  }
+
+  .ledger-figures > *:last-child {
+    margin-right: 0;
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .ledger-figures dt {
+    font-family: var(--font-system);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  /* The figure is written, and it still aligns: Klee One's digits are uniform
+     width. tabular-nums is kept declared anyway so a future face swap cannot
+     silently lose the property. */
+  .ledger-figures dd {
+    margin: 0;
+    font-family: var(--font-written);
+    font-size: 27px;
+    font-weight: 400;
+    line-height: 30px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  /* ==========================================================================
+     STATES — §9
+     ====================================================================== */
+
+  /*
+   * The empty state: a short lead in the section-title size, a sentence in the
+   * second ink, and the one action that resolves it — centred on the sheet with
+   * real air, 60px of it, and NOT a bordered box. Used in place of .sheet-body,
+   * whose padding and isolation it carries itself.
+   *
+   * An empty page has no figures to report: hide the headline figures rather than
+   * showing zeros or a stale count above an empty state. That is a page decision,
+   * but it is the one this class most often comes with.
+   */
+  .blank {
+    position: relative;
+    isolation: isolate;
+    padding: 60px 40px;
+    text-align: center;
+  }
+
+  /* ==========================================================================
+     NARROW — §3
+
+     Sheets go full width at 20px padding. Very little of the squared finish
+     survives at this width, and that is expected: the grid is a desktop-margin
+     decision, because sheets are opaque and it is only ever seen beside them.
+     ====================================================================== */
+
+  @media (max-width: 900px) {
+    .paper-col {
+      padding-inline: 20px;
+    }
+
+    .sheet-body {
+      padding: 20px;
+    }
+
+    .note {
+      padding: 20px;
+    }
+
+    .blank {
+      padding: 40px 20px;
+    }
+  }
+}

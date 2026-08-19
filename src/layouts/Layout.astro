@@ -2,7 +2,7 @@
 import '../styles/global.css';
 // Imported rather than hardcoded: Vite fingerprints the filename at build time,
 // so a literal /_astro/... path would 404 in production.
-import hankenGroteskUrl from '../assets/fonts/hanken-grotesk-latin-var.woff2?url';
+import interUrl from '../assets/fonts/inter-latin-var.woff2?url';
 
 interface Props {
   title: string;
@@ -51,34 +51,48 @@ const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 
     {
       /*
-      Preload the body face only. Preloading all four would have them compete for
-      bandwidth with the HTML on first paint; Hanken is the one that renders the
-      most pixels above the fold.
-    */
-    }
-    <link rel="preload" href={hankenGroteskUrl} as="font" type="font/woff2" crossorigin />
+      Preload the SYSTEM face, not the written one. Inter paints the chrome, the
+      headings and every label on the page, so it is the face whose absence shows
+      first; Klee One sets the visitor's own data, which is both less of the page
+      above the fold and less jarring to have swap in a beat later. Preloading both
+      would have them compete for bandwidth with the HTML on first paint.
 
-    {
-      /*
-      Set the theme before first paint so a dark-mode user never sees a flash of
-      warm paper. Inline and synchronous by necessity — a deferred script runs too
-      late to prevent the flash.
+      One file rather than three: Inter is vendored as a variable font covering the
+      400–600 the design uses.
     */
     }
-    <script is:inline>
-      (function () {
-        try {
-          const stored = localStorage.getItem('packsheet-theme');
-          if (stored === 'light' || stored === 'dark') {
-            document.documentElement.setAttribute('data-theme', stored);
-          }
-        } catch {
-          /* Private mode blocks localStorage; the CSS media query still applies. */
-        }
-      })();
-    </script>
+    <link rel="preload" href={interUrl} as="font" type="font/woff2" crossorigin />
   </head>
   <body>
-    <slot />
+    {
+      /*
+      THE GROUND, THE GRAIN AND THE PAGE, IN THIS ORDER, ALL AT z-index: 0.
+
+      Read DESIGN.md §2.2 before changing any of this, because getting it wrong
+      fails silently and takes the entire design with it. The obvious
+      implementation is a fixed layer at a negative z-index, behind everything.
+      Do not. A negative-z descendant paints between the ROOT element's background
+      and the in-flow backgrounds of its siblings — so the moment <body> has a
+      background of its own, that background covers the ground and the paper
+      vanishes completely. No error, no warning, just a blank page.
+
+      global.css gives <body> an explicit background from the token deliberately,
+      precisely so this cannot be "fixed" later by someone adding one and quietly
+      losing the paper. That means the layering here MUST come from DOM order:
+      ground, then grain over it, then the page over both.
+
+      .paper-page is a stacking context, which is also what keeps the sheets' curl
+      shadows working — their z-index:-1 pseudo-elements stay inside it and paint
+      behind their own sheets instead of falling out of the page (§2.4).
+
+      Both layers are aria-hidden: they are texture, and a screen reader has no use
+      for them.
+    */
+    }
+    <div class="paper-ground" aria-hidden="true"></div>
+    <div class="paper-grain" aria-hidden="true"></div>
+    <div class="paper-page">
+      <slot />
+    </div>
   </body>
 </html>

@@ -25,20 +25,19 @@ competitor was reskinned into an affiliate funnel, that is the point.
 FONTS ARE NOT COVERED BY THE AGPL
 ================================================================================
 
-The four .woff2 files in src/assets/fonts/ are licensed under the SIL Open Font
+The three .woff2 files in src/assets/fonts/ are licensed under the SIL Open Font
 License 1.1, NOT the AGPL. This is not a courtesy — OFL 1.1 condition 5 requires
 that the Font Software "must be distributed entirely under this license, and
 must not be distributed under any other license", so relicensing them under the
 AGPL is not permitted.
 
-  Bricolage Grotesque   Copyright 2022 The Bricolage Grotesque Project Authors
-                        https://github.com/ateliertriay/bricolage
-  Hanken Grotesk        Copyright 2021 The Hanken Grotesk Project Authors
-                        https://github.com/marcologous/hanken-grotesk
-  IBM Plex Mono         Copyright 2017 IBM Corp.
+  Klee One              Copyright 2020 The Klee Project Authors
+                        https://fonts.google.com/specimen/Klee+One
+  Inter                 Copyright 2020 The Inter Project Authors
+                        https://github.com/rsms/inter
 
 Full licence texts: src/assets/fonts/licenses/
 Provenance and subsetting notes: src/assets/fonts/README.md
 
-None of the three declares a Reserved Font Name, so the latin-subset versions
+Neither of the two declares a Reserved Font Name, so the latin-subset versions
 shipped here may keep their original family names.

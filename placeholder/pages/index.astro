@@ -14,10 +14,10 @@
 // visitor lands on: the sibling catch-all is the only route that costs an invocation.
 //
 // It imports the real Layout rather than forking it, so canonical URL, OG and Twitter
-// tags, the font preload and the no-flash theme script are the ones the rest of the site
-// uses. Only the body below is this file's own.
+// tags, the font preload and the paper ground are the ones the rest of the site uses. Only
+// the body below is this file's own. (Layout used to carry a no-flash theme script too;
+// PK-64 removed dark mode, so there is no theme to set before first paint any more.)
 import Layout from '../../src/layouts/Layout.astro';
-import ThemeToggle from '../../src/components/ThemeToggle.vue';
 
 // Identical to src/pages/welcome.astro's, on purpose. This is the page a stranger, a link
 // preview and a search result meet during the placeholder period, and the naming bet the
@@ -32,55 +32,79 @@ const repoUrl = 'https://github.com/MadStark/packsheet-io';
 ---
 
 <Layout title={title} description={description}>
-  <main class="mx-auto flex min-h-svh max-w-2xl flex-col justify-center px-6 py-16">
-    <header class="flex items-baseline justify-between gap-4">
-      <p class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Coming soon</p>
-      {
-        /*
-        THE ONE DELIBERATE DIFFERENCE FROM src/pages/welcome.astro, which carries a "Sign
-        in" link here. There is nothing to sign in to in this mode — /sign-in is one of
-        the routes that was never compiled — so the link would 302 straight back to this
-        page, which reads as a broken button on the only page the site has. Its absence is
-        the honest signal: the product is not open yet.
+  {
+    /*
+    ONE SHEET ON THE PAPER (DESIGN.md §2.3). A page whose only job is one statement gets one
+    sheet, with its title inside it — a cover carrying nothing but an h1 is a second sheet
+    doing no work. Nothing is written directly on the paper (§13), so every line below sits
+    on this one.
+  */
+  }
+  <main class="paper-col flex min-h-svh flex-col justify-center py-[30px]">
+    <div class="sheet">
+      <div class="sheet-body">
+        <header class="flex items-baseline justify-between gap-4">
+          <p class="eyebrow">Coming soon</p>
+          {
+            /*
+            THE ONE DELIBERATE DIFFERENCE FROM src/pages/welcome.astro, which carries a "Sign
+            in" button here. There is nothing to sign in to in this mode — /sign-in is one of
+            the routes that was never compiled — so the link would 302 straight back to this
+            page, which reads as a broken button on the only page the site has. Its absence is
+            the honest signal: the product is not open yet.
+          */
+          }
+        </header>
 
-        The theme toggle stays. It is the one control on the page that still does
-        something, and dropping it would mean a dark-mode visitor has no way to correct a
-        page that mis-guessed.
-      */
-      }
-      <ThemeToggle client:load />
-    </header>
+        <h1 class="page-title mt-2">Packsheet</h1>
 
-    <h1 class="mt-8 text-4xl leading-[1.1] sm:text-5xl">Packsheet</h1>
+        <p class="lead text-ink-2 mt-4 max-w-prose">
+          A free, open gear tracker for hikers. Build a gear closet once, then compose it into a
+          packsheet for each trip — the list you plan with, and the page you share.
+        </p>
 
-    <p class="text-ink-2 mt-4 max-w-prose text-lg">
-      A free, open gear tracker for hikers. Build a gear closet once, then compose it into a
-      packsheet for each trip — the list you plan with, and the page you share.
-    </p>
+        {
+          /*
+          The three promises set as a small ledger — 40px rows on hairlines with a moss dot
+          each — rather than as a bulleted list. The product's own vocabulary, used to state
+          what the product promises. Identical in shape to welcome.astro's, on purpose: these
+          two pages are the same page either side of a build flag, and a launch should not
+          quietly restyle the thing a stranger already met.
 
-    <ul class="text-ink-2 mt-8 space-y-2 text-sm">
-      <li>Free forever. No paywall, no ads.</li>
-      <li>Open source from the first commit.</li>
-      <li>Your data is always exportable.</li>
-    </ul>
+          The dot is decoration carrying no meaning of its own, so it is aria-hidden and the
+          text says everything.
+        */
+        }
+        <ul class="border-hairline mt-8 max-w-prose border-t">
+          {
+            [
+              'Free forever. No paywall, no ads.',
+              'Open source from the first commit.',
+              'Your data is always exportable.',
+            ].map((promise) => (
+              <li class="border-hairline text-ink-2 flex h-10 items-center gap-3 border-b text-sm">
+                <span class="bg-moss size-[6px] shrink-0 rounded-full" aria-hidden="true" />
+                {promise}
+              </li>
+            ))
+          }
+        </ul>
 
-    {
-      /*
-      text-blue-deep rather than the default link --blue: on the --paper page ground,
-      plain --blue is 4.48:1, under the 4.5 AA floor. --blue-deep clears it (6.27:1)
-      and still reads as the same blue, so "blue marks interactive" still holds.
+        {
+          /*
+          The hover colour is stated explicitly rather than inherited from the `a:hover` rule
+          in global.css: that rule lives in @layer base, which a utility class outranks, so
+          without this the only link on the page would have no hover feedback at all.
 
-      The hover colour is stated explicitly rather than inherited from the `a:hover`
-      rule in global.css: that rule lives in @layer base, which a utility class
-      outranks, so without this the only link on the page would have no hover
-      feedback at all. --blue-ink is 9.99:1 light and 13.03:1 dark.
-
-      Underlined because Tailwind's preflight strips text-decoration, and colour
-      alone is not a sufficient cue that something is a link.
-    */
-    }
-    <p class="mt-10 text-sm">
-      <a href={repoUrl} class="text-blue-deep hover:text-blue-ink underline">Source on GitHub</a>
-    </p>
+          Underlined because Tailwind's preflight strips text-decoration, and colour alone is
+          not a sufficient cue that something is a link.
+        */
+        }
+        <p class="mt-10 text-sm">
+          <a href={repoUrl} class="text-blue-deep hover:text-blue-ink underline">Source on GitHub</a
+          >
+        </p>
+      </div>
+    </div>
   </main>
 </Layout>

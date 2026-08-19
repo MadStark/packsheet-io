@@ -1,25 +1,32 @@
 @import 'tailwindcss';
 @import './fonts.css';
 @import './tokens.css';
+@import './paper.css';
 
 /*
  * Tailwind v4 is configured here in CSS rather than in tailwind.config.ts —
  * v4 dropped the JS config as the primary surface in favour of @theme.
  *
- * `@theme inline` (not plain `@theme`) is load-bearing: it emits utilities that
- * reference var(--paper) rather than copying the literal value at build time.
- * With plain @theme, every utility would bake in the light-mode hex and dark mode
- * would silently do nothing.
+ * `@theme inline` (not plain `@theme`) emits utilities that reference var(--paper)
+ * rather than copying the literal value at build time. That was load-bearing for
+ * dark mode, which is gone; it is kept because it still means a token has exactly
+ * one definition, in tokens.css, rather than one there and a build-time copy in
+ * every utility that happens to use it.
+ *
+ * THIS BLOCK AND tokens.css MOVE TOGETHER. Every entry below is a token→utility
+ * mapping, so deleting a token without deleting its line here leaves a utility
+ * resolving to nothing — `bg-surface` silently painting transparent rather than
+ * failing the build. That is what makes this file's diff part of the token change
+ * rather than a follow-up to it.
  */
 
 @theme inline {
-  --font-display: var(--font-display);
-  --font-body: var(--font-body);
-  --font-mono: var(--font-mono);
+  --font-system: var(--font-system);
+  --font-written: var(--font-written);
 
   --color-paper: var(--paper);
-  --color-surface: var(--surface);
-  --color-sunk: var(--sunk);
+  --color-note: var(--note);
+  --color-paper-deep: var(--paper-deep);
   --color-hairline: var(--hairline);
   --color-rule: var(--rule);
 
@@ -32,16 +39,11 @@
   --color-blue-ink: var(--blue-ink);
   --color-blue-tint: var(--blue-tint);
 
-  --color-bark: var(--bark);
-  --color-trail: var(--trail);
-  --color-clay: var(--clay);
-  --color-clay-ink: var(--clay-ink);
-  --color-wheat: var(--wheat);
   --color-moss: var(--moss);
   --color-ochre: var(--ochre);
   --color-ochre-ink: var(--ochre-ink);
   --color-rust: var(--rust);
-  --color-worn-ink: var(--worn-ink);
+  --color-worn: var(--worn);
 
   --color-w-base: var(--w-base);
   --color-w-worn: var(--w-worn);
@@ -58,46 +60,87 @@
   --color-c-safety: var(--c-safety);
   --color-c-misc: var(--c-misc);
 
-  --radius-sm: var(--r-sm);
-  --radius-DEFAULT: var(--r);
-  --radius-lg: var(--r-lg);
+  /*
+   * One radius, so `rounded` is the only shape utility this language has. The
+   * old --radius-sm / --radius-lg are not here because --r-sm and --r-lg are not
+   * in tokens.css any more: §6 puts 6px on every control and sheets are square,
+   * which left the other two steps describing nothing.
+   */
+  --radius-DEFAULT: var(--radius);
 }
 
 @layer base {
+  /*
+   * BOTH html AND body carry the paper colour, and body's is not redundant.
+   * DESIGN.md §2.2: the ground layer sits at z-index 0 and relies on DOM order,
+   * because a negative-z layer paints between the root's background and the
+   * in-flow backgrounds of its siblings — so a transparent body is one stylesheet
+   * away from something painting over the whole ground with no error and no
+   * warning, just a blank page. Giving body an explicit background from the token
+   * is half of what stops that; Layout.astro's layer order is the other half.
+   */
   html {
     background-color: var(--paper);
     color: var(--ink);
-    font-family: var(--font-body);
+    font-family: var(--font-system);
     -webkit-text-size-adjust: 100%;
   }
 
+  /*
+   * §3's body size sits on body, NOT on html, and that is not a stylistic
+   * preference. Tailwind's spacing scale is in rem, so rem resolves against the
+   * root font size — setting 15px on html would quietly rescale every px-6, gap-4
+   * and max-w-* on the site by 15/16ths. On body it sets the text and nothing
+   * else.
+   */
   body {
     margin: 0;
     min-height: 100svh;
+    background-color: var(--paper);
+    font-size: 15px;
+    line-height: 20px;
   }
 
+  /*
+   * The system voice sets every heading — a page title is the app naming the
+   * page, not something the visitor wrote (§4). No negative tracking: that was
+   * tuned for Bricolage Grotesque, and Inter at 600 does not want it.
+   */
   h1,
   h2,
   h3 {
-    font-family: var(--font-display);
+    font-family: var(--font-system);
     font-weight: 600;
-    letter-spacing: -0.015em;
     text-wrap: balance;
   }
 
-  /* Data reads as data. Tabular figures stop weights jittering as they update. */
+  /*
+   * Figures are WRITTEN, and they still align. Klee One's digits were measured in
+   * the browser — 111111, 000000 and 478901 all render to exactly the same
+   * advance — so a written column of weights aligns on its right edge without a
+   * monospace face. That measurement is the whole reason there is no mono family
+   * in this system any more.
+   *
+   * tabular-nums is kept declared even though Klee One does not need it, so a
+   * future face swap cannot silently lose the property and take the alignment
+   * with it.
+   *
+   * 14.5px, one notch below body, so a column of figures reads as data without
+   * shouting (§4).
+   */
   .numeric {
-    font-family: var(--font-mono);
+    font-family: var(--font-written);
     font-variant-numeric: tabular-nums;
+    font-size: 14.5px;
   }
 
   a {
-    color: var(--blue);
+    color: var(--blue-deep);
     text-underline-offset: 0.2em;
   }
 
   a:hover {
-    color: var(--blue-deep);
+    color: var(--blue-ink);
   }
 
   /*
@@ -110,6 +153,10 @@
     border-radius: 2px;
   }
 
+  /*
+   * §11 — paper does not animate. Sheets and notes never move; the only motion is
+   * on controls, at 150ms. Reduced motion collapses even those.
+   */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,

@@ -110,9 +110,10 @@
  *
  * Server-rendered, this is the pack's list with its live figures and its working forms, and
  * NOTHING that looks draggable: no grips, no `draggable`, no drop targets. The affordances
- * appear in `onMounted`, the same idiom `src/components/ThemeToggle.vue` uses for its icon
- * and for the same reason — a control that is drawn before it can work is a control that
- * lies for as long as the gap lasts.
+ * appear in `onMounted`, on the principle that a control drawn before it can work is a
+ * control that lies for as long as the gap lasts. `ThemeToggle.vue` used the same idiom for
+ * its icon and was this file's reference for it; PK-64 removed dark mode, so this component
+ * is now both the only `client:*` island in the app and the only place the idiom lives.
  */
 import { computed, onMounted, shallowRef } from 'vue';
 import { GripVertical } from 'lucide-vue-next';
@@ -1232,12 +1233,21 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 
 <style scoped>
 /*
- * THE ONLY SHADOW IN THE PRODUCT, AND IT IS A TOKEN. "Nothing casts a shadow at rest.
- * Elevation is expressed with --surface, --sunk and --hairline. Shadows are reserved for
- * transient overlays" (src/styles/tokens.css, CONTRIBUTING.md). The value lives in
- * tokens.css as --shadow-drag, with a dark cut, because CONTRIBUTING.md's rule is that a
- * colour the palette lacks gets RAISED rather than invented at a call site — and a black
- * shadow at 22% is one of the values that most needs the dark cut it would not otherwise get.
+ * THE ONLY UNIFORM DROP SHADOW IN THE PRODUCT, AND IT IS A TOKEN. It used to be the only
+ * shadow of any kind, and used to need an exemption: "nothing casts a shadow at rest" was a
+ * standing rule, and this was written as its single admitted exception.
+ *
+ * PK-64 SUPERSEDED THAT RULE. Notebook Paper's depth model is a shadow at rest — the corner
+ * curl of DESIGN.md §2.4 is on every sheet on the site — so this no longer needs an
+ * exemption and no longer has one. What survives of the rule is the part that still bites
+ * here: no uniform drop shadows, and this is the one place that breaks it. That is
+ * deliberate rather than overlooked. The curl says "a sheet resting on paper"; a dragged row
+ * is genuinely picked up, which is a different physical claim and wants a different shadow.
+ * A SECOND one would be the moment to re-read this paragraph rather than to add a token.
+ *
+ * The value lives in tokens.css as --shadow-drag, because a colour invented at a call site
+ * is a colour with no reviewer. Its dark cut went with dark mode, and it is now mixed from
+ * --shadow-ink like every other shadow — warm, never black.
  *
  * WHAT THIS IS ACTUALLY DRAWN ON, because an earlier version of this comment described a
  * mechanism the browser does not have. It said the row was "lifted, following a pointer, over
@@ -1247,9 +1257,9 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
  * So the shadow is painted on the in-flow row sitting in the list at 0.55 opacity — the row
  * left behind, not the one in motion.
  *
- * IT IS STILL WITHIN THE RULE, and the honest reading is the narrow one. The rule bans
- * shadows AT REST; the state this selector matches is the interval between `dragstart` and
- * `dragend` and nothing else, cleared by `endDrag` on every exit including an abandoned drag.
+ * IT IS STILL TRANSIENT, which is what keeps it honest. The state this selector matches is
+ * the interval between `dragstart` and `dragend` and nothing else, cleared by `endDrag` on
+ * every exit including an abandoned drag.
  * What the shadow does is mark WHICH row the gesture is carrying, on a list where the faded
  * row and its neighbours are otherwise the same shape — the drag image is a snapshot the
  * visitor is looking at, not a thing they are looking for. Nothing else on this surface casts
