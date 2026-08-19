@@ -25,7 +25,7 @@ import {
 import { extractGearOptions, loadGearOptions } from '../src/lib/gear/options';
 import type { GearItemInput } from '../src/lib/gear/form';
 import { MAX_BULK_IDS } from '../src/lib/gear/bulk';
-import type { WeightUnit } from '../src/lib/units';
+import { roundWeight, toGrams, type WeightUnit } from '../src/lib/units';
 import type { Database } from '../src/lib/database.types';
 
 type GearInsert = Database['public']['Tables']['gear_items']['Insert'];
@@ -127,8 +127,9 @@ function gearInput(overrides: Partial<GearItemInput> = {}): GearItemInput {
   return {
     name: 'Edited Item',
     quantity: 1,
-    weight: 250,
-    weight_unit: 'g',
+    // Grams (PK-67). `GearItemInput` is what `parseGearItemForm` produces, and it now
+    // carries a converted gram figure rather than the typed number and its unit.
+    weight_grams: 250,
     price: null,
     currency: null,
     acquired_on: null,
@@ -247,11 +248,17 @@ interface FilterFixtureItem {
 }
 
 /**
- * Varied across category, status, brand and weight (entered in different units, so
- * `weight_grams` is genuinely doing the comparing rather than the raw `weight`
- * number). Every combination test below is chosen so that at least one OTHER item
- * would incorrectly appear if the filter in question were dropped or turned into an
- * OR — see each test's own comment for which item that is.
+ * Varied across category, status, brand and weight. The weights are still declared as a
+ * number AND a unit even though PK-67 stores only grams, and that is deliberate rather
+ * than left over: these describe what a visitor TYPED, under accounts set to different
+ * systems, and the insert below converts them exactly as the item form does. Keeping the
+ * entered pair is what makes the range assertions readable — `4.4 oz` says something a
+ * reader can check against the test's own expectations, where `124.738` does not — while
+ * still exercising the gram column that does the comparing.
+ *
+ * Every combination test below is chosen so that at least one OTHER item would incorrectly
+ * appear if the filter in question were dropped or turned into an OR — see each test's own
+ * comment for which item that is.
  */
 const FILTER_ITEMS: readonly FilterFixtureItem[] = [
   {
@@ -339,8 +346,9 @@ describe('filters compose correctly', () => {
         category: item.category,
         status: item.status,
         brand: item.brand,
-        weight: item.weight,
-        weight_unit: item.weightUnit,
+        // Converted once, at entry, and quantised to the column's scale — the same two
+        // steps `parseGearItemForm` performs on a submitted weight.
+        weight_grams: roundWeight(toGrams(item.weight, item.weightUnit)),
       })),
     );
     if (error) {
@@ -461,8 +469,8 @@ describe('search matches name or brand, case-insensitively, mid-word', () => {
         category: item.category,
         status: item.status,
         brand: item.brand,
-        weight: item.weight,
-        weight_unit: item.weightUnit,
+        // Same entry-path conversion as the filter fixture above.
+        weight_grams: roundWeight(toGrams(item.weight, item.weightUnit)),
       })),
     );
     if (error) {
@@ -540,8 +548,7 @@ describe('sorting', () => {
       {
         name: 'Featherweight Quilt',
         brand: 'Alpkit',
-        weight: 300,
-        weight_unit: 'g',
+        weight_grams: 300,
         price: 200,
         currency: 'USD',
         acquired_on: '2026-01-01',
@@ -549,8 +556,7 @@ describe('sorting', () => {
       {
         name: 'Basecamp Grill',
         brand: 'Weber',
-        weight: 500,
-        weight_unit: 'g',
+        weight_grams: 500,
         price: 50,
         currency: 'USD',
         acquired_on: '2026-02-01',
@@ -561,8 +567,9 @@ describe('sorting', () => {
         // pagination fixture — one nullable column per fixture is enough to pin a
         // behaviour, and giving every row a date keeps the `added` order unambiguous.
         name: 'Overnight Pack',
-        weight: 2,
-        weight_unit: 'lb', // ≈ 907 g — heavier than either of the two above in grams
+        // 2 lb, converted at entry as the item form now does: heavier than either of
+        // the two above, which is the property the `weight` sort order here depends on.
+        weight_grams: 907.185,
         price: 120,
         currency: 'USD',
         acquired_on: '2026-03-01',
@@ -593,11 +600,13 @@ describe('sorting', () => {
     ]);
   });
 
-  it('sorts by weight_grams, not the raw entered number — a 2 lb item outweighs a 500 g one', async () => {
-    // Featherweight Quilt: 300 g. Basecamp Grill: 500 g. Overnight Pack: 2 lb ≈ 907
-    // g. Sorting by the bare `weight` column would rank Overnight Pack (raw value 2)
-    // below both — this is the assertion that proves weight_grams is what
-    // GEAR_SORT_COLUMNS.weight actually points at.
+  it('sorts by weight_grams — a 2 lb item outweighs a 500 g one', async () => {
+    // Featherweight Quilt: 300 g. Basecamp Grill: 500 g. Overnight Pack: 2 lb, stored as
+    // 907.185 g. Since PK-67 there is no "raw entered number" for this to be contrasted
+    // with — every row is grams — so what this pins is narrower than it used to be:
+    // GEAR_SORT_COLUMNS.weight points at a real column that exists and orders by it. The
+    // fixture keeps its mixed-unit ENTRY values because they are what a reader can check
+    // the ordering against by hand.
     expect(await sortedNames('weight', 'asc')).toEqual([
       'Featherweight Quilt',
       'Basecamp Grill',
@@ -809,8 +818,7 @@ describe('pagination walks every item exactly once, including when many rows tie
     // lands on both). That is exactly what this test exists to catch.
     const rows = Array.from({ length: TIE_COUNT }, (_, i) => ({
       name: `Tie Item ${String(i).padStart(4, '0')}`,
-      weight: 100,
-      weight_unit: 'g',
+      weight_grams: 100,
     }));
     const { data, error } = await paginationUser.client
       .from('gear_items')
@@ -945,9 +953,14 @@ describe('I2 — a weight-range boundary entered in a non-gram unit includes an 
   beforeAll(async () => {
     weightUser = await createUser('gear-closet-weight-boundary');
     await weightUser.client.from('gear_items').insert([
-      { name: 'Exactly 4.4oz Item', weight: 4.4, weight_unit: 'oz' },
-      { name: 'Lighter 4.3oz Item', weight: 4.3, weight_unit: 'oz' },
-      { name: 'Heavier 4.5oz Item', weight: 4.5, weight_unit: 'oz' },
+      // The gram figures the item form stores for these three entries under an imperial
+      // account: `roundWeight(toGrams(n, 'oz'))`, i.e. quantised to the column's own
+      // numeric(12, 3) scale. Written as literals rather than computed, so a change to
+      // GRAMS_PER_UNIT or to the rounding shows up here as a failure rather than being
+      // silently tracked by the fixture.
+      { name: 'Exactly 4.4oz Item', weight_grams: 124.738 },
+      { name: 'Lighter 4.3oz Item', weight_grams: 121.903 },
+      { name: 'Heavier 4.5oz Item', weight_grams: 127.573 },
     ]);
   });
 
@@ -1322,8 +1335,7 @@ describe('updateGearItem saves an owner’s edit and refuses a stranger’s', ()
         brand: 'Edited Brand',
         status: 'retired',
         quantity: 3,
-        weight: 1.25,
-        weight_unit: 'kg',
+        weight_grams: 1250,
         notes: 'Edited notes',
       }),
     );
@@ -1340,7 +1352,8 @@ describe('updateGearItem saves an owner’s edit and refuses a stranger’s', ()
     expect(reloaded?.brand).toBe('Edited Brand');
     expect(reloaded?.status).toBe('retired');
     expect(reloaded?.quantity).toBe(3);
-    expect(reloaded?.weight_unit).toBe('kg');
+    // 1.25 kg, as the gram figure the form converts it to on the way in.
+    expect(Number(reloaded?.weight_grams)).toBe(1250);
     expect(reloaded?.notes).toBe('Edited notes');
 
     // A `status: 'retired'` edit does not remove the item from the closet — the same
@@ -1542,16 +1555,15 @@ describe('500 items remain responsive', () => {
     const PERF_COUNT = 500;
     const categories = ['Shelter', 'Cook', 'Sleep', 'Pack', 'Camp'];
 
-    // weight = i, unit 'g' throughout, so weight_grams = i exactly for every row —
-    // unique and monotonic, which makes the expected sorted page below computable
-    // in plain arithmetic rather than needing to guess how Postgres breaks ties.
+    // weight_grams = i for every row — unique and monotonic, which makes the expected
+    // sorted page below computable in plain arithmetic rather than needing to guess how
+    // Postgres breaks ties.
     const rows = Array.from({ length: PERF_COUNT }, (_, i) => ({
       name: `Perf Item ${String(i).padStart(4, '0')}`,
       category: categories[i % categories.length],
       status: GEAR_STATUSES[i % GEAR_STATUSES.length],
       brand: `Brand${i % 7}`,
-      weight: i,
-      weight_unit: 'g',
+      weight_grams: i,
     }));
 
     // One bulk insert, not 500 round trips — this fixture alone would otherwise

@@ -330,9 +330,10 @@ export function gearImportProblemCount(report: GearImportReport): number {
  * The file's field names, mapped to the `GearFormValues` key each one fills.
  *
  * `weight_grams` MAPS TO `weight`, AND THAT IS THE WHOLE OF THE UNIT CONVERSION. The file
- * carries grams; `weight_unit` is then supplied as `'g'` by this module rather than read
- * from anywhere, so the pair handed to the shared validator is already in the unit it
- * will be stored in and no arithmetic happens at all. A conversion that is a constant is
+ * carries grams, and `validateItem` hands the shared validator `'metric'`, whose entry
+ * unit is `g` — so the number reaching the column is the number in the file and no
+ * arithmetic happens at all. (Before PK-67 the same guarantee was bought by setting
+ * `values.weight_unit = 'g'`; the column is gone, the guarantee is not.) A conversion that is a constant is
  * not a conversion worth a function — and, more to the point, converting here would
  * reintroduce exactly the rounding this schema went to grams to avoid (see
  * `json-schema.ts`'s precision argument). The value is NOT rounded on the way in either:
@@ -521,10 +522,12 @@ function itemToFormValues(item: Record<string, unknown>): {
   // while an explicitly present `"status": "wishlist"` is untouched.
   if (values.status.trim() === '') values.status = 'owned';
 
-  // The unit is not read from the file and is not converted from anything: the file's
-  // number is already grams. See `FILE_FIELDS`' comment.
-  values.weight_unit = 'g';
-
+  // PK-67 removed `values.weight_unit`, which this function used to set to `'g'` here so
+  // the shared validator would read the file's number as grams. The guarantee it bought is
+  // unchanged and now lives at the call site instead: `validateItem` passes `'metric'` to
+  // `parseGearFormValues`, whose entry unit is `g` with a factor of 1. See that call, and
+  // `parseGearFormValues`' own comment on why the importer must never pass the importing
+  // account's preference.
   return { values, errors };
 }
 
@@ -552,7 +555,11 @@ function validateItem(value: unknown, position: number): GearImportRow {
   const item = value as Record<string, unknown>;
   const label = rowLabel(item, position);
   const { values, errors } = itemToFormValues(item);
-  const parsed = parseGearFormValues(values);
+  // `'metric'` UNCONDITIONALLY, never the importing account's setting: the file carries
+  // `weight_grams`, and metric's entry unit is `g`, so the number is stored exactly as the
+  // file gave it. An imperial account importing the same file must get the same closet —
+  // see `parseGearFormValues`' comment for what passing a preference here would do.
+  const parsed = parseGearFormValues(values, 'metric');
 
   if (parsed.ok && Object.keys(errors).length === 0) {
     return { ok: true, position, label, values: parsed.values };

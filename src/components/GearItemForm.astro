@@ -21,7 +21,7 @@
 import { GEAR_FORM_FIELD, acquiredOnFutureCutoff, type GearFormValues } from '../lib/gear/form';
 import { GEAR_STATUS_MEANINGS, GEAR_STATUSES } from '../lib/gear/fields';
 import { formatGearStatus } from '../lib/gear/format';
-import { WEIGHT_UNITS } from '../lib/units';
+import { WEIGHT_ENTRY_UNIT, type WeightSystem } from '../lib/units';
 import GearStatusIcon from './GearStatusIcon.astro';
 // `NEXT_PARAM` only — safe not because src/lib/auth-routes.ts is dependency-free (it is
 // not: it imports `./routes`, its own header comment's "the one import this file has"),
@@ -53,15 +53,31 @@ interface Props {
    *  rather than the page reading it straight off the URL. This component only accepts
    *  and renders it; both new.astro and [id].astro pass it. */
   next?: string;
+  /** The account's weight system (PK-67), which decides the unit the Weight field is
+   *  typed in and the suffix beside it. Passed in rather than read here for the reason
+   *  this component's header comment gives: it makes no decisions and holds no client —
+   *  the page has already loaded the preference through `readWeightSystem`, and the same
+   *  value has to reach `parseGearItemForm` on that page's POST for the round trip to be
+   *  exact. Two readers, one value, supplied by whoever owns the request. */
+  weightSystem: WeightSystem;
 }
 
-const { values, errors, submitLabel, cancelHref, intentField, categories, next } = Astro.props;
+const { values, errors, submitLabel, cancelHref, intentField, categories, next, weightSystem } =
+  Astro.props;
+
+/** `g` for a metric account, `oz` for an imperial one — the unit this form's Weight field
+ *  is typed in, and the suffix rendered beside it. Entry is always in the system's base
+ *  unit and never scales: an item the closet lists as `1.85 kg` opens here as `1850` with
+ *  a `g` suffix, which PK-67 calls out so it is not later filed as a bug. */
+const entryUnit = WEIGHT_ENTRY_UNIT[weightSystem];
 
 const errorEntries = Object.entries(errors);
 
 const INPUT_CLASS =
   'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
-const SELECT_CLASS = INPUT_CLASS;
+// SELECT_CLASS was here until PK-67 removed the weight-unit `<select>`, which was the
+// only one this form had — the Category field is a `datalist` and Status is a radio group,
+// both by deliberate choice (PK-63). There is now no `<select>` left to style.
 const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-24`;
 const LABEL_CLASS = 'text-ink-2 block text-sm';
 const ERROR_CLASS = 'text-rust mt-1 text-sm';
@@ -201,7 +217,12 @@ const acquiredOnMax = acquiredOnFutureCutoff();
     >
   </div>
 
-  <div class="grid gap-5 sm:grid-cols-3">
+  {
+    /* Two columns, not three: PK-67 removed the weight-unit `<select>` that was the third,
+      so Quantity and Weight now share the row evenly rather than leaving a gap where the
+      unit picker used to be. */
+  }
+  <div class="grid gap-5 sm:grid-cols-2">
     <div>
       <label for="quantity" class={LABEL_CLASS}> Quantity </label>
       <input
@@ -222,47 +243,54 @@ const acquiredOnMax = acquiredOnFutureCutoff();
         )
       }
     </div>
+    {
+      /* PK-67: one control where there were two. The `<select>` of four units that stood
+        beside this input is gone with the column behind it — the unit is one account-level
+        setting now, so re-picking it per item was asking a per-person question once per
+        row. What replaces it is not a control at all but a SUFFIX: the account's entry
+        unit, rendered beside the box so the visitor can see which unit they are typing in
+        without being able to change it here. `/account` is where it changes.
+
+        THE SUFFIX IS LABEL TEXT, NOT DECORATION, which is why it is inside the `<label>`
+        rather than floated next to the input. A screen reader announcing "Weight" and
+        nothing else would leave the one fact this field depends on unspoken, and a purely
+        visual suffix is exactly the shape that happens in. Putting it in the label makes
+        the accessible name "Weight (g)" — the sighted and unsighted readings are then the
+        same string rather than two things kept in step by hand.
+
+        `aria-describedby` still points only at the error, deliberately: the unit is part of
+        what this field IS, not a hint about it. */
+    }
     <div>
-      <label for="weight" class={LABEL_CLASS}> Weight </label>
-      <input
-        id="weight"
-        name={GEAR_FORM_FIELD.weight}
-        type="text"
-        inputmode="decimal"
-        value={values.weight}
-        aria-describedby={describedBy('weight')}
-        aria-invalid={invalid('weight')}
-        class={INPUT_CLASS}
-      />
+      <label for="weight" class={LABEL_CLASS}>
+        Weight ({entryUnit})
+      </label>
+      <div class="relative">
+        <input
+          id="weight"
+          name={GEAR_FORM_FIELD.weight}
+          type="text"
+          inputmode="decimal"
+          value={values.weight}
+          aria-describedby={describedBy('weight')}
+          aria-invalid={invalid('weight')}
+          class={`${INPUT_CLASS} pr-10`}
+        />
+        {
+          /* aria-hidden because the label above already says the unit; announcing it twice
+            would read as "Weight g, edit text, g". Purely the visual half of the pairing. */
+        }
+        <span
+          aria-hidden="true"
+          class="text-ink-3 pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm"
+        >
+          {entryUnit}
+        </span>
+      </div>
       {
         errors.weight && (
           <p id="weight-error" class={ERROR_CLASS}>
             {errors.weight}
-          </p>
-        )
-      }
-    </div>
-    <div>
-      <label for="weight_unit" class={LABEL_CLASS}> Weight unit </label>
-      <select
-        id="weight_unit"
-        name={GEAR_FORM_FIELD.weightUnit}
-        aria-describedby={describedBy('weight_unit')}
-        aria-invalid={invalid('weight_unit')}
-        class={SELECT_CLASS}
-      >
-        {
-          WEIGHT_UNITS.map((unit) => (
-            <option value={unit} selected={unit === values.weight_unit}>
-              {unit}
-            </option>
-          ))
-        }
-      </select>
-      {
-        errors.weight_unit && (
-          <p id="weight_unit-error" class={ERROR_CLASS}>
-            {errors.weight_unit}
           </p>
         )
       }

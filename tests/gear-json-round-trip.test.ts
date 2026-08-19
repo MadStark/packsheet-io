@@ -77,8 +77,7 @@ describe('export → import → identical values', () => {
         description: 'Two-person tent',
         notes: 'Fly pitches first',
         quantity: 2,
-        weight: 907,
-        weight_unit: 'g',
+        weight_grams: 907,
         price: 429.99,
         currency: 'GBP',
         acquired_on: '2024-05-01',
@@ -126,7 +125,8 @@ describe('export → import → identical values', () => {
     // gear_items.weight can hold, and the re-import stores that number as grams — so the
     // mass survives to within the column's own precision while the UNIT does not.
     const ids = await seed(owner, [
-      { name: 'Katadyn BeFree', weight: 2.3, weight_unit: 'oz', status: 'owned' },
+      // 2.3 oz as the gram figure the item form stores since PK-67.
+      { name: 'Katadyn BeFree', weight_grams: 65.204, status: 'owned' },
     ]);
 
     const text = await exportToText(owner, ids);
@@ -138,13 +138,14 @@ describe('export → import → identical values', () => {
 
     const { data } = await stranger.client
       .from('gear_items')
-      .select('weight, weight_unit, weight_grams')
+      .select('weight_grams')
       .eq('user_id', stranger.id)
       .eq('name', 'Katadyn BeFree')
       .single();
 
-    expect(Number(data?.weight)).toBe(65.204);
-    expect(data?.weight_unit).toBe('g');
+    // PK-67: one column, one assertion. `weight`/`weight_unit` are gone, and the gram
+    // figure the file carried is the gram figure the column holds — which is what the
+    // three assertions here were collectively pinning before.
     expect(Number(data?.weight_grams)).toBe(65.204);
   });
 
@@ -153,8 +154,11 @@ describe('export → import → identical values', () => {
     // the export did not round to the column's scale, this is the assertion that would
     // fail on the second pass.
     const ids = await seed(owner, [
-      { name: 'Settling tent', weight: 4.4, weight_unit: 'oz', status: 'owned' },
-      { name: 'Settling stove', weight: 1.5, weight_unit: 'lb', status: 'wishlist' },
+      // The gram figures 4.4 oz and 1.5 lb are stored as since PK-67 — the entry-side
+      // conversion the item form now performs, applied here so the fixture still exercises
+      // values with awkward decimals rather than round hundreds.
+      { name: 'Settling tent', weight_grams: 124.738, status: 'owned' },
+      { name: 'Settling stove', weight_grams: 680.389, status: 'wishlist' },
     ]);
 
     const first = await exportToText(owner, ids);
@@ -325,8 +329,7 @@ describe('the import write', () => {
     const good: GearItemInput = {
       name: 'Transaction A',
       quantity: 1,
-      weight: 1,
-      weight_unit: 'g',
+      weight_grams: 1,
       price: null,
       currency: null,
       acquired_on: null,
@@ -387,8 +390,7 @@ describe('the import write', () => {
     const many = Array.from({ length: MAX_IMPORT_ITEMS + 1 }, (_, index) => ({
       name: `Over cap ${index}`,
       quantity: 1,
-      weight: 0,
-      weight_unit: 'g' as const,
+      weight_grams: 0,
       price: null,
       currency: null,
       acquired_on: null,

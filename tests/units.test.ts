@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_WEIGHT_SYSTEM,
   GRAMS_PER_UNIT,
   WEIGHT_DECIMALS,
+  WEIGHT_ENTRY_UNIT,
+  WEIGHT_SYSTEM_UNITS,
+  WEIGHT_SYSTEMS,
   WEIGHT_UNITS,
   convertWeight,
+  formatWeight,
   fromGrams,
+  isWeightSystem,
   isWeightUnit,
   roundWeight,
   toGrams,
@@ -49,11 +55,14 @@ const UNIT_PAIRS: readonly (readonly [WeightUnit, WeightUnit])[] = WEIGHT_UNITS.
 );
 
 describe('WEIGHT_UNITS and isWeightUnit', () => {
-  // Pins the CHECK constraint in supabase/migrations/20260810120000_core_schema.sql
-  // literally: `check (weight_unit in ('g', 'kg', 'oz', 'lb'))`. If this list and that
-  // constraint ever disagree, a row can exist that this module cannot convert, or this
-  // module can accept a unit the database will reject on write.
-  it('is exactly the four units the gear_items.weight_unit CHECK constraint allows', () => {
+  // This USED to pin `check (weight_unit in ('g', 'kg', 'oz', 'lb'))` in
+  // 20260810120000_core_schema.sql, and both failure modes it named — a row this module
+  // cannot convert, a unit the database rejects on write — are now unreachable: PK-67
+  // deleted the column, so no row carries a unit and no write is validated against this
+  // list. What the assertion still pins is internal and worth keeping: `GRAMS_PER_UNIT`
+  // must be total over these four (the compiler says so, this says so at runtime), and
+  // they are the vocabulary `?wunit=` is narrowed against in src/lib/gear/query.ts.
+  it('is exactly the four units GRAMS_PER_UNIT and ?wunit= are defined over', () => {
     expect(WEIGHT_UNITS).toEqual(['g', 'kg', 'oz', 'lb']);
   });
 
@@ -266,7 +275,7 @@ describe('a conversion that overflows is refused rather than returned', () => {
 });
 
 describe('WEIGHT_DECIMALS and roundWeight', () => {
-  it('is 3, matching the numeric(12, 3) scale of gear_items.weight', () => {
+  it('is 3, matching the numeric(12, 3) scale of gear_items.weight_grams', () => {
     expect(WEIGHT_DECIMALS).toBe(3);
   });
 
@@ -281,5 +290,139 @@ describe('WEIGHT_DECIMALS and roundWeight', () => {
     ['zero', 0, 0],
   ])('rounds %s (%s) to %s', (_label, input, expected) => {
     expect(roundWeight(input)).toBe(expected);
+  });
+});
+
+/**
+ * PK-67's display half. The scaling rule and the rounding table are product decisions
+ * stated in the ticket, so these expectations are written out as literal strings rather
+ * than derived from `GRAMS_PER_UNIT` — for the same reason `FACTORS` is re-typed at the
+ * top of this file, a test that recomputed the expected string from the same constants
+ * the implementation uses would pass with the rule itself inverted.
+ */
+describe('formatWeight — the account-scaled display string', () => {
+  // The two figures PK-67's acceptance criteria name by hand, in both systems.
+  it.each([
+    ["the ticket's 1850 g under metric", 1850, 'metric', '1.85 kg'],
+    ["the ticket's 1850 g under imperial", 1850, 'imperial', '4.08 lb'],
+    ['a 4.4 oz entry read back under imperial', 124.738, 'imperial', '4.4 oz'],
+    ['the same row seen by a metric account', 124.738, 'metric', '125 g'],
+  ] as const)('renders %s as %s', (_label, grams, system, expected) => {
+    expect(formatWeight(grams, system)).toBe(expected);
+  });
+
+  // The threshold is "at or above one of the larger unit", and the larger unit's size is
+  // its GRAMS_PER_UNIT factor — so the boundary sits at exactly 1000 g and exactly
+  // 453.59237 g. Both sides of each are pinned, because an off-by-one in the comparison
+  // (`>` rather than `>=`) is invisible everywhere except on the boundary itself.
+  it.each([
+    ['just below the metric boundary', 999.9, 'metric', '1000 g'],
+    ['exactly on the metric boundary', 1000, 'metric', '1 kg'],
+    ['just below the imperial boundary', 453.59, 'imperial', '16 oz'],
+    ['exactly on the imperial boundary', 453.59237, 'imperial', '1 lb'],
+  ] as const)('scales %s to %s', (_label, grams, system, expected) => {
+    expect(formatWeight(grams, system)).toBe(expected);
+  });
+
+  // Zero is the one weight below every threshold in both systems, so it is shown in each
+  // system's entry unit. It is also a value PK-63 made ordinary rather than exceptional —
+  // a blank weight saves as zero — so it must render, not throw.
+  it.each([
+    ['metric', 'metric', '0 g'],
+    ['imperial', 'imperial', '0 oz'],
+  ] as const)('renders zero under %s as %s', (_label, system, expected) => {
+    expect(formatWeight(0, system)).toBe(expected);
+  });
+
+  it.each([
+    ['a whole number of kilograms', 2000, 'metric', '2 kg'],
+    ['a single trailing zero', 1100, 'metric', '1.1 kg'],
+    ['a whole number of pounds', 907.18474, 'imperial', '2 lb'],
+    ['a whole number of ounces', 56.69904625, 'imperial', '2 oz'],
+  ] as const)('trims trailing zeros from %s', (_label, grams, system, expected) => {
+    expect(formatWeight(grams, system)).toBe(expected);
+  });
+
+  // Grams are shown to whole numbers, so this must not render '124.738 g'. The column's
+  // own scale (WEIGHT_DECIMALS) is a storage fact and deliberately not the display one.
+  it('shows grams to whole numbers rather than to the column scale', () => {
+    expect(formatWeight(124.738, 'metric')).toBe('125 g');
+  });
+
+  /**
+   * The deliberate difference from `formatGearPrice`, which returns an em dash rather
+   * than throwing. See `formatWeight`'s own comment: that function guards a `text` column
+   * whose CHECK is not proven to hold on read, while this one's input is
+   * `numeric not null check (weight_grams >= 0 and weight_grams < 'Infinity')`. A value
+   * that fails here did not come from the column, and is the in-memory defect "THROW, NOT
+   * RETURN" exists to stop.
+   */
+  it.each([
+    ['a negative weight', -1],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ])('throws on %s rather than rendering a placeholder', (_label, grams) => {
+    expect(() => formatWeight(grams, 'metric')).toThrow(RangeError);
+  });
+});
+
+describe('the weight-system vocabulary', () => {
+  // Mirrors check (weight_units in ('metric', 'imperial')) in
+  // 20260817000000_user_profiles.sql. Independent files with no shared import, so this is
+  // the enforcement — exactly as the WEIGHT_UNITS comment used to be for the column PK-67
+  // deleted.
+  it('is exactly the two values the profiles CHECK constraint accepts', () => {
+    expect(WEIGHT_SYSTEMS).toEqual(['metric', 'imperial']);
+  });
+
+  it('defaults to metric, agreeing with the column default a missing row stands in for', () => {
+    expect(DEFAULT_WEIGHT_SYSTEM).toBe('metric');
+  });
+
+  it.each([
+    ['metric', true],
+    ['imperial', true],
+    ['Metric', false],
+    ['METRIC', false],
+    ['si', false],
+    ['', false],
+    [null, false],
+    [undefined, false],
+    [1, false],
+  ])('isWeightSystem(%s) is %s', (value, expected) => {
+    expect(isWeightSystem(value)).toBe(expected);
+  });
+
+  // Entry is always in the smaller unit of the system, which is what lets the item form
+  // drop its unit control entirely. WEIGHT_ENTRY_UNIT is derived from WEIGHT_SYSTEM_UNITS
+  // in the source rather than written out twice; this pins the derivation.
+  it.each([
+    ['metric', 'g'],
+    ['imperial', 'oz'],
+  ] as const)('enters %s weights in %s', (system, expected) => {
+    expect(WEIGHT_ENTRY_UNIT[system]).toBe(expected);
+    expect(WEIGHT_SYSTEM_UNITS[system][0]).toBe(expected);
+  });
+
+  // Every unit a system names must have a conversion factor, and none may fall outside
+  // WEIGHT_UNITS. The Record<> types say so at compile time; this says it for a value
+  // read at runtime.
+  it('names only units that have a conversion factor', () => {
+    for (const system of WEIGHT_SYSTEMS) {
+      for (const unit of WEIGHT_SYSTEM_UNITS[system]) {
+        expect(WEIGHT_UNITS).toContain(unit);
+        expect(GRAMS_PER_UNIT[unit]).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  // Smallest-first is the scaling rule, not presentation: formatWeight walks these in
+  // order and keeps the last unit that fits, so a reordered array silently changes which
+  // unit a weight renders in.
+  it("lists each system's units smallest first", () => {
+    for (const system of WEIGHT_SYSTEMS) {
+      const factors = WEIGHT_SYSTEM_UNITS[system].map((unit) => GRAMS_PER_UNIT[unit]);
+      expect(factors).toEqual([...factors].sort((a, b) => a - b));
+    }
   });
 });

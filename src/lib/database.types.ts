@@ -52,9 +52,7 @@ export type Database = {
           updated_at: string
           url: string | null
           user_id: string
-          weight: number
-          weight_grams: number | null
-          weight_unit: string
+          weight_grams: number
         }
         Insert: {
           acquired_on?: string | null
@@ -73,9 +71,7 @@ export type Database = {
           updated_at?: string
           url?: string | null
           user_id?: string
-          weight?: number
-          weight_grams?: number | null
-          weight_unit?: string
+          weight_grams?: number
         }
         Update: {
           acquired_on?: string | null
@@ -94,9 +90,7 @@ export type Database = {
           updated_at?: string
           url?: string | null
           user_id?: string
-          weight?: number
-          weight_grams?: number | null
-          weight_unit?: string
+          weight_grams?: number
         }
         Relationships: []
       }
@@ -237,6 +231,27 @@ export type Database = {
           updated_at?: string
           user_id?: string
           visibility?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          updated_at: string
+          user_id: string
+          weight_units: string
+        }
+        Insert: {
+          created_at?: string
+          updated_at?: string
+          user_id?: string
+          weight_units?: string
+        }
+        Update: {
+          created_at?: string
+          updated_at?: string
+          user_id?: string
+          weight_units?: string
         }
         Relationships: []
       }

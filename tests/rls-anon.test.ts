@@ -235,7 +235,10 @@ describe('the frozen snapshot carries only what renders the item', () => {
     expect(data?.snapshot).not.toHaveProperty('notes');
     expect(data?.snapshot).not.toHaveProperty('url');
     // Still a usable display record.
-    expect(data?.snapshot).toMatchObject({ name: 'Gear 1', weight_unit: 'g' });
+    // PK-67: the frozen shape lost its `weight_unit` key — gear_item_snapshot() writes a
+    // gram figure now. `weight` is asserted in its place so this still pins that the
+    // snapshot carries the weight, which is the property the test is about.
+    expect(data?.snapshot).toMatchObject({ name: 'Gear 1', weight: 100 });
   });
 });
 

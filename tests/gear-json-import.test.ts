@@ -265,7 +265,7 @@ describe('defaults a file may leave out', () => {
     expect(row?.ok).toBe(true);
     if (row?.ok) {
       expect(row.values.quantity).toBe(1);
-      expect(row.values.weight).toBe(0);
+      expect(row.values.weight_grams).toBe(0);
     }
   });
 
@@ -274,8 +274,11 @@ describe('defaults a file may leave out', () => {
     const row = rows(report)[0];
     expect(row?.ok).toBe(true);
     if (row?.ok) {
-      expect(row.values.weight).toBe(907);
-      expect(row.values.weight_unit).toBe('g');
+      expect(row.values.weight_grams).toBe(907);
+      // PK-67: there is no `weight_unit` to assert. The guarantee it used to carry — the
+      // file's number reaches the column unconverted — is now that `validateItem` passes
+      // `'metric'`, whose entry unit is `g`. `907` in, 907 g stored.
+      expect(row.values.weight_grams).toBe(907);
     }
   });
 });
@@ -551,8 +554,9 @@ describe('round trip, in memory', () => {
       category: 'Shelter',
       description: 'Two-person tent',
       quantity: 1,
-      weight: 907,
-      weight_unit: 'g',
+      // One field where there were two (PK-67). `GearItemInput` carries the gram figure
+      // the file gave, and there is no unit beside it to be right or wrong about.
+      weight_grams: 907,
       price: 429.99,
       currency: 'GBP',
       acquired_on: '2024-05-01',
@@ -560,7 +564,7 @@ describe('round trip, in memory', () => {
       url: 'https://example.com/hornet',
       notes: 'Fly pitches first',
     });
-    expect(items?.[1]?.weight).toBe(65.204);
+    expect(items?.[1]?.weight_grams).toBe(65.204);
     expect(items?.[1]?.status).toBe('wishlist');
   });
 });

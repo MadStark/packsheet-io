@@ -122,11 +122,17 @@ describe('the item', () => {
     expect(gearItemToJson({ ...ROW, weight_grams: 65.2039031875 }).weight_grams).toBe(65.204);
   });
 
-  it('treats a null generated weight as zero rather than propagating it', () => {
-    // Unreachable for any row in the table (the weight_unit CHECK makes the CASE total),
-    // but the generated types are honest about the shape, and 0 is what the column
-    // already defaults to.
-    expect(gearItemToJson({ ...ROW, weight_grams: null }).weight_grams).toBe(0);
+  it('treats a missing weight as zero rather than propagating it', () => {
+    // The generated type said `number | null` while `weight_grams` was a generated column
+    // whose CASE could yield NULL; PK-67 made it the stored, NOT NULL column, so the type
+    // is now plainly `number` and this input has to be cast to reach the branch at all.
+    //
+    // The branch is kept, and so is this test, for the reason `gearItemToJson`'s own
+    // comment gives: the value arrives through PostgREST's JSON rather than out of the
+    // table, and a serialisation change is enough to hand this function something that is
+    // not a number. `0` is the column's own default, so it is the honest fallback.
+    const missingWeight = { ...ROW, weight_grams: null } as unknown as typeof ROW;
+    expect(gearItemToJson(missingWeight).weight_grams).toBe(0);
   });
 });
 

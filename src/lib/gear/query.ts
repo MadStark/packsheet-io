@@ -47,7 +47,7 @@
  */
 
 import type { PacksheetClient } from '../supabase';
-import { toGrams, fromGrams, isWeightUnit, type WeightUnit } from '../units';
+import { toGrams, fromGrams, isWeightUnit, WEIGHT_DECIMALS, type WeightUnit } from '../units';
 import {
   GEAR_PAGE_SIZE,
   GEAR_SORT_COLUMNS,
@@ -547,17 +547,23 @@ export function buildSearchFilter(search: string): string {
  *  claiming every column here earns its place by being displayed. Take "needs" as
  *  "roughly what the view uses", not a guarantee every field in this list has a
  *  renderer today. */
+// ONE weight column since PK-67, where there were three. `weight` and `weight_unit` are
+// gone from the table, and `weight_grams` is no longer the generated copy that existed so
+// two rows entered in different units could be compared — it IS the stored weight now, and
+// the closet renders it through `formatWeight` rather than printing it beside a unit.
 export const GEAR_SELECT =
-  'id, name, brand, category, status, quantity, price, currency, weight, weight_unit, weight_grams, acquired_on, photo_path, created_at, updated_at';
+  'id, name, brand, category, status, quantity, price, currency, weight_grams, acquired_on, photo_path, created_at, updated_at';
 
 /** The columns `src/pages/gear/[id].astro` needs: every `GEAR_FORM_FIELD` (so
- *  `gearItemToFormValues` can pre-fill the edit form) plus `id`, `photo_path` and
+ *  `gearItemToFormValues` can pre-fill the edit form) — with the Weight field reading the
+ *  `weight_grams` column that function converts out of, since PK-67 the one place a form
+ *  field and its column no longer share a name — plus `id`, `photo_path` and
  *  `created_at` for the parts of the page that are not the form itself. Unlike
  *  `GEAR_SELECT`, this deliberately DOES include `description`, `notes` and `url` — the
  *  very fields that comment says a list row has no business fetching — because a
  *  detail/edit page is exactly the view that renders them. */
 export const GEAR_DETAIL_SELECT =
-  'id, name, brand, category, description, quantity, weight, weight_unit, price, currency, acquired_on, url, notes, status, photo_path, created_at';
+  'id, name, brand, category, description, quantity, weight_grams, price, currency, acquired_on, url, notes, status, photo_path, created_at';
 
 /**
  * The exact shape `client.from('gear_items').select(GEAR_SELECT)` produces, derived
@@ -591,21 +597,32 @@ type GearItemsQueryBuilder = ReturnType<typeof _gearItemsQuery>;
  * `weight_grams >= 124.73790175000002` excludes the row that IS "4.4 oz and heavier" —
  * the boundary itself, hidden by the seventeenth significant digit.
  *
- * 1e-6 g is not picked freely: it is the exact figure `tests/gear-closet-schema.test.ts`
- * already uses (`TOLERANCE_GRAMS`) for the read-back comparison between the same two
- * arithmetic systems, chosen there as "far above where floating-point rounding noise
- * could ever land, far below anything a real distinguishing weight needs" — reused here
- * rather than re-derived, so the two files cannot quietly disagree on how much slack a
- * gram figure is allowed.
+ * PK-67 MADE THE DOMINANT ERROR A DIFFERENT AND MUCH LARGER ONE, so the figure below is
+ * no longer the 1e-6 g that IEEE-754 noise called for. Read the paragraph above as history:
+ * it described a `weight_grams` that was a GENERATED column of unconstrained `numeric`,
+ * which held the exact decimal product `124.73790175` and disagreed with the TypeScript
+ * conversion only in the seventeenth significant digit.
  *
- * APPLIED TO BOTH BOUNDS, not only the minimum I2 was filed against: which direction a
- * given value's floating-point conversion drifts (a hair above or a hair below the
- * database's exact decimal result) depends on the specific operands, not on whether it
- * is a `wmin` or a `wmax` — the failure mode I2 named for `gte` has an exact mirror on
- * `lte` for a value that happens to drift the other way, and there is no reason to leave
- * that one unfixed.
+ * `weight_grams` is now the stored weight itself, `numeric(12, 3)`. A weight entered as
+ * `4.4 oz` is converted at entry and QUANTISED to the column's scale, so the row holds
+ * `124.738`, not `124.73790175` — an error of up to half a milligram, which is five
+ * hundred times the old tolerance. With 1e-6 g of slack, `wmax=4.4&wunit=oz` computes a
+ * bound of `124.73790275` and EXCLUDES the row a user entered as exactly 4.4 oz: the exact
+ * failure I2 was filed about, reintroduced from the other end by the rounding rather than
+ * by the floating point.
+ *
+ * So the slack is half of the column's own quantum — the largest amount rounding to
+ * `WEIGHT_DECIMALS` places can move a value — and it is DERIVED from that constant rather
+ * than written as `0.0005`, so widening the column's scale cannot silently leave this
+ * behind. It subsumes the floating-point noise it replaces, being some five hundred times
+ * larger. Half a milligram remains far below anything that distinguishes two real pieces
+ * of gear.
+ *
+ * APPLIED TO BOTH BOUNDS, not only the minimum I2 was filed against: rounding moves a
+ * value up as readily as down, so the failure mode has an exact mirror on `lte` — and
+ * since PK-67 that mirror is the more likely half, because `4.4 oz` rounds UP to 124.738.
  */
-const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 1e-6;
+const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 0.5 * 10 ** -WEIGHT_DECIMALS;
 
 /**
  * The search/category/status/brand/weight filters every closet-list query needs.

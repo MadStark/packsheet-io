@@ -1,11 +1,19 @@
+import { readFile } from 'node:fs/promises';
 import { describe, it, expect, beforeAll } from 'vitest';
-import { createUser, type TestUser } from './support/local-database';
-import { toGrams, WEIGHT_UNITS, type WeightUnit } from '../src/lib/units';
+import { adminSql, createUser, type TestUser } from './support/local-database';
+import {
+  GRAMS_PER_UNIT,
+  roundWeight,
+  toGrams,
+  WEIGHT_UNITS,
+  type WeightUnit,
+} from '../src/lib/units';
 
 /**
  * The gear-closet columns added by supabase/migrations/20260813000000_gear_closet.sql —
- * `quantity` (how many I own) and `weight_grams` (a generated, comparable weight) — and
- * the ownership boundary around writing to a closet row at all.
+ * `quantity` (how many I own) and `weight_grams`, which that migration added as a
+ * GENERATED column and PK-67 turned into the stored weight itself — and the ownership
+ * boundary around writing to a closet row at all.
  *
  * Same style as tests/rls-owner.test.ts: real local database, fixtures inserted
  * through PostgREST as their owner under RLS, exact SQLSTATE assertions, and every
@@ -27,7 +35,7 @@ async function insertGear(overrides: Record<string, unknown> = {}) {
   return owner.client
     .from('gear_items')
     .insert({ name: 'Test gear', ...overrides })
-    .select('id, quantity, weight, weight_unit, weight_grams')
+    .select('id, quantity, weight_grams')
     .single();
 }
 
@@ -110,7 +118,30 @@ describe('another user cannot write to someone else’s closet row', () => {
   });
 });
 
-describe('weight_grams — a generated, comparable weight', () => {
+/**
+ * `weight_grams` was a GENERATED column (`case weight_unit ... end`) until PK-67, and this
+ * block used to pin its four SQL factors against `GRAMS_PER_UNIT` by inserting a weight in
+ * each unit and comparing the database's answer to `toGrams()`. The column is now the
+ * stored weight itself and there is no `weight_unit` to generate it from, so that shape of
+ * test has nothing left to insert.
+ *
+ * IT IS REPOINTED AT THE BACKFILL RATHER THAN DELETED, because the property it protected
+ * outlived the column. The same four factors still exist in SQL — in the one-shot `update
+ * ... set weight = weight * case weight_unit ... end` inside
+ * `20260817120000_gear_weight_in_grams.sql` — and they are still the numbers that decide
+ * whether every imperial weight in the product survived the migration intact. A typo there
+ * is worse than a typo in the generated column ever was: the generated column recomputed
+ * on every write, so a wrong factor was visible immediately and fixable by correcting the
+ * expression, whereas the backfill ran ONCE against real data and a wrong factor is
+ * permanent silent corruption.
+ *
+ * The migration has already run by the time this suite executes, so there is no live
+ * expression left to exercise. The factors are therefore read out of the shipped migration
+ * FILE and checked two ways: against `GRAMS_PER_UNIT`, and by making Postgres multiply with
+ * them so the comparison is still database arithmetic against IEEE-754 arithmetic rather
+ * than a string comparison dressed up as one.
+ */
+describe('the grams backfill factors (PK-67)', () => {
   /**
    * Non-trivial weights, one per unit, chosen to have several significant digits so a
    * factor typo (28.35 instead of 28.349523125, say) would move the result by an
@@ -124,68 +155,113 @@ describe('weight_grams — a generated, comparable weight', () => {
   };
 
   /**
-   * The tolerance is not decoration. PostgREST can serialise `numeric` as either a
-   * string or a number depending on magnitude, so the value is always run through
-   * `Number()` first. From there, the database computed weight_grams with exact
-   * decimal arithmetic (Postgres `numeric`), while toGrams() computed the same
-   * conversion in IEEE-754 double precision — two different arithmetic systems
-   * multiplying the same operands. They agree to a very large number of digits, but
-   * are not bitwise-guaranteed to agree at the seventeenth one, so an exact `toBe` is
-   * the wrong assertion. 1e-6 grams is roughly a millionth of a gram: far below
-   * anything a check on GRAMS_PER_UNIT staying in sync with the SQL factors needs to
-   * catch, and far above where double-precision rounding noise could ever land.
+   * The tolerance is not decoration. Postgres multiplies with exact decimal arithmetic
+   * (`numeric`) while `toGrams()` computes the same conversion in IEEE-754 double
+   * precision — two different arithmetic systems multiplying the same operands. They agree
+   * to a very large number of digits but are not bitwise-guaranteed to agree at the
+   * seventeenth, so an exact `toBe` is the wrong assertion. 1e-6 grams is roughly a
+   * millionth of a gram: far below anything a check on GRAMS_PER_UNIT staying in sync with
+   * the SQL factors needs to catch, and far above where double-precision rounding noise
+   * could ever land.
    */
   const TOLERANCE_GRAMS = 1e-6;
 
+  const MIGRATION_PATH = new URL(
+    '../supabase/migrations/20260817120000_gear_weight_in_grams.sql',
+    import.meta.url,
+  );
+
+  /**
+   * The factors as the SHIPPED MIGRATION states them, parsed out of the backfill's own
+   * `case weight_unit ... end` rather than re-typed here.
+   *
+   * Re-typing them would make this test tautological in the exact way this repository has
+   * warned about before (see `tests/units.test.ts`'s note on why `FACTORS` is written out
+   * independently THERE): a constant copied from the source it is checking passes even when
+   * the source is wrong. Here the direction is reversed — the SQL is the thing under test —
+   * so the honest move is to read the SQL and compare it against the independently-written
+   * TypeScript constants.
+   *
+   * The file contains three such CASE expressions (two for `pack_items`, one for the
+   * `gear_items` backfill). The `weight_unit` scrutinised here is the gear one; it is
+   * located by the `set weight = weight *` that opens the backfill statement, so this
+   * cannot silently start reading one of the JSON rewrites instead.
+   */
+  const backfillFactors = async (): Promise<Record<string, number>> => {
+    const sql = await readFile(MIGRATION_PATH, 'utf8');
+    const statement = sql.slice(sql.indexOf('set weight = weight * case weight_unit'));
+    const clause = statement.slice(0, statement.indexOf('end'));
+    const factors: Record<string, number> = {};
+    for (const [, unit, factor] of clause.matchAll(/when '(\w+)' then ([\d.]+)/g)) {
+      factors[unit] = Number(factor);
+    }
+    return factors;
+  };
+
+  it('states exactly the four units, and no others', async () => {
+    expect(Object.keys(await backfillFactors()).sort()).toEqual([...WEIGHT_UNITS].sort());
+  });
+
   it.each(WEIGHT_UNITS)(
-    'agrees with toGrams() for a %s weight — the assertion pinning the SQL factors to GRAMS_PER_UNIT',
+    'uses the same %s factor as GRAMS_PER_UNIT — the assertion pinning the SQL to units.ts',
     async (unit) => {
-      const weight = CASES[unit];
-      const { data, error } = await insertGear({ weight, weight_unit: unit });
-      expect(error).toBeNull();
-
-      const fromDatabase = Number(data?.weight_grams);
-      const fromTypeScript = toGrams(weight, unit);
-
-      expect(Math.abs(fromDatabase - fromTypeScript)).toBeLessThan(TOLERANCE_GRAMS);
+      expect((await backfillFactors())[unit]).toBe(GRAMS_PER_UNIT[unit]);
     },
   );
 
-  // Proves this is genuinely GENERATED and not an ordinary column someone could
-  // desynchronise from weight/weight_unit with a direct write. A generated column
-  // cannot be the target of an INSERT's column list; Postgres refuses it outright.
-  it('rejects an insert that supplies weight_grams directly', async () => {
-    const { error } = await owner.client
-      .from('gear_items')
-      .insert({ name: 'Test gear', weight: 100, weight_unit: 'g', weight_grams: 999 })
-      .select('id');
+  it.each(WEIGHT_UNITS)(
+    'agrees with toGrams() when Postgres multiplies by the %s factor it shipped',
+    async (unit) => {
+      const weight = CASES[unit];
+      const factor = (await backfillFactors())[unit];
 
-    expect(error).not.toBeNull();
+      // The migration's own arithmetic, replayed: `weight * factor` in `numeric`, then
+      // landed in the column's own numeric(12, 3) so the comparison includes the rounding
+      // a real backfilled row went through.
+      const [row] = await adminSql<{ grams: string }>(
+        'select ($1::numeric * $2::numeric)::numeric(12, 3) as grams',
+        [weight, factor],
+      );
+
+      const fromDatabase = Number(row.grams);
+      const fromTypeScript = toGrams(weight, unit);
+
+      // Rounded to the column's scale on the TypeScript side too, so this compares like
+      // with like rather than reporting the column's own three-decimal truncation as a
+      // factor mismatch.
+      expect(Math.abs(fromDatabase - roundWeight(fromTypeScript))).toBeLessThan(TOLERANCE_GRAMS);
+    },
+  );
+
+  /**
+   * The inverse of the test this block used to carry. `weight_grams` was refused as an
+   * INSERT target because a generated column cannot be one — that was the proof it could
+   * not be desynchronised from `weight`/`weight_unit` by a direct write. There is nothing
+   * left for it to desynchronise FROM, so the column is now an ordinary writable one, and
+   * this asserts that plainly rather than leaving the old prohibition to be assumed.
+   */
+  it('accepts a weight written directly, the generated column being gone', async () => {
+    const { data, error } = await insertGear({ weight_grams: 999.5 });
+
+    expect(error).toBeNull();
+    expect(Number(data?.weight_grams)).toBe(999.5);
   });
 
-  // Proves STORED recomputes on UPDATE, not only at INSERT time — which is what the
-  // range filter and sort-by-weight this column exists for actually depend on: an item
-  // whose unit was corrected after the fact must not carry a stale weight_grams.
-  it('recomputes when weight or weight_unit is updated', async () => {
-    const { data: created } = await insertGear({ weight: 100, weight_unit: 'g' });
-    const id = created!.id as unknown as string;
-    expect(Number(created?.weight_grams)).toBeCloseTo(toGrams(100, 'g'), 6);
+  it('defaults to 0 when omitted, as the column says', async () => {
+    const { data, error } = await insertGear();
 
-    await owner.client.from('gear_items').update({ weight: 2 }).eq('id', id);
-    const { data: afterWeight } = await owner.client
-      .from('gear_items')
-      .select('weight_grams')
-      .eq('id', id)
-      .single();
-    expect(Number(afterWeight?.weight_grams)).toBeCloseTo(toGrams(2, 'g'), 6);
+    expect(error).toBeNull();
+    expect(Number(data?.weight_grams)).toBe(0);
+  });
 
-    await owner.client.from('gear_items').update({ weight_unit: 'kg' }).eq('id', id);
-    const { data: afterUnit } = await owner.client
-      .from('gear_items')
-      .select('weight_grams')
-      .eq('id', id)
-      .single();
-    expect(Number(afterUnit?.weight_grams)).toBeCloseTo(toGrams(2, 'kg'), 6);
+  // Both halves of check (weight_grams >= 0 and weight_grams < 'Infinity'), which the
+  // rename carried across from `weight` — Postgres rewrote the constraint expression along
+  // with the column, and this is what says so against the running database rather than
+  // against the migration's intent.
+  it('still refuses a negative weight after the rename', async () => {
+    const { error } = await insertGear({ weight_grams: -1 });
+
+    expect(error?.code).toBe('23514');
   });
 });
 

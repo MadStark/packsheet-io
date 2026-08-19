@@ -31,12 +31,12 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
 
     await owner.client
       .from('gear_items')
-      .update({ name: 'Renamed tent', weight: 999 })
+      .update({ name: 'Renamed tent', weight_grams: 999 })
       .eq('id', pack.gearItemIds[0]);
 
     const { data, error } = await owner.client
       .from('pack_items')
-      .select('gear_items(name, weight)')
+      .select('gear_items(name, weight_grams)')
       .eq('id', pack.itemIds[0])
       .single();
 
@@ -52,9 +52,10 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
     // the actual wire format, so the type and the response cannot diverge in silence.
     expect(Array.isArray(data?.gear_items), 'the to-one embed came back as an array').toBe(false);
 
-    // `weight` is `numeric(12,3)`, which PostgREST serialises as an unquoted JSON number.
+    // `weight_grams` is `numeric(12,3)`, which PostgREST serialises as an unquoted JSON
+    // number.
     expect(data?.gear_items?.name).toBe('Renamed tent');
-    expect(data?.gear_items?.weight).toBe(999);
+    expect(data?.gear_items?.weight_grams).toBe(999);
   });
 
   it('keeps per-list divergence in overrides, leaving the master record alone', async () => {
@@ -67,14 +68,14 @@ describe('rule 1 — a pack item references the closet rather than copying it', 
 
     const item = await owner.client
       .from('pack_items')
-      .select('overrides, gear_items(weight)')
+      .select('overrides, gear_items(weight_grams)')
       .eq('id', pack.itemIds[0])
       .single();
 
     expect(item.error).toBeNull();
     expect(item.data?.overrides).toEqual({ weight: 450 });
     // The closet is untouched: the divergence belongs to this list only.
-    expect(item.data?.gear_items?.weight).toBe(100);
+    expect(item.data?.gear_items?.weight_grams).toBe(100);
   });
 
   it('defaults overrides to an empty object rather than null, so consumers need not branch', async () => {
@@ -423,7 +424,7 @@ describe('timestamps are the server’s to set', () => {
  * which is the guarantee the rest of this ticket is about.
  */
 const weightLiteral = (literal: 'NaN' | 'Infinity') =>
-  ({ weight: literal }) as unknown as Pick<TablesInsert<'gear_items'>, 'weight'>;
+  ({ weight_grams: literal }) as unknown as Pick<TablesInsert<'gear_items'>, 'weight_grams'>;
 
 /**
  * The CHECK constraints.
@@ -455,11 +456,27 @@ describe('the constrained columns refuse values outside their domain', () => {
     expect(infinity.error?.code, 'Infinity was accepted as a weight').toBe('22003');
   });
 
-  it('refuses an unknown weight unit, status or visibility', async () => {
-    const unit = await owner.client
-      .from('gear_items')
-      .insert({ name: 'Bad unit', weight: 1, weight_unit: 'banana' })
-      .select('id');
+  /**
+   * PK-67 removed `gear_items.weight_unit` and the CHECK behind it, so the 'banana' case
+   * this test opened with no longer has a column to be refused by. It is REPLACED rather
+   * than deleted, by the constraint that inherited its job: `profiles.weight_units`, which
+   * is now the only place a unit vocabulary is written down in the database and therefore
+   * the only place a typo can reach one.
+   *
+   * Dropping the case outright would have quietly reduced this file's coverage of "an
+   * unconstrained text column becomes a de-facto enum with typos in it" — the rule
+   * core_schema.sql states at `gear_items.status` and the profiles migration repeats for
+   * its own column — from three columns to two, at exactly the moment a new one was added.
+   */
+  it('refuses an unknown weight system, status or visibility', async () => {
+    // `user_id` is stated rather than left to its `default auth.uid()`, because the
+    // generated Insert type requires a primary key it cannot know is defaulted. The value
+    // is this caller's own id, so `profiles_insert_own` permits the row and the CHECK is
+    // what refuses it — which is the distinction this assertion is making.
+    const units = await owner.client
+      .from('profiles')
+      .insert({ user_id: owner.id, weight_units: 'banana' })
+      .select('user_id');
     const status = await owner.client
       .from('gear_items')
       .insert({ name: 'Bad status', status: 'borrowed' })
@@ -469,7 +486,7 @@ describe('the constrained columns refuse values outside their domain', () => {
       .insert({ name: 'Bad visibility', visibility: 'unlisted' })
       .select('id');
 
-    expect(unit.error?.code).toBe('23514');
+    expect(units.error?.code).toBe('23514');
     expect(status.error?.code).toBe('23514');
     // The one that matters most: 'unlisted' is a value the read policy does not handle,
     // and the constraint is what stops it reaching the column.

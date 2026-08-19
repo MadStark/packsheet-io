@@ -40,34 +40,36 @@
  * only because of where `weight_unit` is going; if that plan is abandoned, this decision
  * should be revisited with it rather than left standing on its own.
  *
- * THE PRECISION ARGUMENT, WHICH IS THE PART THAT IS EASY TO GET WRONG. `weight_grams` is
- * `numeric` with no declared scale (it is `weight * <factor>`, and the oz/lb factors carry
- * nine and five decimal places respectively), while `weight` is `numeric(12, 3)`. So
- * `2.3 oz` is stored as `2.3` and generates `65.2039031875` grams — a figure with more
- * precision than the column it would have to be imported back INTO can hold.
+ * PK-67 HAS SINCE LANDED, AND THE BET ABOVE PAID OFF. `weight_unit` is gone; the unit is
+ * one account-level metric/imperial setting and `gear_items.weight_grams` is the stored
+ * weight. This file format needed no change for that — it already carried one gram number
+ * and no unit — which is the outcome the reversal was gambling on. What DID change is
+ * that the fidelity cost above is no longer a cost of this format: an item entered as
+ * `4.4 oz` is stored as `124.738` g by the item form itself, so exporting grams loses
+ * nothing the database was keeping. PK-65's acceptance criterion "weights in their
+ * original units" is not merely unmet, it is now unmeetable by anything — there are no
+ * original units to preserve.
  *
- * Exporting that raw value would not silently round on the way back in — the importer
- * refuses more than three decimal places outright, through `parseGearFormValues`, exactly
- * as the add-item form does (see `FILE_FIELDS`' comment in `json-import.ts`). It would do
- * something worse: **our own export would not re-import at all.** Every ounce- or
- * pound-entered item in the file would come back as "enter a weight with up to three
- * decimal places", and the product's headline promise — export your closet, import it
- * again — would fail on the first file it produced.
+ * THE PRECISION ARGUMENT IS ALSO NOW MOOT, and it is recorded rather than deleted because
+ * the round-trip guarantee it produced still has to hold. It used to run: `weight_grams`
+ * was `numeric` with no declared scale (it was `weight * <factor>`, and the oz/lb factors
+ * carry nine and five decimals), so `2.3 oz` stored `2.3` and generated `65.2039031875`
+ * grams — more precision than the column an import writes back INTO could hold, meaning
+ * our own export would not re-import. That was real, and `gearItemToJson`'s rounding to
+ * three decimals is what fixed it.
  *
- * `gearItemToJson` therefore rounds to three decimals itself, in the unit the value will
- * be stored in, so the number in the file is one the column holds exactly and the importer
- * accepts. The re-imported row then generates the identical gram figure (`weight * 1`),
- * and a second export equals the first. That is what makes the round trip TESTABLE rather
- * than approximately true — `tests/gear-json-round-trip.test.ts` asserts the two documents
- * are equal, across all four units.
+ * Under PK-67 the column IS `numeric(12, 3)` and holds grams directly, so a value read out
+ * of it already has at most three decimals and the rounding is a no-op. It is kept anyway:
+ * it costs one call, it keeps this module's output well-formed for a value that reached
+ * the column by some path this schema did not anticipate, and deleting it would make
+ * `tests/gear-json-round-trip.test.ts` the only thing standing between a changed column
+ * scale and an export that cannot be imported.
  *
- * THE ONE PLACE IT STILL BREAKS, recorded rather than left to be discovered: `weight` is
- * `numeric(12, 3)` in the ENTERED unit, so a legal row of `1 000 000 kg` generates
- * 1e9 grams — past the bound the importer enforces on `weight` — and that export will not
- * re-import. The threshold is a thousand tonnes. Nothing anybody carries is anywhere near
- * it, and refusing the row on export instead would be the worse trade (an unexportable
- * closet, to protect against a weight no closet holds), so it is left as a documented
- * edge rather than defended against.
+ * THE THOUSAND-TONNE EDGE IS CLOSED, not merely unlikely. It used to be reachable because
+ * `weight` was `numeric(12, 3)` in the ENTERED unit, so a legal `1 000 000 kg` row
+ * generated 1e9 grams — past the bound the importer enforces. There is no entered unit
+ * now: the column stores grams and its own precision caps it just below 1e9, which is the
+ * same bound, so a row that exists can always be exported and re-imported.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS NOT IN THE FILE, AND WHY EACH ONE IS ABSENT
@@ -79,11 +81,12 @@
  *   policy checks the same expression, so a file that carried one could only ever agree
  *   with the database or be refused by it. Neither is worth a field.
  * - `weight_unit`: see above.
- * - `weight_grams` is IN the file but is NOT a column an import writes — it is generated
- *   `stored` and Postgres refuses a direct write to it. The importer converts it to
- *   `weight` (+ `weight_unit: 'g'`), which is the pair that actually exists to be
- *   written. The file's field name matching a generated column's name is deliberate:
- *   it says "this is a gram figure" in the one vocabulary this schema already has.
+ * - `weight_grams` IS in the file and, since PK-67, IS the column an import writes. It
+ *   used to be generated `stored`, which Postgres refuses a direct write to, so the
+ *   importer converted it into `weight` + `weight_unit: 'g'`; that pair no longer exists
+ *   and the importer now writes the gram figure straight through. The file's field name
+ *   matching the column's was chosen when the two were merely namesakes — it now matches
+ *   because they are the same thing, which is the simpler state this format was betting on.
  * - `photo_path`: a storage key, meaningless outside the bucket it names. Exporting one
  *   would produce a file whose photo reference is dangling on arrival.
  * - `created_at` / `updated_at`: database audit timestamps about the ROW, not claims
@@ -198,16 +201,18 @@ export const GEAR_EXPORT_SELECT =
 /**
  * Turns one stored row into one file item.
  *
- * `weight_grams` IS NULLABLE IN THE GENERATED TYPES AND IS NOT NULLABLE IN THE FILE. The
- * column is `generated always as (case weight_unit when 'g' then … end) stored`, and a
- * `CASE` with no `ELSE` yields NULL for an unmatched unit — so the type is honest about
- * a shape the CHECK constraint on `weight_unit` ('g', 'kg', 'oz', 'lb') makes
- * unreachable for any row that is actually in the table. Falling back to `0` rather than
- * propagating the null keeps `PacksheetGearItem.weight_grams` a plain `number`, which is
- * what every consumer of the file wants; a weightless item and an item whose unit
- * escaped the CHECK constraint would both export as `0`, and only one of those can
- * happen. `gear_items.weight` itself defaults to `0`, so `0` is a value this schema
- * already means "no weight recorded" by.
+ * `weight_grams` IS NO LONGER NULLABLE IN THE GENERATED TYPES, and the null-handling
+ * below is kept anyway. It used to be nullable because the column was
+ * `generated always as (case weight_unit when 'g' then … end) stored`, and a `CASE` with
+ * no `ELSE` yields NULL for a unit outside the CHECK constraint — a shape the constraint
+ * made unreachable, but which the generated type was honest about. PK-67 dropped that
+ * column and renamed the real one into its place, so the type is now plainly `number`.
+ *
+ * The `?? 0` stays because the reason for it was never really the generated column: the
+ * value arrives through PostgREST's JSON, not out of the table, and the paragraph below
+ * sets out why this export path must not throw for anything it is handed. `0` remains the
+ * right fallback — it is the column's own default, so it is a value this schema already
+ * means "no weight recorded" by.
  */
 /**
  * `weight_grams` as a number this schema can write, for any value the column hands back.

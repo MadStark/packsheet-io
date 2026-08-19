@@ -86,8 +86,11 @@ import { formatMoney, type CurrencyCode } from '../src/lib/money';
 function gear(overrides: Partial<PackTreeGearItem> = {}): PackTreeGearItem {
   return {
     name: 'Gear 1',
-    weight: 100,
-    weight_unit: 'g',
+    // Grams, since PK-67 — there is no `weight_unit` to pair it with. Fixtures that used
+    // to say `{ weight: 4.4, weight_unit: 'oz' }` now say the gram figure directly,
+    // because the engine no longer converts and the conversion is not what they were
+    // ever really about.
+    weight_grams: 100,
     price: null,
     currency: null,
     ...overrides,
@@ -141,8 +144,12 @@ function snapshot(overrides: { [key: string]: Json } = {}): Json {
     brand: 'Testbrand',
     category: null,
     description: null,
+    // The KEY is `weight` while the gear COLUMN is `weight_grams`, and that mismatch is
+    // the snapshot's own vocabulary rather than an error here — see `resolvePackItem`.
+    // PK-67 removed the `weight_unit` key that used to sit beside this one and made the
+    // value a gram figure; the key itself was deliberately left alone so that existing
+    // `{"weight": ...}` overrides keep applying to frozen rows.
     weight: 100,
-    weight_unit: 'g',
     price: null,
     currency: null,
     photo_path: null,
@@ -164,7 +171,7 @@ describe('resolvePackItem', () => {
   // this block differs from by exactly one thing.
   it('reads the live gear row when there is no snapshot and no override', () => {
     const resolved = resolvePackItem(
-      packItem({ gear_items: gear({ weight: 1.2, weight_unit: 'kg' }) }),
+      packItem({ gear_items: gear({ weight_grams: 1.2 * GRAMS.kg }) }),
     );
 
     expect(resolved).toEqual({
@@ -186,18 +193,37 @@ describe('resolvePackItem', () => {
     expect(resolved.name).toBe('Gear 1');
   });
 
-  // The merge is per-field in BOTH directions. Only this case fails if the unit is read
-  // from the base whenever the override omits a weight, or vice versa — an override of
-  // the unit alone re-denominates the gear row's own number.
-  it('takes an overridden unit and the gear row’s weight together', () => {
+  // The merge is per-field in BOTH directions. This case replaces PK-67's deleted
+  // "takes an overridden unit and the gear row's weight together", which pinned the same
+  // property using a `weight_unit` override — a shape that no longer exists, because the
+  // migration stripped that key from every `overrides` object and there is no unit to
+  // override. The property itself is unchanged and still worth pinning: an override that
+  // names ONE field must leave the others coming from the base, in both directions.
+  it('takes an overridden name and the gear row’s weight together', () => {
     const resolved = resolvePackItem(
       packItem({
-        gear_items: gear({ weight: 2, weight_unit: 'g' }),
-        overrides: { weight_unit: 'kg' },
+        gear_items: gear({ name: 'Gear 1', weight_grams: 2000 }),
+        overrides: { name: 'Renamed for this pack' },
       }),
     );
 
+    expect(resolved.name).toBe('Renamed for this pack');
     expect(resolved.weightGrams).toBe(2000);
+  });
+
+  it('takes an overridden weight and the gear row’s name together', () => {
+    const resolved = resolvePackItem(
+      packItem({
+        gear_items: gear({ name: 'Gear 1', weight_grams: 2000 }),
+        overrides: { weight: 450 },
+      }),
+    );
+
+    expect(resolved.name).toBe('Gear 1');
+    // 450 GRAMS, not 450 of some base unit. PK-67 changed what a bare `{"weight": n}`
+    // override means, which is why the migration converted the ones that already existed
+    // rather than leaving them to be reread — see resolvePackItem's own comment.
+    expect(resolved.weightGrams).toBe(450);
   });
 
   // Rule 3: the gear is gone, the foreign key has nulled the reference, and the snapshot
@@ -230,7 +256,7 @@ describe('resolvePackItem', () => {
   it('prefers the snapshot on a locked pack that still references live gear', () => {
     const resolved = resolvePackItem(
       packItem({
-        gear_items: gear({ name: 'Changed after the trip', weight: 100 }),
+        gear_items: gear({ name: 'Changed after the trip', weight_grams: 100 }),
         snapshot: snapshot({ name: 'Gear 1', weight: 900 }),
       }),
     );
@@ -269,14 +295,24 @@ describe('resolvePackItem', () => {
     );
   });
 
-  it('converts through grams once, whatever unit the item is entered in', () => {
-    for (const [unit, factor] of Object.entries(GRAMS)) {
-      const resolved = resolvePackItem(
-        packItem({ gear_items: gear({ weight: 2, weight_unit: unit }) }),
-      );
-      expect(resolved.weightGrams).toBeCloseTo(2 * factor, 9);
-    }
-  });
+  /**
+   * PK-67 replaced "converts through grams once, whatever unit the item is entered in".
+   * There is no unit to convert from: `gear_items.weight_grams` is grams at rest and
+   * `resolveWeightGrams` returns it untouched.
+   *
+   * That makes this the test for the property that REPLACED conversion — the engine must
+   * pass the stored figure through EXACTLY, with no scaling, no rounding and no
+   * re-derivation. Asserted with `toBe` rather than `toBeCloseTo` precisely because there
+   * is no arithmetic left to lose precision to: any tolerance here would hide a stray
+   * conversion factor, which is the one regression this test exists to catch.
+   */
+  it.each([0, 2, 100, 124.738, 1850, 453.59237])(
+    'passes a stored gram figure (%s) through untouched',
+    (grams) => {
+      const resolved = resolvePackItem(packItem({ gear_items: gear({ weight_grams: grams }) }));
+      expect(resolved.weightGrams).toBe(grams);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -317,11 +353,19 @@ describe('resolvePackItem refuses malformed overrides and snapshots', () => {
       /not a finite number/,
     ],
     [
-      // The near-miss a human types without a picker: refused exactly as a bare typo is,
-      // because a weight whose unit cannot be read has no conversion at all.
-      'an override with an unknown weight unit',
-      packItem({ overrides: { weight_unit: 'lbs' } }),
-      /weight unit of "lbs"/,
+      // PK-67 replaced "an override with an unknown weight unit" (`{ weight_unit: 'lbs' }`,
+      // refused because a weight whose unit cannot be read has no conversion at all). There
+      // is no unit to misspell now, and a stray `weight_unit` key is simply ignored rather
+      // than refused — see the "malformed" note in this module's own comment for what that
+      // costs and where it is paid instead.
+      //
+      // The case is replaced rather than dropped so this table keeps a row for the OVERRIDE
+      // path specifically. A `weight` that is present and unreadable is still the defect it
+      // always was, and this is now the only entry that reaches it through `overrides`
+      // rather than through a snapshot — the distinction the table exists to keep separate.
+      'an override with a non-numeric weight',
+      packItem({ overrides: { weight: 'heavy' } }),
+      /weight of "heavy", which is not a finite number/,
     ],
     [
       // The snapshot CHECK constraint only guarantees `captured_at` and a non-blank
@@ -526,11 +570,16 @@ describe('bucket classification', () => {
 
 describe('base + worn + consumable === total', () => {
   /**
-   * Mixed units in one pack, which is the case the grams-canonical claim is actually
-   * about: four items entered in four different units, in three different buckets, in two
-   * categories. An engine that summed the numbers as entered would produce a total that
-   * is not merely imprecise but meaningless, and would still satisfy the partition — so
-   * the identity is asserted alongside the value, not instead of it.
+   * Four items across three buckets and two categories, with weights spanning four orders
+   * of magnitude — the shape that exercises the partition rather than a single bucket.
+   *
+   * These were four items ENTERED IN FOUR DIFFERENT UNITS until PK-67, and the fixture
+   * kept its arithmetic when the units went: each weight is still written as its own
+   * conversion (`1.1 * GRAMS.lb`) so the numbers stay recognisable against the assertions
+   * below. What that no longer tests is an engine summing values as entered, because a
+   * pack can no longer hold two rows denominated differently — every row is grams before
+   * this engine ever sees it. The partition itself is what these cases pin now, and the
+   * identity is asserted alongside the values rather than instead of them.
    */
   const mixed = pack([
     category('worn-and-base', [
@@ -538,22 +587,22 @@ describe('base + worn + consumable === total', () => {
         id: 'boots',
         quantity: 1,
         worn: true,
-        gear_items: gear({ weight: 1.1, weight_unit: 'lb' }),
+        gear_items: gear({ weight_grams: 1.1 * GRAMS.lb }),
       }),
-      packItem({ id: 'tent', quantity: 1, gear_items: gear({ weight: 1.2, weight_unit: 'kg' }) }),
+      packItem({ id: 'tent', quantity: 1, gear_items: gear({ weight_grams: 1.2 * GRAMS.kg }) }),
     ]),
     category('food', [
       packItem({
         id: 'oats',
         quantity: 3,
         consumable: true,
-        gear_items: gear({ weight: 4.4, weight_unit: 'oz' }),
+        gear_items: gear({ weight_grams: 4.4 * GRAMS.oz }),
       }),
-      packItem({ id: 'stove', quantity: 2, gear_items: gear({ weight: 85, weight_unit: 'g' }) }),
+      packItem({ id: 'stove', quantity: 2, gear_items: gear({ weight_grams: 85 }) }),
     ]),
   ]);
 
-  it('holds exactly, with four units in one pack', () => {
+  it('holds exactly, across three buckets and two categories', () => {
     const totals = computeTotals(mixed);
 
     // Exact equality, not toBeCloseTo: `total` is DEFINED as this sum rather than
@@ -562,7 +611,7 @@ describe('base + worn + consumable === total', () => {
     expect(totals.base + totals.worn + totals.consumable).toBe(totals.total);
   });
 
-  it('converts every unit to grams before adding anything', () => {
+  it('sums the stored gram figures without rescaling any of them', () => {
     const totals = computeTotals(mixed);
 
     expect(totals.worn).toBeCloseTo(1.1 * GRAMS.lb, 9);
@@ -596,10 +645,10 @@ describe('base + worn + consumable === total', () => {
    */
   it('refuses a negative line rather than subtracting it from an otherwise valid pack', () => {
     const withNegativeLine = packOf(
-      packItem({ id: 'tent', gear_items: gear({ weight: 1000 }) }),
+      packItem({ id: 'tent', gear_items: gear({ weight_grams: 1000 }) }),
       packItem({
         id: 'quilt',
-        gear_items: gear({ name: 'Quilt', weight: 1000 }),
+        gear_items: gear({ name: 'Quilt', weight_grams: 1000 }),
         overrides: { weight: -400 },
       }),
     );
@@ -612,10 +661,10 @@ describe('base + worn + consumable === total', () => {
     // the two numbers side by side: 1400 g for `{"weight": 400}`, 600 g for
     // `{"weight": -400}`, neither of which looks wrong on its own.
     const positive = packOf(
-      packItem({ id: 'tent', gear_items: gear({ weight: 1000 }) }),
+      packItem({ id: 'tent', gear_items: gear({ weight_grams: 1000 }) }),
       packItem({
         id: 'quilt',
-        gear_items: gear({ name: 'Quilt', weight: 1000 }),
+        gear_items: gear({ name: 'Quilt', weight_grams: 1000 }),
         overrides: { weight: 400 },
       }),
     );
@@ -637,10 +686,10 @@ describe('category and per-item rollups', () => {
     const totals = computeTotals(
       pack([
         category('mixed', [
-          packItem({ id: 'a', gear_items: gear({ weight: 8, weight_unit: 'oz' }) }),
-          packItem({ id: 'b', gear_items: gear({ weight: 0.5, weight_unit: 'kg' }) }),
+          packItem({ id: 'a', gear_items: gear({ weight_grams: 8 * GRAMS.oz }) }),
+          packItem({ id: 'b', gear_items: gear({ weight_grams: 0.5 * GRAMS.kg }) }),
         ]),
-        category('plain', [packItem({ id: 'c', gear_items: gear({ weight: 30 }) })]),
+        category('plain', [packItem({ id: 'c', gear_items: gear({ weight_grams: 30 }) })]),
       ]),
     );
 
@@ -661,8 +710,7 @@ describe('category and per-item rollups', () => {
           packed: true,
           gear_items: gear({
             name: 'Wool socks',
-            weight: 1.5,
-            weight_unit: 'oz',
+            weight_grams: 1.5 * GRAMS.oz,
             price: 12.5,
             currency: 'GBP',
           }),
@@ -717,8 +765,8 @@ describe('category and per-item rollups', () => {
   it('counts a zero-weight item rather than dropping it', () => {
     const totals = computeTotals(
       packOf(
-        packItem({ id: 'stuff-sack', quantity: 2, gear_items: gear({ weight: 0 }) }),
-        packItem({ id: 'tent', gear_items: gear({ weight: 1000 }) }),
+        packItem({ id: 'stuff-sack', quantity: 2, gear_items: gear({ weight_grams: 0 }) }),
+        packItem({ id: 'tent', gear_items: gear({ weight_grams: 1000 }) }),
       ),
     );
 
@@ -1080,8 +1128,7 @@ describe('the shape PACK_TREE_SELECT returns', () => {
                 id: 'gear-1',
                 name: 'Gear 1',
                 brand: 'Testbrand',
-                weight: 100,
-                weight_unit: 'g',
+                weight_grams: 100,
                 price: 42.5,
                 currency: 'GBP',
               },
@@ -1099,8 +1146,7 @@ describe('the shape PACK_TREE_SELECT returns', () => {
                 id: 'gear-2',
                 name: 'Oats',
                 brand: 'Testbrand',
-                weight: 4.4,
-                weight_unit: 'oz',
+                weight_grams: 4.4 * GRAMS.oz,
                 price: null,
                 currency: null,
               },

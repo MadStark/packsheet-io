@@ -9,6 +9,7 @@ import Layout from '../../layouts/Layout.astro';
 import GearNav from '../../components/GearNav.astro';
 import GearItemForm from '../../components/GearItemForm.astro';
 import { createAuthClient } from '../../lib/auth';
+import { readWeightSystem } from '../../lib/profile';
 import { SIGN_IN_PATH, NEXT_PARAM } from '../../lib/auth-routes';
 import {
   EMPTY_GEAR_FORM_VALUES,
@@ -47,6 +48,12 @@ const GENERIC_WRITE_ERROR = 'Something went wrong adding this item. Please try a
 // autocomplete, and refusing to render the add-item form over that would turn a minor
 // inconvenience into a hard block on the one thing this page exists for.
 const { data: optionRows, error: optionsError } = await loadGearOptions(client, user.id);
+
+// PK-67: the account's weight system decides which unit the Weight field is typed in, so
+// it is needed on BOTH paths — the GET that renders the form and the POST that parses it.
+// Read once, here, above the branch: reading it inside the POST handler alone would leave
+// the re-rendered form on a validation failure showing a suffix the parser did not use.
+const { system: weightSystem } = await readWeightSystem(client, user.id);
 const categories = optionsError ? [] : extractGearOptions(optionRows ?? []).categories;
 
 let values: GearFormValues = EMPTY_GEAR_FORM_VALUES;
@@ -78,7 +85,7 @@ let returnPath: string | null = gearReturnPathOrNull(Astro.url.searchParams.get(
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
   returnPath = gearReturnPathFromFormOrNull(form, Astro.url);
-  const result = parseGearItemForm(form);
+  const result = parseGearItemForm(form, weightSystem);
 
   if (!result.ok) {
     // Re-render with the visitor's own values and the errors describing what to fix —
@@ -156,6 +163,7 @@ if (Astro.request.method === 'POST') {
 
     <div class="mt-8">
       <GearItemForm
+        weightSystem={weightSystem}
         values={values}
         errors={errors}
         submitLabel="Add item"

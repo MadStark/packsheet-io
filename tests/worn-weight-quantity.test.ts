@@ -84,8 +84,7 @@ function packItem(overrides: Partial<PackTreeItem> = {}): PackTreeItem {
     overrides: {},
     gear_items: {
       name: 'Wool socks',
-      weight: WORN_UNIT_GRAMS,
-      weight_unit: 'g',
+      weight_grams: WORN_UNIT_GRAMS,
       // Stated as an explicit null pair because the type requires it: an unpriced gear
       // row says so rather than leaving the fields out. Nothing in this file reads them.
       price: null,
