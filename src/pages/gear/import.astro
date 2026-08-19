@@ -1,0 +1,384 @@
+---
+// On-demand: this page requires a session, reads Astro.locals.user, inserts into
+// gear_items on POST and redirects — none of which a prerendered file can do. See
+// src/pages/gear/new.astro, whose shape this page follows, and src/middleware.ts for why
+// GEAR_PATH carries the no-store rule.
+export const prerender = false;
+
+import Layout from '../../layouts/Layout.astro';
+import GearNav from '../../components/GearNav.astro';
+import { createAuthClient } from '../../lib/auth';
+import { SIGN_IN_PATH } from '../../lib/auth-routes';
+import { GEAR_IMPORTED_PARAM, GEAR_PATH } from '../../lib/gear/routes';
+import {
+  IMPORT_FORM_FIELD,
+  IMPORT_INTENT,
+  itemCount,
+  problemHeading,
+  readImportSubmission,
+  readyHeading,
+} from '../../lib/gear/import-form';
+import {
+  MAX_IMPORT_ITEMS,
+  gearImportIsClean,
+  gearImportProblemCount,
+  gearImportRows,
+  importableGearItems,
+  parseGearItemsFile,
+  type GearImportReport,
+} from '../../lib/gear/json-import';
+import { importGearItems } from '../../lib/gear/mutations';
+// The preview renders the STATUS a row will be saved with, and a visitor reads labels
+// rather than column values — see GEAR_STATUS_LABELS' own comment.
+import { GEAR_STATUS_LABELS } from '../../lib/gear/fields';
+
+// src/middleware.ts has already resolved this with a verified getUser() call. A null user
+// redirects to sign-in with `next` set back to this URL, exactly as the other gear pages
+// do, so signing in returns here.
+const user = Astro.locals.user;
+if (!user) {
+  const next = `${Astro.url.pathname}${Astro.url.search}`;
+  return Astro.redirect(`${SIGN_IN_PATH}?next=${encodeURIComponent(next)}`);
+}
+
+// CSRF: same protection as every other page that posts — Astro's on-demand origin check
+// (security.checkOrigin, set explicitly in astro.config.mjs) plus the session cookie's
+// sameSite: 'lax'.
+const client = createAuthClient(Astro.cookies, Astro.request);
+
+// Never render a raw PostgREST/Supabase error string — mirrors src/lib/auth/index.ts and
+// src/lib/gear/form.ts's own "NEVER A RAW POSTGRES OR POSTGREST STRING" rule. This one
+// deliberately promises nothing about whether the write landed, the way
+// GEAR_DELETE_FAILED_MESSAGE does and for the same reason: an INSERT that commits and
+// then loses its response arrives in this branch with the rows already there, so "please
+// try again" would be an invitation to import everything twice.
+const GENERIC_WRITE_ERROR =
+  'We could not confirm whether that import went through. Check your gear closet before trying again.';
+
+let submissionError: string | null = null;
+let report: GearImportReport | null = null;
+/** The exact text the current preview was built from, re-posted by the confirm step. See
+ *  IMPORT_FORM_FIELD.text's own comment for why the bytes travel and the verdict does
+ *  not. */
+let submittedText = '';
+/** What to put back in the paste box. Set only when the text CAME from the paste box —
+ *  see the textarea's own comment for why a file's contents are not echoed into it. */
+let pastedText = '';
+
+// ---------------------------------------------------------------------------
+// POST: preview, then import.
+//
+// Method discipline: only POST does anything. A PUT, PATCH or DELETE to this path
+// RENDERS THE PAGE rather than being refused — a `.astro` page is not an endpoint, so
+// there is no handler map for a method to be absent from, and the 405 that an `.ts` route
+// gives you for an unexported method has no equivalent here. (Sibling gear pages carry a
+// comment claiming the 405; it is wrong there too, verified against `astro dev`, and
+// correcting them is not this change's business.) It is harmless because the frontmatter
+// below acts on `=== 'POST'` alone, so every other method falls through to a plain render
+// and changes nothing.
+//
+// The one branch that WRITES redirects with 303, so a refresh cannot resubmit it. The
+// preview branch deliberately does NOT redirect: it has written nothing to redirect away
+// from, and there is nowhere to carry a whole file through a redirect anyway.
+//
+// THE TWO STEPS ARE THE SAME GATE THE BULK DELETE USES, pointed the other way. There, the
+// first submission reveals what is about to be destroyed; here it reveals what is about
+// to be created, per row, with the reasons any of it would be refused. Both exist because
+// the action underneath is one a visitor cannot inspect beforehand — a selection of ids
+// they cannot see the contents of, a file they may not have written.
+// ---------------------------------------------------------------------------
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const submission = await readImportSubmission(form);
+
+  if (!submission.ok) {
+    submissionError = submission.error;
+  } else {
+    submittedText = submission.text;
+    // Only echoed back for a paste — see the textarea's own comment.
+    if (submission.source === 'text') pastedText = submission.text;
+    // RE-PARSED AND RE-VALIDATED ON BOTH STEPS, from the same bytes, by the same
+    // function. The confirm step does not trust the preview's verdict, or carry a count,
+    // or carry the parsed items — it carries the FILE and reaches the same conclusion
+    // again. There is no state to desynchronise, because there is no state.
+    //
+    // WHAT THAT DOES AND DOES NOT GUARANTEE, stated precisely because the loose version of
+    // this claim is wrong. It guarantees NOTHING INVALID IS EVER WRITTEN: whatever text
+    // arrives, it goes through the same parser and the same validator, so there is no
+    // route by which a "confirm" writes something the preview would have refused. It does
+    // NOT guarantee that what is written is what was previewed — editing the hidden field,
+    // or POSTing `intent=import-confirm` with arbitrary text, imports content no preview
+    // ever displayed. That is not a hole worth closing: the only thing a visitor can do
+    // that way is import their own valid gear into their own closet, which is what the
+    // button does anyway. The property worth having is the first one.
+    report = parseGearItemsFile(submission.text);
+
+    if (submission.intent === IMPORT_INTENT.confirm) {
+      const items = importableGearItems(report);
+      if (items === null) {
+        // The file stopped being clean between the two steps — which in practice means it
+        // was never clean and the confirm button was reached by other means, since the
+        // preview only offers it for a clean file. Falling through to the render below
+        // shows the same per-row reasons the preview would have; there is nothing to add.
+        submissionError = null;
+      } else {
+        const { error, count } = await importGearItems(client, user.id, items);
+        if (error) {
+          submissionError = GENERIC_WRITE_ERROR;
+        } else {
+          // THE COUNT IS CARRIED, AND IT IS THE WRITE'S OWN COUNT (PK-65 review, F7).
+          // `deleteGearItems` discards its count on the argument that "the item's absence
+          // from the list IS the feedback" — which does not transfer here. The closet is
+          // name-sorted and paged at 50, so 200 newly-imported items can be entirely
+          // invisible on the page the visitor lands on, and an import that silently did
+          // nothing looks exactly like one that worked. `count` comes off the insert's own
+          // `.select('id')`, never off `items.length`, so the number the banner shows is
+          // the number of rows the database actually returned.
+          //
+          // In the query string rather than a session flash because this project has no
+          // session store to flash through, and a number is not sensitive. The closet
+          // treats it as a display-only hint and re-derives nothing from it.
+          //
+          // Unfiltered: any filter carried from wherever the visitor started could hide
+          // every imported row. 303 so a refresh cannot import the file a second time.
+          return Astro.redirect(`${GEAR_PATH}?${GEAR_IMPORTED_PARAM}=${count}`, 303);
+        }
+      }
+    }
+  }
+}
+
+const previewRows = report === null ? [] : gearImportRows(report);
+const problemCount = report === null ? 0 : gearImportProblemCount(report);
+const isClean = report !== null && gearImportIsClean(report);
+---
+
+<Layout
+  title="Import gear — Packsheet"
+  description="Import gear items into your Packsheet closet from a JSON or JSONL file."
+>
+  <GearNav />
+  <main class="mx-auto max-w-3xl px-6 py-10">
+    <h1 class="text-3xl">Import gear</h1>
+    <p class="text-ink-2 mt-2 text-sm">
+      Bring in gear from a Packsheet export, or from a JSON file you have written yourself. Nothing
+      is added to your closet until you have seen what it would add.
+    </p>
+
+    {
+      submissionError && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {submissionError}
+        </p>
+      )
+    }
+
+    {
+      report?.fileError && (
+        <p
+          role="alert"
+          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {report.fileError}
+        </p>
+      )
+    }
+
+    {
+      /* THE PREVIEW. Rendered whenever a file parsed into rows at all, clean or not, so a
+         visitor sees every problem in one pass rather than discovering them one submission
+         at a time — the same reasoning parseGearFormValues gives for validating all
+         thirteen fields rather than stopping at the first. */
+    }
+    {
+      previewRows.length > 0 && (
+        <section class="mt-8" aria-labelledby="preview-heading">
+          <h2 id="preview-heading" class="text-xl">
+            {isClean
+              ? readyHeading(previewRows.length)
+              : problemHeading(problemCount, previewRows.length)}
+          </h2>
+          <p class="text-ink-2 mt-2 text-sm">
+            {isClean
+              ? 'This is exactly what will be added. Check it, then import.'
+              : 'Nothing is imported while any item has a problem. Fix the file and try again.'}
+          </p>
+
+          <div class="border-hairline mt-6 overflow-x-auto rounded-[var(--r-sm)] border">
+            <table class="w-full text-left text-sm">
+              <caption class="sr-only">
+                Every item in the file, with the values that would be saved and any problems found
+                in it
+              </caption>
+              <thead class="border-hairline bg-sunk border-b">
+                <tr>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    #
+                  </th>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    Item
+                  </th>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    Qty
+                  </th>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    Weight
+                  </th>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    Price
+                  </th>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    Status
+                  </th>
+                  <th scope="col" class="text-ink-2 px-3 py-2 font-medium">
+                    Problem
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {previewRows.map((row) => (
+                  <tr class="border-hairline border-t align-top">
+                    <td class="text-ink-3 px-3 py-2 font-mono text-xs">{row.position}</td>
+                    <td class="text-ink px-3 py-2">{row.label}</td>
+                    {row.ok ? (
+                      <>
+                        {/* THE VALUES THAT WILL BE WRITTEN, not the ones in the file — read
+                            off the parsed GearItemInput, so every default this format
+                            applies is VISIBLE here rather than applied silently. An item
+                            with no weight_grams key shows "0 g", an item with no status
+                            shows "Owned", an item with no quantity shows "1". The page
+                            promises "nothing is added until you have seen what it would
+                            add"; a table of names and problems did not keep that promise,
+                            and the defaults were exactly the part a visitor could not have
+                            guessed. */}
+                        <td class="text-ink-2 px-3 py-2 font-mono text-xs">
+                          {row.values.quantity}
+                        </td>
+                        <td class="text-ink-2 px-3 py-2 font-mono text-xs">
+                          {row.values.weight_grams} g
+                        </td>
+                        <td class="text-ink-2 px-3 py-2 font-mono text-xs">
+                          {row.values.price === null
+                            ? '—'
+                            : `${row.values.price} ${row.values.currency}`}
+                        </td>
+                        <td class="text-ink-2 px-3 py-2">
+                          {GEAR_STATUS_LABELS[row.values.status]}
+                        </td>
+                        <td class="px-3 py-2">
+                          {/* A word, not only a colour or an icon: WCAG AA does not accept
+                              colour as the sole carrier of meaning, and this column is the
+                              one a visitor reads down to decide whether to import. */}
+                          <span class="text-ink-3">No problems</span>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        {/* A row that did not validate has no values to show — showing the
+                            file's raw ones would be showing values that are not going to be
+                            written, in the columns that promise they are. */}
+                        <td class="text-ink-3 px-3 py-2" colspan="4">
+                          —
+                        </td>
+                        <td class="px-3 py-2">
+                          <ul class="text-rust space-y-1">
+                            {Object.entries(row.errors).map(([field, message]) => (
+                              <li>
+                                <span class="text-ink-3 font-mono text-xs">{field}</span> {message}
+                              </li>
+                            ))}
+                          </ul>
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {isClean && (
+            <form method="POST" class="mt-6">
+              {/* The bytes the preview above was built from, re-posted. The server parses
+                  and validates them again from scratch — see the POST branch's own comment
+                  on why nothing but the file travels. */}
+              <input type="hidden" name={IMPORT_FORM_FIELD.text} value={submittedText} />
+              <button
+                type="submit"
+                name={IMPORT_FORM_FIELD.intent}
+                value={IMPORT_INTENT.confirm}
+                class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+              >
+                Import {itemCount(previewRows.length)}
+              </button>
+            </form>
+          )}
+        </section>
+      )
+    }
+
+    <section class="mt-10" aria-labelledby="choose-heading">
+      <h2 id="choose-heading" class="text-xl">
+        {report === null ? 'Choose a file' : 'Try another file'}
+      </h2>
+
+      <form method="POST" enctype="multipart/form-data" class="mt-4 space-y-6">
+        <div>
+          <label for="import-file" class="text-ink block text-sm font-medium">
+            Upload a file
+          </label>
+          <input
+            id="import-file"
+            type="file"
+            name={IMPORT_FORM_FIELD.file}
+            accept=".json,.jsonl,application/json,application/jsonl,text/plain"
+            class="text-ink-2 file:border-hairline file:bg-surface file:text-ink-2 hover:file:text-ink mt-2 block w-full text-sm file:mr-4 file:rounded-[var(--r-sm)] file:border file:px-3 file:py-1.5 file:text-sm file:font-medium"
+          />
+          <p class="text-ink-3 mt-2 text-xs">
+            A Packsheet export, a JSON array of items, a single item, or JSONL with one item per
+            line. Up to {MAX_IMPORT_ITEMS} items.
+          </p>
+        </div>
+
+        <div>
+          <label for="import-text" class="text-ink block text-sm font-medium">
+            Or paste it in
+          </label>
+          {
+            /* PRE-FILLED WITH WHAT WAS PASTED, when this render followed a paste. A page
+               that says "fix the file and try again" while having just cleared the box the
+               visitor typed into is asking them to retype what it already has —
+               `src/lib/gear/form.ts` makes exactly this argument for the item form ("never
+               clear a form someone has just filled in") and it applies identically here.
+               Only for the paste path: a file input cannot be re-populated from the server,
+               so a submission that came from a file leaves this empty rather than dumping
+               the file's whole contents into a textarea the visitor never typed in. */
+          }
+          <textarea
+            id="import-text"
+            name={IMPORT_FORM_FIELD.text}
+            rows="6"
+            spellcheck="false"
+            class="border-hairline bg-surface text-ink mt-2 block w-full rounded-[var(--r-sm)] border px-3 py-2 font-mono text-xs"
+            placeholder={'{ "name": "Nemo Hornet 2P", "weight_grams": 907 }'}>{pastedText}</textarea
+          >
+        </div>
+
+        <div class="flex items-center gap-3">
+          <button
+            type="submit"
+            name={IMPORT_FORM_FIELD.intent}
+            value={IMPORT_INTENT.preview}
+            class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+          >
+            Preview
+          </button>
+          <a href={GEAR_PATH} class="text-ink-2 hover:text-ink text-sm">Cancel</a>
+        </div>
+      </form>
+    </section>
+  </main>
+</Layout>

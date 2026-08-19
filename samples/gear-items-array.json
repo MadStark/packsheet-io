@@ -1,0 +1,13 @@
+[
+  { "name": "Sea to Summit Aeros Pillow", "category": "Sleep", "weight_grams": 79 },
+  {
+    "name": "MSR PocketRocket 2",
+    "brand": "MSR",
+    "category": "Cooking",
+    "weight_grams": 73,
+    "price": 44.99,
+    "currency": "GBP",
+    "status": "owned"
+  },
+  { "name": "Leukotape P", "category": "First aid", "weight_grams": 12.5, "quantity": 3 }
+]

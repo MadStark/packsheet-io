@@ -39,9 +39,11 @@
 
 import type { PostgrestError } from '@supabase/supabase-js';
 import type { PacksheetClient } from '../supabase';
+import type { Database } from '../database.types';
 import { MAX_BULK_IDS } from './bulk';
 import type { GearStatus } from './fields';
 import type { GearItemInput } from './form';
+import { MAX_IMPORT_ITEMS } from './json-import';
 
 /** What every write below reports: whether it failed, and how many rows it actually
  *  touched — see the module comment's "EVERY WRITE REPORTS..." section for why `count`
@@ -154,6 +156,107 @@ export async function deleteGearItems(
     .in('id', ids as string[])
     .select('id');
   return { error, count: data?.length ?? 0 };
+}
+
+/**
+ * Writes a validated JSON import (PK-65) into the closet: every item, or none of them.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS ONE `.insert()` AND NOT THE `SECURITY DEFINER` RPC THE TICKET ASKS FOR
+ * ---------------------------------------------------------------------------
+ *
+ * PK-65 says, in as many words, that import needs "a `SECURITY DEFINER` import RPC,
+ * following `delete_own_account` — PostgREST cannot do a multi-table transaction from the
+ * client, and this project holds no service-role key". That reasoning is correct and it
+ * does not apply to THIS half of the ticket, so this function is a plain insert and this
+ * branch adds no migration at all.
+ *
+ * The premise of the RPC is the word MULTI-TABLE. Importing a PACK writes `packs`, then
+ * `pack_categories`, then `pack_items`, and three statements over PostgREST are three
+ * transactions — there is no client-side sequence of them that is atomic, so the only
+ * place the atomicity can live is inside a function. Importing GEAR ITEMS writes one
+ * table. A single multi-row `INSERT` is ONE statement, and a statement in Postgres is
+ * atomic on its own: if row 187 of 200 violates `gear_items_price_has_currency`, the
+ * whole statement rolls back and rows 1 to 186 were never visible to anybody. "Transac-
+ * tional — no partial imports" is therefore already true here, by construction, with
+ * nothing added.
+ *
+ * That leaves a `SECURITY DEFINER` function with no job to do, and the project's own
+ * rules say not to write one anyway: README's authorization section makes DEFINER
+ * conditional on RLS being structurally unable to express the operation — which is what
+ * justifies `delete_own_account`, since `authenticated` holds no privilege on
+ * `auth.users` at all and no policy can be written to grant it. Inserting your own rows
+ * into your own table is the exact operation `gear_items_insert_own` already expresses.
+ * Adding a DEFINER function here would take a write that RLS enforces and move it behind
+ * a function that bypasses RLS to re-implement the same check by hand — strictly more
+ * privilege, strictly more code, and one more entry for `tests/rls-enabled.test.ts`'s
+ * sweep to have to be satisfied about, in exchange for nothing.
+ *
+ * WHEN THAT CHANGES: the moment pack import lands. It genuinely needs the RPC, for the
+ * reason the ticket gives. Nothing here should be read as an argument against it — only
+ * as the observation that the items-only half never had the problem the RPC solves.
+ *
+ * ---------------------------------------------------------------------------
+ * THE REST OF THE HOUSE RULES, APPLIED
+ * ---------------------------------------------------------------------------
+ *
+ * `user_id` IS SET EXPLICITLY rather than left to the column's `default auth.uid()`. The
+ * default would produce the identical value and the insert policy would refuse anything
+ * else, so this is not a correctness fix — it is the same contract every other function
+ * in this module keeps, and its module comment argues for at length: a function whose
+ * contract is "writes THIS visitor's rows" should say so itself rather than inherit it
+ * from a column default and a policy, both of which are facts about the schema as it
+ * stands rather than properties of this function.
+ *
+ * IT REPORTS WHAT WAS WRITTEN, not what it was asked to write — `count` off
+ * `.select('id')`, like every other write here. For an insert that is a weaker signal
+ * than it is for an update (an insert that succeeds inserted what it was given), but a
+ * caller reporting "200 items imported" should be reading the result either way, and the
+ * one shape that must never appear is a success message assembled from the input list.
+ *
+ * THE CAP IS ENFORCED HERE AS WELL AS IN THE PARSER, and `deleteGearItems`' own comment
+ * is the precedent: `MAX_IMPORT_ITEMS` living only in `parseGearItemsFile` is a bound
+ * that holds because one caller applies it, not a property of this function. An empty
+ * list is a NO-OP rather than an error, for the same reason it is there — it is what a
+ * caller legitimately produces, and the truthful answer is "nothing was imported".
+ * Over the cap THROWS, because there is no correct partial answer to give.
+ */
+export async function importGearItems(
+  client: PacksheetClient,
+  userId: string,
+  items: readonly GearItemInput[],
+): Promise<GearMutationResult> {
+  if (items.length === 0) return { error: null, count: 0 };
+  if (items.length > MAX_IMPORT_ITEMS) {
+    throw new RangeError(
+      `importGearItems refuses ${items.length} items: at most ${MAX_IMPORT_ITEMS} may be imported at once.`,
+    );
+  }
+
+  const { data, error } = await client
+    .from('gear_items')
+    .insert(items.map((values) => gearItemInsert(values, userId)))
+    .select('id');
+  return { error, count: data?.length ?? 0 };
+}
+
+/**
+ * One validated item as an insertable row, with `weight_grams` made unwritable.
+ *
+ * `weight_grams` IS `GENERATED ALWAYS ... STORED` AND POSTGRES REFUSES A DIRECT WRITE TO
+ * IT — but nothing in TypeScript did. The generated `Insert` type lists every column
+ * including that one, so `.insert([{ …, weight_grams: 999 }])` compiled cleanly and failed
+ * only at runtime, as a raw Postgres error, on a path whose whole point is that the file
+ * carries grams and the database derives them. This ticket makes that mistake unusually
+ * easy to make: `PacksheetGearItem` HAS a `weight_grams` field, so spreading a file item
+ * into an insert is the obvious wrong thing to reach for. `Omit` turns it into a compile
+ * error instead of a 500.
+ */
+function gearItemInsert(
+  values: GearItemInput,
+  userId: string,
+): Omit<Database['public']['Tables']['gear_items']['Insert'], 'weight_grams'> {
+  return { ...values, user_id: userId };
 }
 
 /** Saves an edit to exactly one item. `.eq('id', id)` alone would not be enough to make

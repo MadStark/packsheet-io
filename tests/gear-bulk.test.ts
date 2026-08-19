@@ -307,6 +307,100 @@ describe('parseBulkAction: bulk-set-status', () => {
 // parseBulkAction: bulk-delete — ids only
 // ---------------------------------------------------------------------------
 
+describe('parseBulkAction: bulk-export (PK-65)', () => {
+  /**
+   * Export shares the delete branch — ids only, nothing further to validate — so nothing
+   * in `parseBulkAction` was written FOR it, and that is exactly why it needs its own
+   * tests rather than inheriting delete's. `bulk.ts` makes three claims about this intent
+   * in its comments (it parses, `MAX_BULK_IDS` bounds it, malformed ids are dropped), and
+   * a claim about a code path with no test is a claim about a path that is one refactor
+   * away from being wrong. It is also the one intent that reads rather than writes, which
+   * makes it the one whose failure is quietest: a broken delete is loud.
+   */
+  it('parses a valid selection', () => {
+    const result = parseBulkAction(
+      formData([
+        [BULK_FORM_FIELD.intent, BULK_INTENT.export],
+        [BULK_FORM_FIELD.id, UUID_A],
+        [BULK_FORM_FIELD.id, UUID_C],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action.intent).toBe(BULK_INTENT.export);
+      expect(result.action.ids).toEqual([UUID_A, UUID_C]);
+    }
+  });
+
+  it('refuses an empty selection', () => {
+    // The closet's export branch never reaches a query for this, so the refusal here is
+    // the whole of what stops an "export" that selected nothing.
+    const result = parseBulkAction(formData([[BULK_FORM_FIELD.intent, BULK_INTENT.export]]));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.ids).toBe('Select at least one item.');
+  });
+
+  it('refuses a selection over MAX_BULK_IDS', () => {
+    const entries: [string, string][] = [[BULK_FORM_FIELD.intent, BULK_INTENT.export]];
+    for (let index = 0; index <= MAX_BULK_IDS; index += 1) {
+      entries.push([
+        BULK_FORM_FIELD.id,
+        `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`,
+      ]);
+    }
+    const result = parseBulkAction(formData(entries));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.ids).toContain(String(MAX_BULK_IDS));
+  });
+
+  it('drops malformed ids rather than passing them to a query', () => {
+    const result = parseBulkAction(
+      formData([
+        [BULK_FORM_FIELD.intent, BULK_INTENT.export],
+        [BULK_FORM_FIELD.id, UUID_A],
+        [BULK_FORM_FIELD.id, '1 OR 1=1'],
+        [BULK_FORM_FIELD.id, '../../etc/passwd'],
+        [BULK_FORM_FIELD.id, ''],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.action.ids).toEqual([UUID_A]);
+  });
+
+  it('de-duplicates and lower-cases, so one row cannot be exported twice', () => {
+    const result = parseBulkAction(
+      formData([
+        [BULK_FORM_FIELD.intent, BULK_INTENT.export],
+        [BULK_FORM_FIELD.id, UUID_A],
+        [BULK_FORM_FIELD.id, UUID_A.toUpperCase()],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.action.ids).toEqual([UUID_A]);
+  });
+
+  it('ignores the fields the other intents use', () => {
+    // An export form posts no category and no status; a crafted request may. Neither
+    // should change what an export means, and neither should make it fail.
+    const result = parseBulkAction(
+      formData([
+        [BULK_FORM_FIELD.intent, BULK_INTENT.export],
+        [BULK_FORM_FIELD.id, UUID_A],
+        [BULK_FORM_FIELD.category, 'Shelter'],
+        [BULK_FORM_FIELD.status, 'not-a-status'],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.action.intent).toBe(BULK_INTENT.export);
+  });
+
+  it('is a recognised intent', () => {
+    expect(isBulkIntent(BULK_INTENT.export)).toBe(true);
+    expect(isBulkIntent('bulk-export')).toBe(true);
+    expect(isBulkIntent('export')).toBe(false);
+  });
+});
+
 describe('parseBulkAction: delete', () => {
   it('accepts a valid selection with no extra fields', () => {
     const result = parseBulkAction(

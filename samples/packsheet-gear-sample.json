@@ -1,0 +1,93 @@
+{
+  "packsheet": 1,
+  "kind": "gear_items",
+  "exported_at": "2026-08-16T12:00:00.000Z",
+  "data": {
+    "items": [
+      {
+        "name": "Nemo Hornet OSMO 2P",
+        "brand": "Nemo",
+        "category": "Shelter",
+        "description": "Two-person semi-freestanding tent",
+        "quantity": 1,
+        "weight_grams": 963,
+        "price": 429.99,
+        "currency": "GBP",
+        "acquired_on": "2024-05-01",
+        "status": "owned",
+        "url": "https://www.nemoequipment.com/products/hornet-osmo",
+        "notes": "Fly pitches first in the rain"
+      },
+      {
+        "name": "Katadyn BeFree 1.0L",
+        "brand": "Katadyn",
+        "category": "Water",
+        "description": null,
+        "quantity": 2,
+        "weight_grams": 63,
+        "price": 44.5,
+        "currency": "GBP",
+        "acquired_on": "2023-07-14",
+        "status": "owned",
+        "url": null,
+        "notes": "Backflush after every trip"
+      },
+      {
+        "name": "Petzl Actik Core",
+        "brand": "Petzl",
+        "category": "Lighting",
+        "description": "600 lumen rechargeable head torch",
+        "quantity": 1,
+        "weight_grams": 79.5,
+        "price": null,
+        "currency": null,
+        "acquired_on": null,
+        "status": "owned",
+        "url": null,
+        "notes": null
+      },
+      {
+        "name": "Alpkit Filoment 600",
+        "brand": "Alpkit",
+        "category": "Sleep",
+        "description": "Down sleeping bag, comfort -3C",
+        "quantity": 1,
+        "weight_grams": 1105.25,
+        "price": 249,
+        "currency": "GBP",
+        "acquired_on": "2022-11-02",
+        "status": "retired",
+        "url": "https://alpkit.com/products/filoment-600",
+        "notes": "Loft is going, replace before next winter"
+      },
+      {
+        "name": "Zpacks Arc Haul Ultra 60L",
+        "brand": "Zpacks",
+        "category": "Pack",
+        "description": null,
+        "quantity": 1,
+        "weight_grams": 618.043,
+        "price": 399,
+        "currency": "USD",
+        "acquired_on": null,
+        "status": "wishlist",
+        "url": "https://zpacks.com/products/arc-haul-ultra",
+        "notes": "Priced in USD deliberately - mixed currencies are allowed"
+      },
+      {
+        "name": "Toaks Titanium 750ml Pot",
+        "brand": "Toaks",
+        "category": "Cooking",
+        "description": null,
+        "quantity": 1,
+        "weight_grams": 103,
+        "price": 32.95,
+        "currency": "GBP",
+        "acquired_on": "2021-03-19",
+        "status": "owned",
+        "url": null,
+        "notes": null
+      }
+    ]
+  }
+}

@@ -551,8 +551,56 @@ export function rawGearFormValues(form: FormData): GearFormValues {
  * "you must provide a currency" for a currency that was, in fact, provided but wrong.
  */
 export function parseGearItemForm(form: FormData, system: WeightSystem): GearFormResult {
-  const values: GearFormValues = rawGearFormValues(form);
+  return parseGearFormValues(rawGearFormValues(form), system);
+}
 
+/**
+ * The validation itself, over the already-flattened all-strings shape rather than over a
+ * `FormData`. `parseGearItemForm` is now this function with `rawGearFormValues` in front
+ * of it, and every rule, message and pairing below is unchanged by that split.
+ *
+ * WHY THE SPLIT EXISTS (PK-65). JSON import needs exactly these rules — the same CHECK
+ * constraints, the same both-or-neither on price/currency, the same strict calendar date
+ * and future cutoff on `acquired_on`, the same URL scheme refusal, the same numeric
+ * bounds — applied to values that never came from a `<form>` and never will. The two
+ * honest options were to give the importer its own copy of all of it, or to give this
+ * module an entry point that does not insist on a `FormData`. A second copy of thirteen
+ * fields' worth of constraint-mirroring is a copy that drifts the first time a migration
+ * changes one of them, and it would drift SILENTLY: the form path and the import path
+ * would simply start disagreeing about what a valid gear item is, with each half passing
+ * its own tests. This module's header already argues that these rules have exactly one
+ * home; that argument does not stop applying because the input arrived as JSON.
+ *
+ * WHAT THE IMPORTER HAS TO DO TO USE IT, and why that is a feature rather than a wart:
+ * it must flatten each JSON item into `GearFormValues` — every field a string, absent
+ * fields as `''` — which is `src/lib/gear/json-import.ts`'s job and is the one place
+ * JSON's types (a number that is really a number, a `null` that is really a null) meet
+ * this module's types (everything is a string, `''` means absent). Keeping that
+ * conversion OUT of here means this function has one input shape to reason about instead
+ * of two, and the JSON-specific decisions — is `123` an acceptable name, is `true` an
+ * acceptable quantity — are made once, where they can be described, rather than smuggled
+ * in as coercions at thirteen separate call sites.
+ *
+ * THE `values` IT RETURNS ON FAILURE IS THE CALLER'S OWN INPUT, untouched and untrimmed,
+ * exactly as before: the form re-renders it into the boxes, and the importer reads it to
+ * label a bad row with whatever the file called the item.
+ *
+ * `system` IS THE UNIT `values.weight` IS EXPRESSED IN, NOT A PREFERENCE (PK-67). It
+ * decides one thing: which unit the weight string is converted FROM before it is stored
+ * as grams. For the form that is the account's own setting, because the account setting
+ * is what the visitor was typing under. For the JSON importer it is `'metric'`
+ * UNCONDITIONALLY — the file carries `weight_grams`, a gram figure, and metric's entry
+ * unit is `g` with a factor of 1, so the number passes through untouched.
+ *
+ * THE IMPORTER MUST NOT PASS THE IMPORTING ACCOUNT'S SETTING, and the distinction is the
+ * whole reason this is a parameter rather than something read from a client in here: a
+ * file's grams are grams no matter who imports it. Threading an imperial importer's
+ * preference in would reinterpret every number in the file as ounces and multiply the
+ * whole closet by 28.35 on the way in. This replaces PK-65's own guard, which set
+ * `values.weight_unit = 'g'` for exactly the same reason before that column existed to be
+ * set — see `itemToFormValues` in `src/lib/gear/json-import.ts`.
+ */
+export function parseGearFormValues(values: GearFormValues, system: WeightSystem): GearFormResult {
   const errors: Record<string, string> = {};
 
   // pairs with: name text not null check (length(btrim(name)) > 0)

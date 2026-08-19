@@ -12,17 +12,34 @@ import { createAuthClient } from '../../lib/auth';
 import { readWeightSystem } from '../../lib/profile';
 import { formatWeight } from '../../lib/units';
 import { SIGN_IN_PATH } from '../../lib/auth-routes';
-import { GEAR_NEW_PATH, GEAR_PATH, gearItemPath } from '../../lib/gear/routes';
+import {
+  GEAR_IMPORTED_PARAM,
+  GEAR_IMPORT_PATH,
+  GEAR_NEW_PATH,
+  GEAR_PATH,
+  gearItemPath,
+} from '../../lib/gear/routes';
+// PK-65: what a finished import is allowed to say on arrival here. In src/lib/ because
+// `vitest.config.ts` excludes src/pages/**, and this reads a visitor-editable parameter.
+import { importedBannerMessage } from '../../lib/gear/import-form';
 import {
   gearListPath,
   gearQueryToSearchParams,
   hasUnsurfacedFilters,
   loadGearCloset,
+  loadGearItemsForExport,
   parseGearQuery,
   sortLinkSearchParams,
   unsurfacedFilterParams,
   type GearQuery,
 } from '../../lib/gear/query';
+// PK-65: the export half of the JSON round-trip. The page's job is to answer with the
+// bytes; what is IN them is json-schema.ts's decision, tested directly.
+import {
+  buildGearItemsDocument,
+  gearItemsFilename,
+  serialiseGearItemsDocument,
+} from '../../lib/gear/json-schema';
 import {
   GEAR_LIST_COLUMNS,
   GEAR_PAGE_SIZE,
@@ -92,6 +109,11 @@ const GENERIC_LOAD_ERROR = 'Something went wrong loading your gear. Please try a
 // and "please try again", which promises the write did not happen — see that constant's
 // own comment for the committed-then-lost-response case where that promise is false.
 const GENERIC_WRITE_ERROR = 'Something went wrong updating your gear. Please try again.';
+// PK-65. Says the selection is gone rather than "something went wrong", because nothing
+// did: the query ran fine and matched nothing. The likeliest cause is a stale page whose
+// items were deleted elsewhere, and reloading is the action that fixes it.
+const EXPORT_FOUND_NOTHING_MESSAGE =
+  'None of the items you selected are in your closet any more. Reload the page and try again.';
 
 let bulkError: string | null = null;
 /** Set only for a `bulk-delete` submission that has not yet been confirmed — see
@@ -173,6 +195,62 @@ if (Astro.request.method === 'POST') {
         // that is done through GearQuery rather than by deleting params by name.
         return Astro.redirect(gearListPath(parseGearQuery(Astro.url.searchParams)), 303);
       }
+    } else if (action.intent === BULK_INTENT.export) {
+      // THE ONE BRANCH THAT DOES NOT REDIRECT AND MUST NOT (PK-65). Every other action
+      // here answers with a 303 so a refresh cannot resubmit a mutation; this one answers
+      // with the file itself. The 303 rule exists to stop a repeated POST repeating a
+      // WRITE, and this POST writes nothing — re-submitting it produces the same bytes
+      // again, which is what a download that failed halfway ought to do. Routing it
+      // through a redirect would additionally mean parking the selection somewhere a GET
+      // could find it (a query string of 500 ids, or a server-side scratch row), which is
+      // a great deal of machinery to arrive back at the same bytes.
+      //
+      // WHY IT IS A POST AT ALL, then, when it only reads: the selection is the input,
+      // and a selection lives in checkboxes. A GET carrying 500 `?id=` parameters is a
+      // URL past every practical length limit, logged in full by every proxy between here
+      // and the visitor, and bookmarkable into a link that silently means something
+      // different tomorrow.
+      const { items, error } = await loadGearItemsForExport(client, user.id, ids);
+      if (error) {
+        bulkError = GENERIC_LOAD_ERROR;
+      } else if (items.length === 0) {
+        // AN EMPTY SELECTION THAT MATCHED NOTHING IS NOT AN EXPORT (PK-65 review, F6).
+        // `parseBulkAction` has already refused a genuinely empty selection, so arriving
+        // here means every id the visitor ticked has since stopped being theirs to read —
+        // deleted in another tab, or a crafted id list. Answering 200 with a file whose
+        // `items` array is `[]`, under a confident dated filename, hands somebody a
+        // download they may well file away as a backup of a closet that is not in it.
+        // A refusal they can see beats a file that is quietly empty.
+        bulkError = EXPORT_FOUND_NOTHING_MESSAGE;
+      } else {
+        // `exportedAt` is taken ONCE and threaded into both the document and the
+        // filename, so the timestamp inside the file and the date on it can never
+        // disagree — two `new Date()` calls either side of midnight is a small, real bug
+        // that would be found by nobody.
+        const exportedAt = new Date();
+        const body = serialiseGearItemsDocument(buildGearItemsDocument(items, exportedAt));
+        return new Response(body, {
+          status: 200,
+          headers: {
+            // `charset=utf-8` is explicit rather than assumed: gear names carry accents,
+            // CJK and emoji routinely, and a browser guessing the encoding of a file it
+            // was handed without one gets them wrong.
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="${gearItemsFilename(exportedAt)}"`,
+            // BELT AND BRACES, AND THE BRACES ALREADY HOLD: src/middleware.ts sets
+            // `private, no-store` on every response for a signed-in visitor on this path,
+            // and does it AFTER this handler returns, so it overwrites whatever is set
+            // here. This header is therefore doing nothing today. It is kept, and this
+            // comment written, rather than deleted, because what it asserts is a property
+            // of THIS RESPONSE rather than of the route: the body is a visitor's own gear
+            // including notes and prices, and it must never sit in a shared cache or come
+            // back from a private one after a sign-out. If the middleware rule is ever
+            // narrowed to HTML — an entirely reasonable future change — this line is what
+            // stops that narrowing from silently making a JSON download cacheable.
+            'cache-control': 'no-store',
+          },
+        });
+      }
     } else if (action.intent === BULK_INTENT.setStatus) {
       const { error } = await bulkSetStatus(client, user.id, ids, action.status);
       if (error) {
@@ -211,6 +289,13 @@ if (Astro.request.method === 'POST') {
 // query, fetch the filter options and the current page of rows.
 // ---------------------------------------------------------------------------
 const query: GearQuery = parseGearQuery(Astro.url.searchParams);
+
+// PK-65. Read straight off the URL and rendered; `parseGearQuery` deliberately does not
+// know this parameter, so it never survives into the links the list rebuilds and the
+// banner disappears on the visitor's next click. What counts as a believable number is
+// `importedBannerMessage`'s decision, in src/lib/ where a test can reach it — a hand-typed
+// `?imported=abc` or `?imported=-4` has to mean "no banner" rather than a rendered NaN.
+const importedMessage = importedBannerMessage(Astro.url.searchParams.get(GEAR_IMPORTED_PARAM));
 
 // Both queries are owner-scoped and live in src/lib/gear/ now — loadGearOptions
 // (src/lib/gear/options.ts) and loadGearCloset (src/lib/gear/query.ts) — so a test can
@@ -301,7 +386,18 @@ function pageHref(target: number): string {
  * "here". See that function's own comment (src/lib/gear/return-path.ts) for why it
  * lives there rather than as a page-local helper.
  */
-const currentView = `${Astro.url.pathname}${Astro.url.search}`;
+// REBUILT FROM `query` RATHER THAN COPIED FROM THE URL (PK-65). `gearListPath` assembles
+// the path from the parsed `GearQuery` alone, so anything this page does not own is left
+// behind by construction — which is the same argument the POST branches above make for
+// redirecting through it instead of `${GEAR_PATH}${Astro.url.search}`.
+//
+// It became necessary rather than merely tidier when import gained its `?imported=N`
+// banner. Copied verbatim, that parameter rode into the "Add item" link's `next=`, so
+// saving an unrelated item afterwards landed back on `/gear?imported=4` and re-announced
+// an import that had not just happened — a banner lying about something a visitor did
+// minutes ago. Rebuilding drops it, along with any stray `?utm_source=` and any parameter
+// a future feature adds elsewhere.
+const currentView = gearListPath(query);
 ---
 
 <Layout
@@ -323,12 +419,29 @@ const currentView = `${Astro.url.pathname}${Astro.url.search}`;
            border-blue-deep matches the empty state's already-established button styling
            rather than inventing a second vocabulary for "add an item". */
       }
-      <a
-        href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
-        class="border-blue-deep text-blue-deep hover:bg-blue-tint shrink-0 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-      >
-        Add item
-      </a>
+      <div class="flex shrink-0 items-center gap-3">
+        {
+          /* PK-65. The only route to the import page, and it is here rather than in
+             GearNav for the reason that file's own comment gives for keeping the nav to
+             DESTINATIONS: importing is something you do to your closet, from your closet,
+             not a section of the product. Rendered as a quiet secondary action beside the
+             primary one — "Add item" is what a visitor does daily and this is what they
+             do once, so it must not compete with it. Unlike the export button, this is a
+             plain link: it starts a page, not an action on a selection. */
+        }
+        <a
+          href={GEAR_IMPORT_PATH}
+          class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+        >
+          Import
+        </a>
+        <a
+          href={gearFormHrefReturningTo(GEAR_NEW_PATH, currentView)}
+          class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
+        >
+          Add item
+        </a>
+      </div>
     </div>
 
     {
@@ -338,6 +451,24 @@ const currentView = `${Astro.url.pathname}${Astro.url.search}`;
           class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
         >
           {bulkError}
+        </p>
+      )
+    }
+
+    {
+      /* PK-65: the only confirmation an import gets. `role="status"` rather than
+         `role="alert"` — this is not an error and must not interrupt a screen reader
+         mid-sentence the way an assertive live region does. It is a hairline panel rather
+         than a coloured one because CONTRIBUTING reserves blue for interactive elements
+         and base weight, and there is no "success green" in tokens.css to reach for. */
+    }
+    {
+      importedMessage && (
+        <p
+          role="status"
+          class="border-hairline bg-sunk text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
+        >
+          {importedMessage}
         </p>
       )
     }
@@ -733,6 +864,22 @@ const currentView = `${Astro.url.pathname}${Astro.url.search}`;
                     class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
                   >
                     Set status
+                  </button>
+
+                  {/* PK-65. Placed BEFORE the delete button, not after it: this toolbar
+                       ends with the one irreversible action in the closet, and putting a
+                       harmless button below it would mean a mis-aimed click at the bottom
+                       of the row lands on delete. Styled as a neutral secondary action
+                       like the two set-* buttons, deliberately not in blue — CONTRIBUTING
+                       reserves blue for interactive elements and base weight, and this
+                       toolbar has already established that vocabulary for its buttons. */}
+                  <button
+                    type="submit"
+                    name={BULK_FORM_FIELD.intent}
+                    value={BULK_INTENT.export}
+                    class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors"
+                  >
+                    Export selected
                   </button>
 
                   <button
