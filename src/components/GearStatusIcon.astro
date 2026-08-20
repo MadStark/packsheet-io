@@ -38,15 +38,25 @@
 // passes `decorative` and the SVG leaves the accessibility tree entirely. The three
 // glyphs also differ in SHAPE, so neither mode depends on hue being perceivable.
 //
-// WHY WISHLIST IS --ochre-ink AND NOT --ochre. One component now serves two backgrounds,
-// so the colour has to clear the bar on the worse of them. `--ochre` #b5822e is 3.40:1 on
-// --surface (fine for the form) but only 2.84:1 on --sunk #efeae1, which is the closet
-// row's own `hover:bg-sunk` — under WCAG 1.4.11's 3:1 for a graphical object, and on the
-// list this glyph IS the only carrier of "wishlist". --ochre-ink #8a6118 is 4.61:1 on
-// --sunk and 5.52:1 on --surface, so it passes in both places. Same palette, nothing
-// invented; tokens.css's "do not invent values here" rule is respected. --moss and --rust
-// needed no such change. Never --blue: per tokens.css, blue marks something INTERACTIVE,
-// and a status marker is not clickable.
+// WHY WISHLIST IS --ochre-ink AND NOT --ochre. This glyph sits on four different grounds
+// on the closet list, and the colour has to clear the bar on the worst of them. Measured
+// against the surfaces PK-64 actually produces — the white sheet, the 4% ink hover wash,
+// the 5.5% ochre wash a wishlist row carries, and that row hovered at 9%:
+//
+//     --ochre     #b5822e   3.39 / 3.14 / 3.20 / 3.09
+//     --ochre-ink #8a6118   5.52 / 5.11 / 5.21 / 5.03
+//
+// WCAG 1.4.11 asks 3:1 for a graphical object, so --ochre technically passes and clears it
+// by 0.09 at worst — which is not a margin worth shipping for the mark that IS the only
+// carrier of "wishlist" on a row. --ochre-ink clears it by two to one everywhere.
+//
+// (The earlier version of this note reasoned about --surface and --sunk. Both tokens were
+// deleted by PK-64 along with the elevation model that needed them; the conclusion did not
+// change, but the grounds it was measured against no longer existed, so the numbers above
+// are re-measured rather than carried over.)
+//
+// Same palette, nothing invented. --moss and --rust needed no such change. Never --blue:
+// blue marks something INTERACTIVE, and a status marker is not clickable.
 import { GEAR_STATUS_LABELS, isGearStatus, type GearStatus } from '../lib/gear/fields';
 
 interface Props {

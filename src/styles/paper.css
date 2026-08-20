@@ -81,6 +81,19 @@
   .paper-page {
     position: relative;
     z-index: 0;
+    /*
+     * THE PAGE ITSELF NEVER SCROLLS SIDEWAYS. Wide content — the closet's table is
+     * the only case — scrolls inside its own container instead. Measured on a 500px
+     * viewport before this line: the page scrolled 176px horizontally, which is the
+     * table's overhang, even though the table sits in an overflow-x:auto wrapper
+     * that was itself scrolling correctly.
+     *
+     * `clip` rather than `hidden` on purpose. `hidden` makes this a scroll
+     * container, which would trap the sheets' z-index:-1 curl pseudo-elements and
+     * change what §2.4 depends on; `clip` cuts the overflow without creating one.
+     * Only the horizontal axis is constrained — the page must still scroll down.
+     */
+    overflow-x: clip;
   }
 
   /* §3 — the content column is 1000px INCLUDING its 40px side padding, so a
