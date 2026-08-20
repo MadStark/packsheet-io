@@ -239,117 +239,142 @@ const updated = Astro.url.searchParams.get('updated') === '1';
   title={`${item.name} — Packsheet`}
   description={`Manage ${item.name} in your Packsheet gear closet.`}
 >
-  <GearNav />
-  <main class="mx-auto max-w-2xl px-6 py-10">
-    <h1 class="text-3xl">{item.name}</h1>
+  {
+    /*
+    ONE SHEET, THE TITLE INSIDE IT (DESIGN.md §2.3, §8), same shape as new.astro — see
+    that page's own comment. The edit form's error summary is likewise a page-level
+    concern now, not GearItemForm's: see that component's comment on why it no longer
+    renders one.
 
+    THE DELETE UI SPLITS ACROSS THE SHEET BOUNDARY, and the two rules for where each half
+    goes are different: the plain "Delete" trigger stays INSIDE this sheet, below a
+    `.sheet-rule`, because it is one more thing this page lets you do to the item you are
+    looking at — not a second sheet, and not a bordered box. Its CONFIRMATION, once
+    pending, is a `.note.note-danger` ON THE PAPER ABOVE THE SHEET instead, for the same
+    §2.5 reason every other note on this page is: it is a page-level interruption, not
+    sheet content, and mirrors exactly how src/pages/gear/index.astro places its own
+    bulk-delete confirmation above (in place of) its list rather than inside a sheet. */
+  }
+  <GearNav />
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
     {
       updated && (
-        <p
-          role="status"
-          class="border-hairline bg-sunk text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          Saved.
-        </p>
+        <div class="note" role="status">
+          <p>Saved.</p>
+        </div>
       )
     }
 
     {
       writeError && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {writeError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{writeError}</p>
+        </div>
       )
     }
 
-    <div class="mt-6">
-      <GearItemForm
-        weightSystem={weightSystem}
-        values={values}
-        errors={formErrors}
-        submitLabel="Save changes"
-        cancelHref={returnPath ?? GEAR_PATH}
-        intentField={{ name: 'intent', value: GEAR_ITEM_INTENT.edit }}
-        categories={categories}
-        next={returnPath ?? undefined}
-      />
-    </div>
+    {
+      Object.keys(formErrors).length > 0 && (
+        <div class="note note-danger" role="alert">
+          <p class="text-sm font-medium">Fix the following before saving:</p>
+          <ul class="mt-2 list-disc space-y-1 pl-5 text-sm">
+            {Object.values(formErrors).map((message) => (
+              <li>{message}</li>
+            ))}
+          </ul>
+        </div>
+      )
+    }
 
-    <div class="border-hairline mt-12 border-t pt-8">
-      {
-        pendingDelete ? (
-          <div>
-            <h2 class="text-rust text-lg">Confirm delete</h2>
-            {/* The same two ideas the closet list's bulk confirmation carries after the
-                question itself (src/pages/gear/index.astro), in the same order and
-                narrowed to one named item: the irreversibility first, then the one thing
-                a visitor might reasonably fear losing alongside it.
-                gear_items_snapshot_before_delete
-                (core_schema.sql) freezes this row's name, weight and price into every
-                pack_items row still pointing at it, so a pack that lists this item
-                keeps its line rather than losing it. No typed-word confirmation, for
-                the reason that page's own comment gives. */}
-            <p class="text-ink-2 mt-2 text-sm">
-              Delete {item.name} permanently? This cannot be undone. If it appears on a saved pack,
-              that pack keeps a frozen copy.
-            </p>
-            <form method="POST" class="mt-4 flex gap-3">
-              <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
-              {/* Field name and value both from src/lib/gear/bulk.ts, never spelled out
-                  here: this hidden input is the WRITER of the same gate
-                  confirmsGearDeletion READS, and the two must not be able to drift. */}
-              <input
-                type="hidden"
-                name={BULK_FORM_FIELD.confirm}
-                value={GEAR_DELETE_CONFIRMATION_VALUE}
-              />
-              <button
-                type="submit"
-                class="bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95"
-              >
-                Delete permanently
-              </button>
-              {/* CARRIES `next` BACK TO ITSELF. Backing out of a delete must not cost
-                  the visitor their return target: this link re-enters the same page, and
-                  a bare `gearItemPath(id)` would drop the `?next=` the rest of the page
-                  is careful to preserve. The failure that caused was silent and
-                  outlived the interaction — filter the closet, open an item, click
-                  Delete, change your mind, and from then on Save landed on `?updated=1`
-                  and Cancel on a bare `/gear`, because the return target had been
-                  dropped by a link that has nothing to do with either. */}
-              <a
-                href={
-                  returnPath === null
-                    ? gearItemPath(id)
-                    : gearFormHrefReturningTo(gearItemPath(id), returnPath)
-                }
-                class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
-              >
-                Cancel
-              </a>
-            </form>
-          </div>
-        ) : (
-          <div>
-            <h2 class="text-lg">Delete</h2>
-            <p class="text-ink-2 mt-2 text-sm">
-              Deletes this item permanently. It cannot be restored.
-            </p>
-            <form method="POST" class="mt-4">
-              <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
-              <button
-                type="submit"
-                class="border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-              >
-                Delete
-              </button>
-            </form>
-          </div>
-        )
-      }
+    {
+      pendingDelete && (
+        <div class="note note-danger">
+          <h2 class="section-title text-rust">Confirm delete</h2>
+          {/* The same two ideas the closet list's bulk confirmation carries after the
+              question itself (src/pages/gear/index.astro), in the same order and
+              narrowed to one named item: the irreversibility first, then the one thing
+              a visitor might reasonably fear losing alongside it.
+              gear_items_snapshot_before_delete
+              (core_schema.sql) freezes this row's name, weight and price into every
+              pack_items row still pointing at it, so a pack that lists this item
+              keeps its line rather than losing it. No typed-word confirmation, for
+              the reason that page's own comment gives. */}
+          <p class="hint mt-2">
+            Delete {item.name} permanently? This cannot be undone. If it appears on a saved pack,
+            that pack keeps a frozen copy.
+          </p>
+          <form method="POST" class="mt-4 flex gap-3">
+            <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
+            {/* Field name and value both from src/lib/gear/bulk.ts, never spelled out
+                here: this hidden input is the WRITER of the same gate
+                confirmsGearDeletion READS, and the two must not be able to drift. */}
+            <input
+              type="hidden"
+              name={BULK_FORM_FIELD.confirm}
+              value={GEAR_DELETE_CONFIRMATION_VALUE}
+            />
+            <button type="submit" class="btn btn-danger">
+              Delete permanently
+            </button>
+            {/* CARRIES `next` BACK TO ITSELF. Backing out of a delete must not cost
+                the visitor their return target: this link re-enters the same page, and
+                a bare `gearItemPath(id)` would drop the `?next=` the rest of the page
+                is careful to preserve. The failure that caused was silent and
+                outlived the interaction — filter the closet, open an item, click
+                Delete, change your mind, and from then on Save landed on `?updated=1`
+                and Cancel on a bare `/gear`, because the return target had been
+                dropped by a link that has nothing to do with either. */}
+            <a
+              href={
+                returnPath === null
+                  ? gearItemPath(id)
+                  : gearFormHrefReturningTo(gearItemPath(id), returnPath)
+              }
+              class="btn"
+            >
+              Cancel
+            </a>
+          </form>
+        </div>
+      )
+    }
+
+    <div class="sheet">
+      <div class="sheet-body">
+        <p class="eyebrow">Gear</p>
+        <h1 class="page-title mt-2">{item.name}</h1>
+        <p class="aside mt-2">weigh it once</p>
+        <hr class="sheet-rule" />
+
+        <GearItemForm
+          weightSystem={weightSystem}
+          values={values}
+          errors={formErrors}
+          submitLabel="Save changes"
+          cancelHref={returnPath ?? GEAR_PATH}
+          intentField={{ name: 'intent', value: GEAR_ITEM_INTENT.edit }}
+          categories={categories}
+          next={returnPath ?? undefined}
+        />
+
+        {
+          !pendingDelete && (
+            <>
+              <hr class="sheet-rule" />
+              <div>
+                <h2 class="section-title">Delete</h2>
+                <p class="hint mt-2">Deletes this item permanently. It cannot be restored.</p>
+                <form method="POST" class="mt-4">
+                  <input type="hidden" name="intent" value={GEAR_ITEM_INTENT.delete} />
+                  <button type="submit" class="btn btn-danger">
+                    Delete
+                  </button>
+                </form>
+              </div>
+            </>
+          )
+        }
+      </div>
     </div>
   </main>
 </Layout>

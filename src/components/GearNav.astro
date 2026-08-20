@@ -54,35 +54,49 @@ const links: readonly [href: string, label: string][] = [
 ];
 ---
 
-<header class="border-hairline border-b">
-  {
-    /* aria-label="Sections", not "Gear closet". A nav's accessible name is announced as the
+{
+  /* THE STRIP (DESIGN.md §2.3) — a sheet with zero padding at a fixed height, lying on the
+     paper like every other surface. This used to be a `border-b` header, which §13 refuses
+     outright ("borders as separators"): in this language depth comes from the sheet's own
+     shadow instead (§1). The 30px of top padding is the standard gap between papers.
+
+     .paper-col rather than max-w-5xl: §3's content column is 1000px INCLUDING its 40px side
+     padding, and every sheet on every page aligns to that same column. */
+}
+<div class="paper-col pt-[30px]">
+  <header class="strip">
+    {
+      /* aria-label="Sections", not "Gear closet". A nav's accessible name is announced as the
        name of the LANDMARK — "Sections navigation" — so it has to describe what the list
        is, not which page rendered it. It is still labelled at all (rather than left as a
        bare <nav>) because a second navigation landmark already exists on some of these
        pages: the closet's pager, and the pack editor's picker pages, both of which carry
        their own aria-label for the same reason. */
-  }
-  <nav aria-label="Sections" class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-    <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
-      >Packsheet</a
-    >
-    <ul class="flex items-center gap-6 text-sm">
+    }
+    <nav aria-label="Sections" class="flex h-full items-center justify-between px-6">
       {
-        links.map(([href, label]) => (
-          <li>
-            <a
-              href={href}
-              aria-current={path === href ? 'page' : undefined}
-              class="text-ink-2 hover:text-ink aria-[current=page]:text-ink font-medium aria-[current=page]:underline"
-            >
-              {label}
-            </a>
-          </li>
-        ))
+        /* The wordmark is the SYSTEM voice — it is the app naming itself, not something the
+           visitor wrote (§4). It used to be `font-mono`, and there is no monospace family in
+           this design any more: the measurement that retired it is that Klee One's digits are
+           uniform width natively, so nothing needed a mono face to make columns align. */
       }
-      {
-        /* PK-62 REMOVED THE "Add item" LINK FROM THIS NAV — read this before putting
+      <a href={HOME_PATH} class="eyebrow font-medium tracking-[0.18em] no-underline">Packsheet</a>
+      <ul class="flex items-center gap-6 text-sm">
+        {
+          links.map(([href, label]) => (
+            <li>
+              <a
+                href={href}
+                aria-current={path === href ? 'page' : undefined}
+                class="text-ink-2 hover:text-ink aria-[current=page]:text-ink font-medium no-underline aria-[current=page]:underline"
+              >
+                {label}
+              </a>
+            </li>
+          ))
+        }
+        {
+          /* PK-62 REMOVED THE "Add item" LINK FROM THIS NAV — read this before putting
            it back, because the C1 (PK-4 review) defect it was added for is NOT
            re-opened by removing it.
 
@@ -101,7 +115,8 @@ const links: readonly [href: string, label: string][] = [
            page. If "add from anywhere" turns out to matter more than keeping this header
            to destinations only, the fix is a considered one (a persistent action
            affordance), not quietly restoring this <li>. */
-      }
-    </ul>
-  </nav>
-</header>
+        }
+      </ul>
+    </nav>
+  </header>
+</div>

@@ -1,107 +1,185 @@
 /*
- * Treeline design tokens.
+ * Notebook Paper design tokens.
  *
- * Ported verbatim from the Treeline palette page. Do not invent values here —
- * if a colour is needed that does not exist below, it belongs on the palette
- * page first.
+ * THE AUTHORITY FOR THIS FILE IS docs/design/DESIGN.md, and its §14 token sheet is
+ * the list below. That matters more than it sounds: this file used to open by saying
+ * it was "ported verbatim from the Treeline palette page", and PK-15 established that
+ * no such page existed — in this workspace or anywhere linked. The pointer was the
+ * problem, not the palette. If a colour is needed that is not here, it belongs in
+ * DESIGN.md first, so the next person to read this line can actually go and look.
  *
- * Two standing rules the rest of the codebase depends on:
+ * TWO STANDING RULES, ONE OF WHICH CHANGED.
+ *
  *   1. Blue only ever marks something interactive, or a base weight. It is never
  *      decorative. If it is blue, it can be clicked or it is base weight.
- *   2. Nothing casts a shadow at rest. Elevation is expressed with --surface,
- *      --sunk and --hairline. Shadows are reserved for transient overlays.
+ *      UNCHANGED — DESIGN.md §5 states it independently of anything below.
  *
- * Light is the default. Dark is opt-in via :root[data-theme="dark"] and also
- * tracks the OS preference, with the explicit attribute always winning so the
- * in-app toggle can override the system in both directions.
+ *   2. "Nothing casts a shadow at rest" is SUPERSEDED, and is written down here as
+ *      superseded rather than quietly deleted, because it was true for four months
+ *      and someone will remember it. It described a language whose elevation came
+ *      from --surface and --sunk, and both of those tokens are gone. Notebook
+ *      Paper's depth model *is* a shadow at rest: the corner curl of DESIGN.md §2.4
+ *      is the single trick that makes a flat white rectangle read as paper, and
+ *      without it the sheets are just boxes.
+ *
+ *      What survives is the intent behind it. No uniform drop shadows — the curl is
+ *      deepest at the two bottom corners and fades toward the top edge, which is why
+ *      it reads as a sheet resting on its centre rather than as a card floating. No
+ *      elevation for its own sake. And every shadow is mixed from --shadow-ink
+ *      below, never from black: a black shadow on warm paper reads as a hole.
+ *
+ * LIGHT ONLY. Paper is light, so the language is (DESIGN.md §13). There is no dark
+ * cut of any token in this file, no [data-theme] selector and no prefers-color-scheme
+ * block — dark mode was removed outright rather than left half-wired.
  */
 
 :root {
-  /* Typefaces */
-  --font-display: 'Bricolage Grotesque', sans-serif;
-  --font-body: 'Hanken Grotesk', -apple-system, sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  /*
+   * Typefaces — two voices, and the rule for which is which is about who is
+   * speaking rather than about size (DESIGN.md §4). The app prints in Inter; the
+   * visitor writes in Klee One. Figures are written: Klee One's digits were
+   * measured in the browser and are uniform width, so a column of weights still
+   * aligns on its right edge without a monospace face to force it.
+   */
+  --font-system: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-written: 'Klee One', ui-serif, Georgia, serif;
 
-  /* Radius scale */
-  --r-sm: 8px;
-  --r: 12px;
-  --r-lg: 18px;
+  /*
+   * One radius, not a scale. The old --r-sm / --r / --r-lg collapsed because §6
+   * puts 6px on buttons, fields and segments and sheets are square, which left
+   * nothing for the other two steps to describe. The 3px on a checkbox is stated
+   * at its own call site rather than tokenised — one value used once is not a
+   * scale either.
+   */
+  --radius: 6px;
 
-  /* Ground and structure */
-  --paper: #f7f4ee;
-  --surface: #ffffff;
-  --sunk: #efeae1;
+  /* The 20px cell everything sits on: rows, headers, rules, sheet padding (§3). */
+  --cell: 20px;
+
+  /*
+   * Ground and structure. --paper is the page; --note is the sheets, and is the
+   * only pure white on the site. --paper-deep is for sunk areas and is the
+   * replacement for the deleted --sunk.
+   *
+   * DO NOT SET 12px THIRD-INK TEXT ON --paper-deep: it measures 4.11:1 there and
+   * fails AA, where it clears on both --paper (4.51:1) and --note (4.64:1). Use
+   * --ink-2 on a sunk area instead (5.29:1). The prototype had exactly this bug in
+   * its photo chip and it would have shipped.
+   */
+  --paper: #fdfcf6;
+  --note: #ffffff;
+  --paper-deep: #f5f1e4;
   --hairline: #e3dcd0;
   --rule: #d2c8b8;
 
-  /* Text */
+  /*
+   * The squared grid — petits carreaux, a 1px line on the 20px cell. The pattern
+   * ink is a desaturated slate blue, never grey and never the text ink: real
+   * notebook printing is a pale blue-grey and the eye recognises it instantly,
+   * where a grey grid reads as a wireframe (§2.1).
+   *
+   * .10 rather than the more cautious .085 you would use for a pattern content
+   * sits on. Every sheet is opaque, so the grid is only ever seen in the margins
+   * and in the 30px gaps between sheets — never read through — which makes a
+   * stronger value safe here and a cautious one read as nothing.
+   */
+  --grid-ink: rgba(70, 105, 150, 0.1);
+
+  /*
+   * Every shadow on the site is mixed from this, as rgba(var(--shadow-ink), a).
+   * It is the warm ink rather than black, for the reason in rule 2 above.
+   */
+  --shadow-ink: 60, 45, 20;
+
+  /*
+   * Ink. --ink-3 is #7a7468 and NOT the #8c8578 the guideline first reached for:
+   * that value scores 3.56:1 on paper and 3.66:1 on the sheet and fails AA for
+   * normal text, while the third ink is what sets 12px section labels and column
+   * headers. #7a7468 keeps its hue, clears AA at 4.51:1 / 4.64:1, and stays
+   * visibly lighter than --ink-2 so the label hierarchy survives. It also avoids a
+   * collision: #8c8578 is byte-identical to --c-misc.
+   */
   --ink: #1c1917;
   --ink-2: #6b6259;
-  --ink-3: #766c60;
+  --ink-3: #7a7468;
 
-  /* Blue — interactive and base weight only */
+  /* Blue — interactive and base weight only. Unchanged from the old palette. */
   --blue: #0070d4;
   --blue-deep: #005aab;
   --blue-ink: #003d73;
   --blue-tint: #e4f0fc;
 
-  /* Earth tones */
-  --bark: #4a3728;
-  --trail: #8a6a4b;
-  --clay: #a97155;
-  --clay-ink: #8e5b42;
-  --wheat: #c9a87c;
+  /*
+   * The state accents: mid-saturation earths, so none of them shouts. Where an
+   * accent has to be legible as text, use its -ink cut.
+   *
+   * --moss, --ochre, --ochre-ink and --rust are unchanged byte for byte from the
+   * palette this replaced: the redesign changed the ground, the ink and the type,
+   * not what the colours mean.
+   *
+   * --worn IS NEW, and is worth naming as new rather than counting it among them.
+   * What existed before was --worn-ink #6e5c90, which had no call site; the purple
+   * that was actually rendered was a hard literal #7a6a9b sitting in --w-worn. This
+   * gives that literal a name and deletes the unused token, so the value below is
+   * what shipped and the one that did not is gone.
+   */
   --moss: #3d7a52;
   --ochre: #b5822e;
   --ochre-ink: #8a6118;
   --rust: #b24a3c;
-  --worn-ink: #6e5c90;
+  --worn: #7a6a9b;
 
   /*
    * Weight classes — base / worn / consumable.
    *
-   * --w-base and --w-cons are expressed as references rather than literals. In the
-   * palette they are byte-identical to --blue (#0070D4) and --ochre (#B5822E), so
-   * this changes nothing in light mode, but it means they follow the theme instead
-   * of staying stuck on their light values in dark mode. Without this, a base-weight
-   * figure renders light-mode blue on a dark ground at 3.12:1 and fails WCAG AA.
+   * All three are references rather than literals, so each stays tied to the accent
+   * it means. --w-base and --w-cons already were; --w-worn was a hard literal
+   * #7a6a9b and is newly one, which is what --worn above exists for.
    *
-   * --w-worn can only use the same trick in dark mode. Its #7A6A9B is not the light
-   * --worn-ink (#6E5C90); the
-   * only exact match in the palette is --c-sleep, and the categories are fill-only
-   * with no dark cuts of their own, so referencing one would inherit the same gap
-   * this is meant to close. The light value therefore stays the literal PS-4 left it
-   * as, and dark mode alone follows --worn-ink: #A794C6 is 5.62:1 on dark --sunk
-   * #2A241D and 6.19:1 on dark --surface #211C17, both AA passes, against the old
-   * literal's 3.19:1 fail. Light is untouched, which was the whole objection to
-   * mapping --w-worn to --worn-ink outright.
+   * The original reason was that a reference follows the theme into dark mode.
+   * There is no dark mode any more, and the reason to keep it is now simpler: a
+   * base weight IS the blue of rule 1, and writing #0070d4 here a second time would
+   * let the two drift apart silently.
+   *
+   * --w-worn resolves to #7a6a9b: 4.68:1 on paper and 4.81:1 on the sheet, so it
+   * clears AA as text, which is how PackContents.vue uses it.
    */
   --w-base: var(--blue);
-  --w-worn: #7a6a9b;
+  --w-worn: var(--worn);
   --w-cons: var(--ochre);
 
   /*
-   * The one shadow the palette defines, and the only one rule 2 above admits: the row a
-   * pointer is currently dragging (PK-37, src/components/PackContents.vue). It exists ONLY
-   * between `dragstart` and `dragend` — nothing in this product casts a shadow at rest, and
-   * a second `--shadow-*` token would be the moment to re-read rule 2 rather than to add one.
+   * The one shadow that is NOT the corner curl: the row a pointer is currently
+   * dragging (PK-37, src/components/PackContents.vue). It exists only between
+   * `dragstart` and `dragend`.
    *
-   * It is a token rather than an inline value for the reason CONTRIBUTING.md gives: a colour
-   * invented at a call site is a colour with no dark cut and no reviewer. This one needs the
-   * dark cut. 22% black over --paper #f7f4ee reads as a soft lift; the same 22% over dark
-   * --paper #17130f is very nearly nothing, because a black shadow on a near-black ground
-   * has almost no contrast to spend. The dark blocks below raise it to 55% and tighten the
-   * spread, which is the smallest change that keeps the dragged row distinguishable.
+   * This token predates the redesign and used to be justified as the single
+   * exception to "nothing casts a shadow at rest". That rule is gone (see the
+   * header), so it no longer needs an exemption.
+   *
+   * It is the only LIFT shadow on the site, which is a narrower claim than it
+   * looks and the accurate one: every sheet and strip also carries an ambient
+   * shadow under its corner curl. This is the only shadow that says something has
+   * been picked up off the page, which a dragged row has been and a resting sheet
+   * has not. Its dark cut went with dark mode.
    */
-  --shadow-drag: 0 10px 24px rgb(0 0 0 / 0.22);
+  --shadow-drag: 0 10px 24px rgba(var(--shadow-ink), 0.28);
 
   /*
-   * Gear categories are fill-only: dots, bars and swatches, where WCAG imposes no
-   * contrast requirement, and none of them has a dark cut. As text on dark --surface
-   * #211c17, only --c-misc (4.62:1) and --c-cooking (4.99:1) clear AA; the other
-   * eight range from 2.50:1 (--c-electronics) to 4.29:1 (--c-clothing). Do not render
-   * a category name in its own colour on a dark ground until dark cuts exist here —
-   * PS-16's public share page is expected to be the first design that wants to.
+   * Gear categories are fill-only — dots, bars and segments, where WCAG imposes no
+   * contrast requirement.
+   *
+   * DO NOT RENDER A CATEGORY NAME IN ITS OWN COLOUR. Measured on the white sheet, the
+   * ten run from 3.39:1 (--c-cooking) to 6.75:1 (--c-electronics), and exactly half of
+   * them fail AA for text: cooking, misc, clothing, water and food. Picking the five
+   * that pass would be worse than not doing it — the same list would then be styled two
+   * different ways for a reason no reader could see.
+   *
+   * NOTHING IN THE PRODUCT CURRENTLY RENDERS ONE. The closet sets the category name in
+   * ink with no dot at all, and `src/pages/gear/index.astro` carries the argument for
+   * why: the column is unconstrained free text, so there is no mapping onto these ten,
+   * and an invented one encodes nothing a reader can decode. `welcome.astro`'s specimen
+   * is the only call site, and it hand-picks five for five fixed rows.
    */
   --c-shelter: #4a6fa5;
   --c-sleep: #7a6a9b;
@@ -113,77 +191,4 @@
   --c-food: #a9694f;
   --c-safety: #b24a3c;
   --c-misc: #8c8578;
-}
-
-/*
- * Dark theme. Deliberately duplicated across the two selectors below rather than
- * combined: :root:not([data-theme='light']) inside the media query lets an explicit
- * light choice override a dark OS preference, and :root[data-theme='dark'] lets an
- * explicit dark choice win on a light OS. A single combined selector cannot do both.
- */
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --paper: #17130f;
-    --surface: #211c17;
-    --sunk: #2a241d;
-    --hairline: #372f27;
-    --rule: #453b31;
-
-    --ink: #f2ede4;
-    --ink-2: #b3a899;
-    --ink-3: #8e8376;
-
-    --blue: #4da3f0;
-    --blue-deep: #7fbef7;
-    --blue-ink: #bedcfa;
-    --blue-tint: #12304c;
-
-    --bark: #2a2119;
-    --trail: #b08a66;
-    --clay: #c78e6e;
-    --clay-ink: #dbab90;
-    --wheat: #d9be97;
-    --moss: #5fa277;
-    --ochre: #d4a353;
-    --ochre-ink: #e0bc7e;
-    --rust: #d97463;
-    --worn-ink: #a794c6;
-
-    --w-worn: var(--worn-ink);
-
-    --shadow-drag: 0 8px 20px rgb(0 0 0 / 0.55);
-  }
-}
-
-:root[data-theme='dark'] {
-  --paper: #17130f;
-  --surface: #211c17;
-  --sunk: #2a241d;
-  --hairline: #372f27;
-  --rule: #453b31;
-
-  --ink: #f2ede4;
-  --ink-2: #b3a899;
-  --ink-3: #8e8376;
-
-  --blue: #4da3f0;
-  --blue-deep: #7fbef7;
-  --blue-ink: #bedcfa;
-  --blue-tint: #12304c;
-
-  --bark: #2a2119;
-  --trail: #b08a66;
-  --clay: #c78e6e;
-  --clay-ink: #dbab90;
-  --wheat: #d9be97;
-  --moss: #5fa277;
-  --ochre: #d4a353;
-  --ochre-ink: #e0bc7e;
-  --rust: #d97463;
-  --worn-ink: #a794c6;
-
-  --w-worn: var(--worn-ink);
-
-  --shadow-drag: 0 8px 20px rgb(0 0 0 / 0.55);
 }

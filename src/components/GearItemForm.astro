@@ -71,21 +71,27 @@ const { values, errors, submitLabel, cancelHref, intentField, categories, next, 
  *  a `g` suffix, which PK-67 calls out so it is not later filed as a bug. */
 const entryUnit = WEIGHT_ENTRY_UNIT[weightSystem];
 
-const errorEntries = Object.entries(errors);
-
-const INPUT_CLASS =
-  'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
-// SELECT_CLASS was here until PK-67 removed the weight-unit `<select>`, which was the
-// only one this form had — the Category field is a `datalist` and Status is a radio group,
-// both by deliberate choice (PK-63). There is now no `<select>` left to style.
-const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-24`;
-const LABEL_CLASS = 'text-ink-2 block text-sm';
-const ERROR_CLASS = 'text-rust mt-1 text-sm';
-/** One option in the status fieldset (PK-63) — a bordered, clickable card around the
- *  radio input and its label, echoing INPUT_CLASS's own border/radius vocabulary rather
- *  than inventing a second visual language just for this one field. */
-const STATUS_OPTION_CLASS =
-  'border-hairline has-[:checked]:border-blue-deep has-[:checked]:bg-blue-tint flex cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border px-3 py-2 text-sm';
+// PK-64 (Notebook Paper): every control below reads its box, label, hint and error
+// styling straight off src/styles/paper.css's vocabulary — `.field` / `.field-label` /
+// `.field-error` / `.field-required` for every text input, textarea and the date input,
+// and `.segmented` / `.segment` for Status (see that field's own comment further down).
+// There is no local class-constant table any more: the INPUT_CLASS / LABEL_CLASS /
+// ERROR_CLASS / STATUS_OPTION_CLASS strings this used to declare duplicated exactly what
+// paper.css now names once. The one rule to hold onto from that era: NEVER reach for the
+// `font:` shorthand anywhere in this file — see paper.css's own header comment for why a
+// later shorthand naming the system face silently overrides an earlier written-face rule
+// of equal specificity. That bug put every field in this exact form into the wrong voice
+// twice in the prototype this file's language is ported from.
+//
+// The error SUMMARY that used to render here — "Fix the following before saving:" — is
+// gone from this component entirely, not merely restyled. DESIGN.md §2.5: a note may
+// only lie directly on the paper, never on a sheet, and this component is always
+// rendered from inside one (see the shape both new.astro and [id].astro now share). Both
+// pages already hold the same `errors`/`formErrors` this component receives as a prop, so
+// each renders that summary itself, as a `.note.note-danger` ABOVE its `.sheet`, exactly
+// where the PK-64 reference shots put it — see either page's own frontmatter for where. What
+// stays here is the field-level error text beside each control, which the mockup keeps
+// inside the sheet because it is scoped to one box rather than the whole submission.
 
 function describedBy(field: string): string | undefined {
   return errors[field] ? `${field}-error` : undefined;
@@ -107,7 +113,7 @@ function invalid(field: string): 'true' | undefined {
 const acquiredOnMax = acquiredOnFutureCutoff();
 ---
 
-<form method="POST" class="space-y-5">
+<form method="POST">
   {intentField && <input type="hidden" name={intentField.name} value={intentField.value} />}
   {
     /* The same mechanism sign-in.astro and sign-up.astro use for their own `next`
@@ -121,377 +127,395 @@ const acquiredOnMax = acquiredOnFutureCutoff();
   }
   {next !== undefined && <input type="hidden" name={NEXT_PARAM} value={next} />}
 
-  {
-    errorEntries.length > 0 && (
-      <div
-        role="alert"
-        class="border-rust/40 bg-rust/10 text-ink rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-      >
-        <p class="font-medium">Fix the following before saving:</p>
-        <ul class="mt-2 list-disc space-y-1 pl-5">
-          {errorEntries.map(([, message]) => (
-            <li>{message}</li>
-          ))}
-        </ul>
-      </div>
-    )
-  }
-
-  <div>
-    <label for="name" class={LABEL_CLASS}>
-      Name <span aria-hidden="true" class="text-rust">*</span>
-    </label>
-    <input
-      id="name"
-      name={GEAR_FORM_FIELD.name}
-      type="text"
-      value={values.name}
-      aria-required="true"
-      aria-describedby={describedBy('name')}
-      aria-invalid={invalid('name')}
-      class={INPUT_CLASS}
-    />
-    {
-      /* NOT the HTML `required` attribute, deliberately. `required` triggers native
-         constraint validation, which blocks the form submit entirely in-browser the
-         moment Name is blank — the visitor never leaves the page, `parseGearItemForm`
-         never runs, and this ticket's own acceptance criterion ("a blank Name re-renders
-         the form with the field outlined in --rust") could not be demonstrated in a
-         browser, because the browser would refuse the submit first — constraint
-         validation is bypassed by `novalidate` and by any non-browser client, so the
-         server path this comment describes always runs regardless. `aria-required`
-         communicates the same thing to assistive tech without touching submission
-         behaviour, and the red asterisk communicates it visually; the actual
-         enforcement — and the --rust border on `errors.name` below — stays entirely
-         server-side in parseGearItemForm, same as every other field on this form. */
-    }
-    {
-      errors.name && (
-        <p id="name-error" class={ERROR_CLASS}>
-          {errors.name}
-        </p>
-      )
-    }
-  </div>
-
-  <div class="grid gap-5 sm:grid-cols-2">
+  <div class="flex flex-col gap-5">
     <div>
-      <label for="brand" class={LABEL_CLASS}> Brand </label>
+      <label for="name" class="field-label">
+        Name <span aria-hidden="true" class="field-required">*</span>
+      </label>
       <input
-        id="brand"
-        name={GEAR_FORM_FIELD.brand}
+        id="name"
+        name={GEAR_FORM_FIELD.name}
         type="text"
-        value={values.brand}
-        class={INPUT_CLASS}
+        value={values.name}
+        aria-required="true"
+        aria-describedby={describedBy('name')}
+        aria-invalid={invalid('name')}
+        class="field mt-1 w-full"
       />
-    </div>
-    <div>
-      <label for="category" class={LABEL_CLASS}> Category </label>
       {
-        /* `list`/`<datalist>`, not a `<select>` (PK-63). A datalist only SUGGESTS —
-           the input stays free text, so typing a brand-new category a visitor's closet
-           has never seen works exactly as it did before this field grew suggestions, and
-           `parseGearItemForm` goes on receiving a bare string it validates the same way
-           regardless of whether it came from a click or was typed by hand. A `<select>`
-           would have to either invent an "Other" escape hatch or reject any category not
-           already in `categories`, and this ticket asks for neither. */
+        /* NOT the HTML `required` attribute, deliberately. `required` triggers native
+           constraint validation, which blocks the form submit entirely in-browser the
+           moment Name is blank — the visitor never leaves the page, `parseGearItemForm`
+           never runs, and this ticket's own acceptance criterion ("a blank Name re-renders
+           the form with the field outlined in --rust") could not be demonstrated in a
+           browser, because the browser would refuse the submit first — constraint
+           validation is bypassed by `novalidate` and by any non-browser client, so the
+           server path this comment describes always runs regardless. `aria-required`
+           communicates the same thing to assistive tech without touching submission
+           behaviour, and the red asterisk communicates it visually; the actual
+           enforcement — and the --rust border `.field[aria-invalid='true']` draws on
+           `errors.name` below — stays entirely server-side in parseGearItemForm, same as
+           every other field on this form. */
       }
-      <input
-        id="category"
-        name={GEAR_FORM_FIELD.category}
-        type="text"
-        list="category-options"
-        value={values.category}
-        class={INPUT_CLASS}
-      />
-      <datalist id="category-options">
-        {categories.map((category) => <option value={category} />)}
-      </datalist>
-    </div>
-  </div>
-
-  <div>
-    <label for="description" class={LABEL_CLASS}> Description </label>
-    <textarea id="description" name={GEAR_FORM_FIELD.description} class={TEXTAREA_CLASS}
-      >{values.description}</textarea
-    >
-  </div>
-
-  {
-    /* Two columns, not three: PK-67 removed the weight-unit `<select>` that was the third,
-      so Quantity and Weight now share the row evenly rather than leaving a gap where the
-      unit picker used to be. */
-  }
-  <div class="grid gap-5 sm:grid-cols-2">
-    <div>
-      <label for="quantity" class={LABEL_CLASS}> Quantity </label>
-      <input
-        id="quantity"
-        name={GEAR_FORM_FIELD.quantity}
-        type="text"
-        inputmode="numeric"
-        value={values.quantity}
-        aria-describedby={describedBy('quantity')}
-        aria-invalid={invalid('quantity')}
-        class={INPUT_CLASS}
-      />
       {
-        errors.quantity && (
-          <p id="quantity-error" class={ERROR_CLASS}>
-            {errors.quantity}
+        errors.name && (
+          <p id="name-error" class="field-error">
+            {errors.name}
           </p>
         )
       }
     </div>
-    {
-      /* PK-67: one control where there were two. The `<select>` of four units that stood
-        beside this input is gone with the column behind it — the unit is one account-level
-        setting now, so re-picking it per item was asking a per-person question once per
-        row. What replaces it is not a control at all but a SUFFIX: the account's entry
-        unit, rendered beside the box so the visitor can see which unit they are typing in
-        without being able to change it here. `/account` is where it changes.
 
-        THE SUFFIX IS LABEL TEXT, NOT DECORATION, which is why it is inside the `<label>`
-        rather than floated next to the input. A screen reader announcing "Weight" and
-        nothing else would leave the one fact this field depends on unspoken, and a purely
-        visual suffix is exactly the shape that happens in. Putting it in the label makes
-        the accessible name "Weight (g)" — the sighted and unsighted readings are then the
-        same string rather than two things kept in step by hand.
-
-        `aria-describedby` still points only at the error, deliberately: the unit is part of
-        what this field IS, not a hint about it. */
-    }
-    <div>
-      <label for="weight" class={LABEL_CLASS}>
-        Weight ({entryUnit})
-      </label>
-      <div class="relative">
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label for="brand" class="field-label"> Brand </label>
         <input
-          id="weight"
-          name={GEAR_FORM_FIELD.weight}
+          id="brand"
+          name={GEAR_FORM_FIELD.brand}
           type="text"
-          inputmode="decimal"
-          value={values.weight}
-          aria-describedby={describedBy('weight')}
-          aria-invalid={invalid('weight')}
-          class={`${INPUT_CLASS} pr-10`}
+          value={values.brand}
+          class="field mt-1 w-full"
+        />
+      </div>
+      <div>
+        <label for="category" class="field-label"> Category </label>
+        {
+          /* `list`/`<datalist>`, not a `<select>` (PK-63). A datalist only SUGGESTS —
+             the input stays free text, so typing a brand-new category a visitor's closet
+             has never seen works exactly as it did before this field grew suggestions, and
+             `parseGearItemForm` goes on receiving a bare string it validates the same way
+             regardless of whether it came from a click or was typed by hand. A `<select>`
+             would have to either invent an "Other" escape hatch or reject any category not
+             already in `categories`, and this ticket asks for neither. */
+        }
+        <input
+          id="category"
+          name={GEAR_FORM_FIELD.category}
+          type="text"
+          list="category-options"
+          value={values.category}
+          class="field mt-1 w-full"
+        />
+        <datalist id="category-options">
+          {categories.map((category) => <option value={category} />)}
+        </datalist>
+      </div>
+    </div>
+
+    <div>
+      <label for="description" class="field-label"> Description </label>
+      <textarea id="description" name={GEAR_FORM_FIELD.description} class="field mt-1 w-full"
+        >{values.description}</textarea
+      >
+    </div>
+
+    {
+      /* Two columns, not three: PK-67 removed the weight-unit `<select>` that was the third,
+        so Quantity and Weight now share the row evenly rather than leaving a gap where the
+        unit picker used to be. */
+    }
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label for="quantity" class="field-label"> Quantity </label>
+        <input
+          id="quantity"
+          name={GEAR_FORM_FIELD.quantity}
+          type="text"
+          inputmode="numeric"
+          value={values.quantity}
+          aria-describedby={describedBy('quantity')}
+          aria-invalid={invalid('quantity')}
+          class="field mt-1 w-full"
         />
         {
-          /* aria-hidden because the label above already says the unit; announcing it twice
-            would read as "Weight g, edit text, g". Purely the visual half of the pairing. */
+          errors.quantity && (
+            <p id="quantity-error" class="field-error">
+              {errors.quantity}
+            </p>
+          )
         }
-        <span
-          aria-hidden="true"
-          class="text-ink-3 pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm"
-        >
-          {entryUnit}
-        </span>
       </div>
       {
-        errors.weight && (
-          <p id="weight-error" class={ERROR_CLASS}>
-            {errors.weight}
-          </p>
-        )
-      }
-    </div>
-  </div>
+        /* PK-67: one control where there were two. The `<select>` of four units that stood
+          beside this input is gone with the column behind it — the unit is one account-level
+          setting now, so re-picking it per item was asking a per-person question once per
+          row. What replaces it is not a control at all but a SUFFIX: the account's entry
+          unit, rendered beside the box so the visitor can see which unit they are typing in
+          without being able to change it here. `/account` is where it changes.
 
-  <div class="grid gap-5 sm:grid-cols-2">
-    <div>
-      <label for="price" class={LABEL_CLASS}> Price </label>
-      <input
-        id="price"
-        name={GEAR_FORM_FIELD.price}
-        type="text"
-        inputmode="decimal"
-        value={values.price}
-        aria-describedby={describedBy('price')}
-        aria-invalid={invalid('price')}
-        class={INPUT_CLASS}
-      />
-      {
-        errors.price && (
-          <p id="price-error" class={ERROR_CLASS}>
-            {errors.price}
-          </p>
-        )
-      }
-    </div>
-    <div>
-      <label for="currency" class={LABEL_CLASS}> Currency </label>
-      <input
-        id="currency"
-        name={GEAR_FORM_FIELD.currency}
-        type="text"
-        placeholder="GBP"
-        value={values.currency}
-        aria-describedby={describedBy('currency')}
-        aria-invalid={invalid('currency')}
-        class={INPUT_CLASS}
-      />
-      {
-        errors.currency && (
-          <p id="currency-error" class={ERROR_CLASS}>
-            {errors.currency}
-          </p>
-        )
-      }
-    </div>
-  </div>
+          THE SUFFIX IS LABEL TEXT, NOT DECORATION, which is why it is inside the `<label>`
+          rather than floated next to the input. A screen reader announcing "Weight" and
+          nothing else would leave the one fact this field depends on unspoken, and a purely
+          visual suffix is exactly the shape that happens in. Putting it in the label makes
+          the accessible name "Weight (g)" — the sighted and unsighted readings are then the
+          same string rather than two things kept in step by hand.
 
-  <div class="grid gap-5 sm:grid-cols-2">
-    <div>
-      <label for="acquired_on" class={LABEL_CLASS}> Added </label>
-      {
-        /* A native <input type="date">, not a JS date-picker component (PK-61) — the
-           calendar popup a visitor sees here is the BROWSER'S OWN, which is the entire
-           reason this is a native date input rather than anything fancier: it needs no
-           script to render or to submit, exactly like every other field in this
-           component (see the module comment's "KEEP THIS A PLAIN .astro COMPONENT"
-           rule), and it keeps working with JavaScript disabled the same way. */
+          `aria-describedby` still points only at the error, deliberately: the unit is part of
+          what this field IS, not a hint about it.
+
+          THE FLOATING SUFFIX SPAN BELOW TAKES `.written.written` (PK-64), not the system
+          face the label above it keeps: DESIGN.md §4 calls out a unit beside a weight as
+          written because it is half of a value the visitor did type — the closet renders
+          "539 g" entirely in the hand, and setting the box's own "539" in Klee One while
+          this floating "g" stayed in Inter would split one quantity across two voices, the
+          exact split this design's two-voices rule exists to prevent. `.field` already
+          sets the box's own value to the written face; this span is a sibling of the
+          `<input>`, not inside it, so it needs the escape hatch rather than inheriting one. */
       }
-      <input
-        id="acquired_on"
-        name={GEAR_FORM_FIELD.acquiredOn}
-        type="date"
-        value={values.acquired_on}
-        max={acquiredOnMax}
-        aria-describedby={describedBy('acquired_on')}
-        aria-invalid={invalid('acquired_on')}
-        class={INPUT_CLASS}
-      />
-      {
-        /* Echoes the REJECTED value back inside the error message rather than trusting
-           the box above to still show it. HTML's value-sanitization algorithm for
-           `type="date"` blanks the input's value to "" whenever it is not a syntactically
-           valid date string — so a rejected `2026-02-30` (or `2026-2-3`, or any other
-           malformed shape ACQUIRED_ON_PATTERN refuses) makes the browser clear the box
-           on THIS re-render, even though `values.acquired_on` still faithfully carries
-           what was typed. Without this echo, the visitor would see "Enter a valid date
-           (...)" above a box the browser had already emptied for them — the rejected
-           date silently downgraded to "I don't know", and simply resubmitting from there
-           stores `null` instead of the correction they meant to make. Quoting the value
-           back inside the message keeps that state legible even when the box itself goes
-           blank, and keeps faith with parseGearItemForm's own promise that `values`
-           carries back exactly what the visitor typed. (A genuinely future date like
-           `9999-12-31` IS a syntactically valid date, so the browser does not blank that
-           one — but echoing it here too costs nothing and keeps the message's wording
-           uniform across both rejection reasons.) */
-      }
-      {
-        errors.acquired_on && (
-          <p id="acquired_on-error" class={ERROR_CLASS}>
-            {values.acquired_on.trim() === ''
-              ? errors.acquired_on
-              : `“${values.acquired_on}” is not a date this form can store. ${errors.acquired_on}`}
-          </p>
-        )
-      }
-    </div>
-    <div>
-      {
-        /* A radio group, not a `<select>` (PK-63). This makes "exactly one status" a
-           STRUCTURAL property of the markup — the browser itself refuses to let two
-           radios in the same `name` group be checked at once — rather than one this
-           component or a script would have to enforce. It works identically with
-           JavaScript disabled, same as every other field on this form: the group posts
-           whichever `value` was checked, or nothing at all if none was, and
-           `parseGearItemForm` is exactly as able to make sense of either outcome as it
-           was reading a `<select>`'s single value. */
-      }
-      {
-        /* aria-describedby AND aria-invalid GO ON THE RADIOS, NOT THE FIELDSET. A
-           `<fieldset>` maps to role `group`, which does not support `aria-invalid` — put
-           it there and assistive technology ignores it, so the field reads as valid while
-           an error is showing. `aria-describedby` on the fieldset is likewise unreliable
-           here: a screen-reader user arrowing between radios is inside the group, not on
-           it, so the description is not necessarily re-announced. Both attributes are
-           therefore repeated on every `<input type="radio">`, which is where a visitor's
-           focus actually lands. The fieldset keeps the `<legend>`, which is what it is
-           genuinely for. */
-      }
-      <fieldset>
-        <legend class={LABEL_CLASS}>Status</legend>
-        <div class="mt-1 grid gap-2">
+      <div>
+        <label for="weight" class="field-label">
+          Weight ({entryUnit})
+        </label>
+        <div class="relative">
+          <input
+            id="weight"
+            name={GEAR_FORM_FIELD.weight}
+            type="text"
+            inputmode="decimal"
+            value={values.weight}
+            aria-describedby={describedBy('weight')}
+            aria-invalid={invalid('weight')}
+            class="field mt-1 w-full pr-10"
+          />
           {
-            GEAR_STATUSES.map((status) => (
-              <label class={STATUS_OPTION_CLASS} title={GEAR_STATUS_MEANINGS[status]}>
-                <input
-                  type="radio"
-                  name={GEAR_FORM_FIELD.status}
-                  value={status}
-                  checked={status === values.status}
-                  aria-describedby={describedBy('status')}
-                  aria-invalid={invalid('status')}
-                />
-                <GearStatusIcon status={status} decorative />
-                {formatGearStatus(status)}
-              </label>
-            ))
+            /* aria-hidden because the label above already says the unit; announcing it twice
+              would read as "Weight g, edit text, g". Purely the visual half of the pairing. */
           }
+          <span
+            aria-hidden="true"
+            class="written written text-ink-3 pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm"
+          >
+            {entryUnit}
+          </span>
         </div>
-      </fieldset>
+        {
+          errors.weight && (
+            <p id="weight-error" class="field-error">
+              {errors.weight}
+            </p>
+          )
+        }
+      </div>
+    </div>
+
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label for="price" class="field-label"> Price </label>
+        <input
+          id="price"
+          name={GEAR_FORM_FIELD.price}
+          type="text"
+          inputmode="decimal"
+          value={values.price}
+          aria-describedby={describedBy('price')}
+          aria-invalid={invalid('price')}
+          class="field mt-1 w-full"
+        />
+        {
+          errors.price && (
+            <p id="price-error" class="field-error">
+              {errors.price}
+            </p>
+          )
+        }
+      </div>
+      <div>
+        <label for="currency" class="field-label"> Currency </label>
+        <input
+          id="currency"
+          name={GEAR_FORM_FIELD.currency}
+          type="text"
+          placeholder="GBP"
+          value={values.currency}
+          aria-describedby={describedBy('currency')}
+          aria-invalid={invalid('currency')}
+          class="field mt-1 w-full"
+        />
+        {
+          errors.currency && (
+            <p id="currency-error" class="field-error">
+              {errors.currency}
+            </p>
+          )
+        }
+      </div>
+    </div>
+
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label for="acquired_on" class="field-label"> Added </label>
+        {
+          /* A native <input type="date">, not a JS date-picker component (PK-61) — the
+             calendar popup a visitor sees here is the BROWSER'S OWN, which is the entire
+             reason this is a native date input rather than anything fancier: it needs no
+             script to render or to submit, exactly like every other field in this
+             component (see the module comment's "KEEP THIS A PLAIN .astro COMPONENT"
+             rule), and it keeps working with JavaScript disabled the same way. */
+        }
+        <input
+          id="acquired_on"
+          name={GEAR_FORM_FIELD.acquiredOn}
+          type="date"
+          value={values.acquired_on}
+          max={acquiredOnMax}
+          aria-describedby={describedBy('acquired_on')}
+          aria-invalid={invalid('acquired_on')}
+          class="field mt-1 w-full"
+        />
+        {
+          /* Echoes the REJECTED value back inside the error message rather than trusting
+             the box above to still show it. HTML's value-sanitization algorithm for
+             `type="date"` blanks the input's value to "" whenever it is not a syntactically
+             valid date string — so a rejected `2026-02-30` (or `2026-2-3`, or any other
+             malformed shape ACQUIRED_ON_PATTERN refuses) makes the browser clear the box
+             on THIS re-render, even though `values.acquired_on` still faithfully carries
+             what was typed. Without this echo, the visitor would see "Enter a valid date
+             (...)" above a box the browser had already emptied for them — the rejected
+             date silently downgraded to "I don't know", and simply resubmitting from there
+             stores `null` instead of the correction they meant to make. Quoting the value
+             back inside the message keeps that state legible even when the box itself goes
+             blank, and keeps faith with parseGearItemForm's own promise that `values`
+             carries back exactly what the visitor typed. (A genuinely future date like
+             `9999-12-31` IS a syntactically valid date, so the browser does not blank that
+             one — but echoing it here too costs nothing and keeps the message's wording
+             uniform across both rejection reasons.) */
+        }
+        {
+          errors.acquired_on && (
+            <p id="acquired_on-error" class="field-error">
+              {values.acquired_on.trim() === ''
+                ? errors.acquired_on
+                : `“${values.acquired_on}” is not a date this form can store. ${errors.acquired_on}`}
+            </p>
+          )
+        }
+      </div>
+      <div>
+        {
+          /* PK-64: presented as ONE SEGMENTED CONTROL (DESIGN.md §6), not the bordered
+             radio cards this used to draw — a choice of three or fewer says "exactly one
+             of these is true", which a stack of independently-bordered options only
+             implies. What is UNCHANGED is more load-bearing than what is not: these are
+             still real `<input type="radio">` elements sharing one `name`, so "exactly
+             one status" stays a STRUCTURAL property of the markup — the browser itself
+             refuses to let two radios in the same group be checked at once — rather than
+             one this component or a script would have to enforce, and it works
+             identically with JavaScript disabled, same as every other field on this form:
+             the group posts whichever `value` was checked, or nothing at all if none was,
+             and `parseGearItemForm` is exactly as able to make sense of either outcome as
+             it was reading a `<select>`'s single value. `.segment`'s own CSS positions
+             each `<input>` as an invisible full-size overlay on its `<label>` (see
+             paper.css) — the segment styling goes on the label, the radio itself is
+             untouched markup. */
+        }
+        {
+          /* aria-describedby AND aria-invalid GO ON THE RADIOS, NOT THE FIELDSET. A
+             `<fieldset>` maps to role `group`, which does not support `aria-invalid` — put
+             it there and assistive technology ignores it, so the field reads as valid while
+             an error is showing. `aria-describedby` on the fieldset is likewise unreliable
+             here: a screen-reader user arrowing between radios is inside the group, not on
+             it, so the description is not necessarily re-announced. Both attributes are
+             therefore repeated on every `<input type="radio">`, which is where a visitor's
+             focus actually lands. The fieldset keeps the `<legend>`, which is what it is
+             genuinely for. */
+        }
+        <fieldset>
+          <legend class="field-label">Status</legend>
+          <div class="segmented mt-1 w-full">
+            {
+              GEAR_STATUSES.map((status) => {
+                const checked = status === values.status;
+                return (
+                  <label class="segment" title={GEAR_STATUS_MEANINGS[status]}>
+                    <input
+                      type="radio"
+                      name={GEAR_FORM_FIELD.status}
+                      value={status}
+                      checked={checked}
+                      aria-describedby={describedBy('status')}
+                      aria-invalid={invalid('status')}
+                    />
+                    {/* GearStatusIcon bakes its own accent colour (moss/ochre-ink/rust)
+                         onto the `<svg>` as a plain Tailwind colour utility, unconditionally
+                         — see that component's `svgClass`. Left alone, that utility sits in
+                         the UTILITIES layer and beats `.segment:has(input:checked)`'s
+                         `color: var(--paper)` regardless of source order or specificity
+                         (paper.css's own warning on `.segmented`), so the checked segment's
+                         icon would stay coloured instead of reversing out white on the ink
+                         fill the way the PK-64 reference shots show it. The `text-paper!` override
+                         below is scoped to exactly the checked case for exactly that
+                         reason: Tailwind v4's trailing `!` forces `!important`, which is
+                         the one thing that reliably outranks another utility of the same
+                         property regardless of generation order. Left undefined on an
+                         unchecked segment, GearStatusIcon's own accent is exactly the
+                         colour the mockup wants there, so nothing further is needed. */}
+                    <GearStatusIcon
+                      status={status}
+                      decorative
+                      class={checked ? 'text-paper!' : undefined}
+                    />
+                    {formatGearStatus(status)}
+                  </label>
+                );
+              })
+            }
+          </div>
+        </fieldset>
+        {
+          /* If `values.status` matches none of GEAR_STATUSES — a tampered or otherwise
+             stale submission `parseGearItemForm` has already rejected via `errors.status`
+             — NO segment ends up checked here. That is correct, not a bug to paper over:
+             this component makes no decisions (see the header comment), so it has no
+             business inventing a silent fallback to `owned` for a value the parser itself
+             refused. The visitor sees the error below and an unchecked group, which is an
+             honest reflection of "you did not tell us a valid status", not a wrong answer
+             picked on their behalf. */
+        }
+        {
+          errors.status && (
+            <p id="status-error" class="field-error">
+              {errors.status}
+            </p>
+          )
+        }
+      </div>
+    </div>
+
+    <div>
+      <label for="url" class="field-label"> Web address </label>
+      <input
+        id="url"
+        name={GEAR_FORM_FIELD.url}
+        type="text"
+        placeholder="https://"
+        value={values.url}
+        aria-describedby={describedBy('url')}
+        aria-invalid={invalid('url')}
+        class="field mt-1 w-full"
+      />
       {
-        /* If `values.status` matches none of GEAR_STATUSES — a tampered or otherwise
-           stale submission `parseGearItemForm` has already rejected via `errors.status`
-           — NO radio ends up checked here. That is correct, not a bug to paper over: this
-           component makes no decisions (see the header comment), so it has no business
-           inventing a silent fallback to `owned` for a value the parser itself refused.
-           The visitor sees the error below and an unchecked group, which is an honest
-           reflection of "you did not tell us a valid status", not a wrong answer picked
-           on their behalf. */
-      }
-      {
-        errors.status && (
-          <p id="status-error" class={ERROR_CLASS}>
-            {errors.status}
+        errors.url && (
+          <p id="url-error" class="field-error">
+            {errors.url}
           </p>
         )
       }
     </div>
+
+    <div>
+      <label for="notes" class="field-label"> Notes </label>
+      <textarea id="notes" name={GEAR_FORM_FIELD.notes} class="field mt-1 w-full"
+        >{values.notes}</textarea
+      >
+    </div>
   </div>
 
-  <div>
-    <label for="url" class={LABEL_CLASS}> Web address </label>
-    <input
-      id="url"
-      name={GEAR_FORM_FIELD.url}
-      type="text"
-      placeholder="https://"
-      value={values.url}
-      aria-describedby={describedBy('url')}
-      aria-invalid={invalid('url')}
-      class={INPUT_CLASS}
-    />
-    {
-      errors.url && (
-        <p id="url-error" class={ERROR_CLASS}>
-          {errors.url}
-        </p>
-      )
-    }
-  </div>
+  <hr class="sheet-rule" />
 
-  <div>
-    <label for="notes" class={LABEL_CLASS}> Notes </label>
-    <textarea id="notes" name={GEAR_FORM_FIELD.notes} class={TEXTAREA_CLASS}
-      >{values.notes}</textarea
-    >
-  </div>
-
-  <div class="flex gap-3 pt-2">
-    <button
-      type="submit"
-      class="border-blue-deep text-blue-deep hover:bg-blue-tint rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-    >
+  <div class="flex gap-3">
+    <button type="submit" class="btn btn-primary">
       {submitLabel}
     </button>
-    <a
-      href={cancelHref}
-      class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors"
-    >
-      Cancel
-    </a>
+    <a href={cancelHref} class="btn"> Cancel </a>
   </div>
 </form>

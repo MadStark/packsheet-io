@@ -1,6 +1,5 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import ThemeToggle from '../components/ThemeToggle.vue';
 // A path constant, not the auth SDK — safe for this prerendered, anonymous page to
 // import. See src/lib/auth-routes.ts's own header comment for why this file exists
 // separately from src/lib/auth/, and src/lib/auth/index.ts's "corollary of an edge
@@ -16,58 +15,226 @@ const description =
   'A free, open-source gear tracker for hikers. Build a gear closet once, compose it into a packsheet for every trip, and share a page reviewers actually want to read.';
 
 const repoUrl = 'https://github.com/MadStark/packsheet-io';
+
+// The three commitments, set as a small ledger rather than a bulleted list — see the
+// markup. Kept in step with placeholder/pages/index.astro, which states the same three.
+const promises = [
+  'Free forever. No paywall, no ads.',
+  'Open source from the first commit.',
+  'Your data is always exportable.',
+];
+
+/**
+ * A SPECIMEN, NOT DATA. These five rows are static marketing content: they are never
+ * fetched, never belong to anybody, and must not be mistaken for a closet.
+ *
+ * WHY THIS SHEET EXISTS AT ALL, because it looks like decoration and is not. §4's rule is
+ * that the written voice sets what the VISITOR wrote — and a visitor who has not signed in
+ * has written nothing, so by the letter of the rule this whole page is Inter and the page
+ * introducing the product looks nothing like the product. The answer is not to smuggle the
+ * hand in decoratively; it is to SHOW the product. These rows depict somebody's data, so
+ * the written voice appears here honestly. It is also a better landing page than a
+ * paragraph describing one: a stranger sees what a packsheet *is* in about two seconds.
+ *
+ * The category colour is a fill on a dot and never the text colour — most of the ten fail
+ * AA as text, which is why tokens.css calls them fill-only.
+ */
+const specimen: readonly {
+  name: string;
+  brand: string;
+  category: string;
+  colour: string;
+  grams: number;
+}[] = [
+  {
+    name: 'Duplex Tent',
+    brand: 'Zpacks',
+    category: 'Shelter',
+    colour: 'var(--c-shelter)',
+    grams: 539,
+  },
+  {
+    name: 'Southwest 3400',
+    brand: 'Hyperlite',
+    category: 'Pack',
+    colour: 'var(--c-pack)',
+    grams: 907,
+  },
+  {
+    name: 'Palisade 30 Quilt',
+    brand: 'Katabatic Gear',
+    category: 'Sleep',
+    colour: 'var(--c-sleep)',
+    grams: 595,
+  },
+  {
+    name: 'Alpha 90 Hoodie',
+    brand: 'Senchi Designs',
+    category: 'Clothing',
+    colour: 'var(--c-clothing)',
+    grams: 128,
+  },
+  {
+    name: 'Squeeze Filter',
+    brand: 'Sawyer',
+    category: 'Water',
+    colour: 'var(--c-water)',
+    grams: 85,
+  },
+];
+
+const specimenBaseWeight = specimen.reduce((total, item) => total + item.grams, 0);
+const grams = new Intl.NumberFormat('en-GB');
 ---
 
 <Layout title={title} description={description}>
-  <main class="mx-auto flex min-h-svh max-w-2xl flex-col justify-center px-6 py-16">
-    <header class="flex items-baseline justify-between gap-4">
-      <p class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase">Coming soon</p>
-      <div class="flex items-center gap-4">
+  {
+    /*
+    NO APP NAV ON THIS PAGE, and that is a decision rather than an omission. Closet, Packs
+    and Account are routes a signed-out visitor cannot reach, and the strip would repeat the
+    wordmark that the h1 below already is. "Sign in" lives on the cover sheet instead.
+
+    TWO SHEETS AND NO NOTE. The cover, then the specimen. §2.5's no-overlap rule retired the
+    note-on-a-sheet — the language's old emphasis device — so emphasis here comes from rules,
+    size and position. 30px between sheets, so the paper shows through.
+  */
+  }
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
+    <div class="sheet">
+      <div class="sheet-body">
+        <header class="flex items-start justify-between gap-6">
+          <p class="eyebrow">Coming soon</p>
+          {
+            /*
+            A quiet link, not a gate: the ticket is explicit that nothing stands between a
+            visitor and the product on this page — no signup wall, no modal, no redirect.
+          */
+          }
+          <a href={SIGN_IN_PATH} class="btn btn-primary shrink-0 no-underline">Sign in</a>
+        </header>
+
         {
           /*
-          A quiet link, not a gate: the ticket is explicit that nothing stands between
-          a visitor and the product on this page — no signup wall, no modal, no
-          redirect. text-blue-deep for the same AA-contrast reason as the GitHub link
-          below (plain --blue is 4.48:1 on --paper, under the AA floor).
+          The wordmark at display size. §4 allows a landing wordmark to go to 54/60, which is
+          larger than the 34/40 page title every other page uses.
         */
         }
-        <a href={SIGN_IN_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline"
-          >Sign in</a
-        >
-        <ThemeToggle client:load />
+        <h1 class="mt-2 text-[54px] leading-[60px] font-semibold">Packsheet</h1>
+
+        <p class="lead text-ink-2 mt-4 max-w-prose">
+          A free, open gear tracker for hikers. Build a gear closet once, then compose it into a
+          packsheet for each trip — the list you plan with, and the page you share.
+        </p>
+
+        {
+          /*
+          The three free-forever promises set as a small ledger — 40px rows on hairlines with a
+          moss dot each — rather than as a bulleted list borrowed from elsewhere. The product's
+          own vocabulary, used to state what the product promises.
+
+          The dot carries no meaning the text does not, so it is aria-hidden.
+        */
+        }
+        <ul class="border-hairline mt-8 max-w-prose border-t">
+          {
+            promises.map((promise) => (
+              <li class="border-hairline text-ink-2 flex h-10 items-center gap-3 border-b text-sm">
+                <span class="bg-moss size-[6px] shrink-0 rounded-full" aria-hidden="true" />
+                {promise}
+              </li>
+            ))
+          }
+        </ul>
+
+        {
+          /*
+          The hover colour is stated explicitly rather than inherited from the `a:hover` rule
+          in global.css: that rule lives in @layer base, which a utility class outranks, so
+          without this the link would have no hover feedback at all.
+
+          Underlined because Tailwind's preflight strips text-decoration, and colour alone is
+          not a sufficient cue that something is a link.
+        */
+        }
+        <p class="mt-10 text-sm">
+          <a href={repoUrl} class="text-blue-deep hover:text-blue-ink underline">Source on GitHub</a
+          >
+        </p>
       </div>
-    </header>
+    </div>
 
-    <h1 class="mt-8 text-4xl leading-[1.1] sm:text-5xl">Packsheet</h1>
+    <div class="sheet">
+      <div class="sheet-body">
+        <div class="flex items-baseline gap-4">
+          <h2 class="section-title">This is a packsheet</h2>
+          {
+            /*
+            THE ONE HAND-WRITTEN PHRASE THIS PAGE IS ALLOWED, and it sits on the specimen
+            rather than on the marketing copy — beside the rows it belongs to, where the
+            written voice is depicting somebody's list rather than decorating a sales pitch.
+          */
+          }
+          <p class="aside">every gram accounted for</p>
+        </div>
 
-    <p class="text-ink-2 mt-4 max-w-prose text-lg">
-      A free, open gear tracker for hikers. Build a gear closet once, then compose it into a
-      packsheet for each trip — the list you plan with, and the page you share.
-    </p>
-
-    <ul class="text-ink-2 mt-8 space-y-2 text-sm">
-      <li>Free forever. No paywall, no ads.</li>
-      <li>Open source from the first commit.</li>
-      <li>Your data is always exportable.</li>
-    </ul>
-
-    {
-      /*
-      text-blue-deep rather than the default link --blue: on the --paper page ground,
-      plain --blue is 4.48:1, under the 4.5 AA floor. --blue-deep clears it (6.27:1)
-      and still reads as the same blue, so "blue marks interactive" still holds.
-
-      The hover colour is stated explicitly rather than inherited from the `a:hover`
-      rule in global.css: that rule lives in @layer base, which a utility class
-      outranks, so without this the only link on the page would have no hover
-      feedback at all. --blue-ink is 9.99:1 light and 13.03:1 dark.
-
-      Underlined because Tailwind's preflight strips text-decoration, and colour
-      alone is not a sufficient cue that something is a link.
-    */
-    }
-    <p class="mt-10 text-sm">
-      <a href={repoUrl} class="text-blue-deep hover:text-blue-ink underline">Source on GitHub</a>
-    </p>
+        {
+          /*
+          ITEM NAMES ARE INK HERE, NOT BLUE, and this is a deliberate departure from the
+          prototype's specimen. Blue only ever marks something interactive or a base weight
+          (tokens.css rule 1, DESIGN.md §5). The prototype reused the closet's markup, where
+          a name IS a link to that item's page; nothing on this sheet is clickable, so a blue
+          name here would be the one decorative use of blue on the site.
+        */
+        }
+        <table class="ledger mt-6 w-full">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Brand</th>
+              <th scope="col">Category</th>
+              <th scope="col" class="text-right">Weight</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              specimen.map((item) => (
+                <tr>
+                  <td>{item.name}</td>
+                  <td>{item.brand}</td>
+                  <td>
+                    <span class="flex items-center gap-2">
+                      <span
+                        class="size-[10px] shrink-0 rounded-full"
+                        style={`background-color: ${item.colour}`}
+                        aria-hidden="true"
+                      />
+                      {item.category}
+                    </span>
+                  </td>
+                  <td class="numeric text-right">
+                    {grams.format(item.grams)}
+                    <span class="text-ink-3 ml-0.5 text-xs">g</span>
+                  </td>
+                </tr>
+              ))
+            }
+          </tbody>
+          <tfoot>
+            <tr>
+              {
+                /*
+                §7 — a totals row has a system LABEL and written figures. The label inherits
+                the system face; the figure carries .numeric, which is the written face.
+              */
+              }
+              <td colspan="3">Base weight</td>
+              <td class="numeric text-right">
+                {grams.format(specimenBaseWeight)}<span class="text-ink-3 ml-0.5 text-xs">g</span>
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
   </main>
 </Layout>

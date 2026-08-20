@@ -110,9 +110,10 @@
  *
  * Server-rendered, this is the pack's list with its live figures and its working forms, and
  * NOTHING that looks draggable: no grips, no `draggable`, no drop targets. The affordances
- * appear in `onMounted`, the same idiom `src/components/ThemeToggle.vue` uses for its icon
- * and for the same reason — a control that is drawn before it can work is a control that
- * lies for as long as the gap lasts.
+ * appear in `onMounted`, on the principle that a control drawn before it can work is a
+ * control that lies for as long as the gap lasts. `ThemeToggle.vue` used the same idiom for
+ * its icon and was this file's reference for it; PK-64 removed dark mode, so this component
+ * is now both the only `client:*` island in the app and the only place the idiom lives.
  */
 import { computed, onMounted, shallowRef } from 'vue';
 import { GripVertical } from 'lucide-vue-next';
@@ -245,32 +246,31 @@ const BUCKET_LABELS: Record<WeightBucket, string> = {
 };
 /** Blue for base weight is the one non-interactive use of blue the palette allows
  *  (CONTRIBUTING.md, and `--w-base` is literally `var(--blue)` in `src/styles/tokens.css`).
- *  The other two are their own tokens with their own dark cuts. None is decorative: each
- *  marks which total a number belongs to. Compiler-checked as a `Record<WeightBucket, …>` so
- *  a fourth bucket fails to build here rather than rendering uncoloured. */
+ *  The other two are aliases in the same shape — `--w-worn` is `var(--worn)` and
+ *  `--w-cons` is `var(--ochre)` — so each stays tied to the accent it means rather than
+ *  repeating its hex. (They used to be described as carrying dark cuts; PK-64 removed dark
+ *  mode, so no token in this product has one.) None is decorative: each marks which total a
+ *  number belongs to. Compiler-checked as a `Record<WeightBucket, …>` so a fourth bucket
+ *  fails to build here rather than rendering uncoloured. */
 const BUCKET_TEXT_CLASS: Record<WeightBucket, string> = {
   base: 'text-w-base',
   worn: 'text-w-worn',
   consumable: 'text-w-cons',
 };
 
-// Tailwind class strings, declared per file exactly as `src/pages/packs/[id].astro`,
-// `src/pages/packs/index.astro` and `src/components/GearItemForm.astro` each declare their
-// own. They are presentation, not a decision: nothing branches on them.
-const LABEL_CLASS = 'text-ink-2 block text-sm';
-const INPUT_CLASS =
-  'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
-const ERROR_CLASS = 'text-rust mt-1 text-sm';
-const QUIET_BUTTON_CLASS =
-  'border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors';
-const DANGER_BUTTON_CLASS =
-  'border-rust text-rust hover:bg-rust/10 rounded-[var(--r-sm)] border px-3 py-1.5 text-sm font-medium transition-colors';
-const CONFIRM_BUTTON_CLASS =
-  'bg-rust text-paper rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium transition-colors hover:brightness-95';
-const CANCEL_LINK_CLASS =
-  'border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors';
-const CARRIAGE_OPTION_CLASS =
-  'border-hairline has-[:checked]:border-blue-deep has-[:checked]:bg-blue-tint flex cursor-pointer items-center gap-1.5 rounded-[var(--r-sm)] border px-2 py-1 text-xs';
+// PK-64 (Notebook Paper). Class strings, declared per file exactly as
+// `src/pages/packs/[id].astro`, `src/pages/packs/index.astro` and
+// `src/components/GearItemForm.astro` each declare their own — but now naming paper.css's
+// vocabulary rather than a Tailwind box-and-border recipe. They are presentation, not a
+// decision: nothing branches on them. QUIET_BUTTON_CLASS and CANCEL_LINK_CLASS are the same
+// class (`.btn`, undecorated); kept as two names because that is what the call sites mean
+// even though the box is identical, the way `[id].astro` also keeps them apart.
+const LABEL_CLASS = 'field-label';
+const INPUT_CLASS = 'field mt-1 w-full';
+const ERROR_CLASS = 'field-error';
+const QUIET_BUTTON_CLASS = 'btn';
+const DANGER_BUTTON_CLASS = 'btn btn-danger';
+const CANCEL_LINK_CLASS = 'btn';
 
 // ---------------------------------------------------------------------------
 // State
@@ -765,123 +765,122 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
   -->
   <section
     aria-labelledby="pack-contents-heading"
-    class="mt-8"
+    class="sheet"
     @drop.prevent="onDrop"
     @dragend="endDrag"
     @dragleave="onDragLeave"
   >
-    <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-      <h2 id="pack-contents-heading" class="text-xl">Categories</h2>
-      <p class="text-ink-3 text-sm">
-        {{
-          enabled
-            ? 'Drag a category, or an item by its grip, to reorder it. Items can be dragged into another category. Reordering needs a pointer.'
-            : 'Everything in this pack, in the order it is stored in.'
-        }}
+    <div class="sheet-body">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+        <h2 id="pack-contents-heading" class="section-title">Categories</h2>
+        <p class="hint">
+          {{
+            enabled
+              ? 'Drag a category, or an item by its grip, to reorder it. Items can be dragged into another category. Reordering needs a pointer.'
+              : 'Everything in this pack, in the order it is stored in.'
+          }}
+        </p>
+      </div>
+
+      <!--
+        THE FIGURES, RENDERED ONCE ON THIS PAGE. Base, worn and consumable are the partition
+        `computeTotals` guarantees — the three add up to the total by definition, not by
+        coincidence — so they are rendered together rather than as one figure with the others
+        hidden behind a link. They are derived from the tree in front of the visitor, so a drag
+        that moves an item between categories redraws them; reordering moves no weight, so not
+        one of them may change when it does.
+
+        `.ledger-figures` (paper.css, DESIGN.md §7): flat inside this sheet, a hairline above
+        and hairlines between figures — not a second surface. Hidden when the pack has no
+        categories, per §9 ("an empty page has no figures to report"): every one of these
+        would read zero, and a row of zeros above an empty-state invitation is worse than no
+        row at all.
+      -->
+      <dl v-if="rows.length > 0" class="ledger-figures mt-8">
+        <div v-for="bucket in WEIGHT_BUCKETS" :key="bucket">
+          <dt>{{ BUCKET_LABELS[bucket] }}</dt>
+          <dd :class="`numeric ${BUCKET_TEXT_CLASS[bucket]}`">
+            {{ formatWeight(totals[bucket], props.weightSystem) }}
+          </dd>
+        </div>
+        <div>
+          <dt>Total</dt>
+          <dd class="numeric">{{ formatWeight(totals.total, props.weightSystem) }}</dd>
+        </div>
+        <div>
+          <dt>Packed</dt>
+          <dd class="numeric">{{ totals.packedCount }} / {{ totals.itemCount }}</dd>
+        </div>
+        <div v-if="prices.length > 0">
+          <dt>Cost</dt>
+          <dd class="numeric">{{ prices.map((money) => formatMoney(money)).join(' · ') }}</dd>
+        </div>
+      </dl>
+
+      <!--
+        TWO PERMANENT LIVE REGIONS, AND THE PERMANENCE IS THE POINT. A live region has to be in
+        the accessibility tree BEFORE its content changes: an assistive technology announces the
+        DIFFERENCE between what a region held and what it now holds, so a region that is
+        inserted already carrying its text has no previous state to differ from and the
+        announcement is commonly dropped entirely. That is what `v-if="notice"` on a single
+        element did — the element and its sentence appeared in the same tick, and "Order saved."
+        often went unspoken. Both elements below are always rendered; only their text changes.
+
+        TWO OF THEM RATHER THAN ONE WITH A SWAPPING `role`, for the same reason: changing a
+        live region's role or politeness after it is in the tree is not reliably picked up.
+        Keeping one polite `status` and one assertive `alert` means the politeness is decided by
+        WHICH element receives the text, which is a change assistive technology does observe.
+        Six of the seven outcomes in `src/lib/packs/reorder-response.ts` are errors and belong
+        in the assertive one; only `applied` is a status.
+
+        An empty region is `sr-only` rather than hidden: `display: none` and `hidden` take a
+        region out of the tree, which is the failure this markup exists to avoid, restated.
+
+        NEITHER IS A BOXED ALERT (DESIGN.md §2.5): a note may only lie directly on the paper,
+        never inside a sheet, and this notice is scoped to the list this sheet holds — so it
+        stays plain text in the system voice, rust for the error case, rather than growing a
+        second surface.
+      -->
+      <p role="status" :class="statusText === '' ? 'sr-only' : 'hint mt-4'">
+        {{ statusText }}
       </p>
-    </div>
-
-    <!--
-      THE FIGURES, RENDERED ONCE ON THIS PAGE. Base, worn and consumable are the partition
-      `computeTotals` guarantees — the three add up to the total by definition, not by
-      coincidence — so they are rendered together rather than as one figure with the others
-      hidden behind a link. They are derived from the tree in front of the visitor, so a drag
-      that moves an item between categories redraws them; reordering moves no weight, so not
-      one of them may change when it does.
-    -->
-    <dl
-      class="border-hairline bg-surface mt-4 flex flex-wrap gap-x-10 gap-y-4 rounded-[var(--r)] border p-5"
-    >
-      <div v-for="bucket in WEIGHT_BUCKETS" :key="bucket">
-        <dt class="text-ink-3 text-xs tracking-wide uppercase">{{ BUCKET_LABELS[bucket] }}</dt>
-        <dd :class="`numeric mt-1 text-lg font-medium ${BUCKET_TEXT_CLASS[bucket]}`">
-          {{ formatWeight(totals[bucket], props.weightSystem) }}
-        </dd>
-      </div>
-      <div>
-        <dt class="text-ink-3 text-xs tracking-wide uppercase">Total</dt>
-        <dd class="numeric text-ink mt-1 text-lg font-medium">
-          {{ formatWeight(totals.total, props.weightSystem) }}
-        </dd>
-      </div>
-      <div>
-        <dt class="text-ink-3 text-xs tracking-wide uppercase">Packed</dt>
-        <dd class="numeric text-ink mt-1 text-lg font-medium">
-          {{ totals.packedCount }} / {{ totals.itemCount }}
-        </dd>
-      </div>
-      <div v-if="prices.length > 0">
-        <dt class="text-ink-3 text-xs tracking-wide uppercase">Cost</dt>
-        <dd class="numeric text-ink mt-1 text-lg font-medium">
-          {{ prices.map((money) => formatMoney(money)).join(' · ') }}
-        </dd>
-      </div>
-    </dl>
-
-    <!--
-      TWO PERMANENT LIVE REGIONS, AND THE PERMANENCE IS THE POINT. A live region has to be in
-      the accessibility tree BEFORE its content changes: an assistive technology announces the
-      DIFFERENCE between what a region held and what it now holds, so a region that is
-      inserted already carrying its text has no previous state to differ from and the
-      announcement is commonly dropped entirely. That is what `v-if="notice"` on a single
-      element did — the element and its sentence appeared in the same tick, and "Order saved."
-      often went unspoken. Both elements below are always rendered; only their text changes.
-
-      TWO OF THEM RATHER THAN ONE WITH A SWAPPING `role`, for the same reason: changing a
-      live region's role or politeness after it is in the tree is not reliably picked up.
-      Keeping one polite `status` and one assertive `alert` means the politeness is decided by
-      WHICH element receives the text, which is a change assistive technology does observe.
-      Six of the seven outcomes in `src/lib/packs/reorder-response.ts` are errors and belong
-      in the assertive one; only `applied` is a status.
-
-      An empty region is `sr-only` rather than hidden: `display: none` and `hidden` take a
-      region out of the tree, which is the failure this markup exists to avoid, restated.
-    -->
-    <p role="status" :class="statusText === '' ? 'sr-only' : 'text-ink-2 mt-4 text-sm'">
-      {{ statusText }}
-    </p>
-    <p
-      role="alert"
-      :class="
-        errorText === ''
-          ? 'sr-only'
-          : 'border-rust/40 bg-rust/10 text-ink mt-4 rounded-[var(--r-sm)] border px-4 py-3 text-sm'
-      "
-    >
-      {{ errorText }}
-    </p>
-
-    <!--
-      A pack with no categories is a valid, ordinary state — a pack somebody made a minute
-      ago — and not an error. It renders as an invitation, and every total above it reads
-      zero, which is the truth about an empty pack.
-    -->
-    <div
-      v-if="rows.length === 0"
-      class="border-hairline bg-surface mt-4 rounded-[var(--r)] border px-6 py-12 text-center"
-    >
-      <p class="text-ink-2">This pack has no categories yet.</p>
-      <p class="text-ink-3 mt-2 text-sm">
-        Categories are how a pack is grouped — Shelter, Sleep, Cooking, or whatever matches the
-        trip. Add one below, then fill it from your closet.
+      <p role="alert" :class="errorText === '' ? 'sr-only' : 'hint text-rust mt-4'">
+        {{ errorText }}
       </p>
-    </div>
 
-    <ul v-else class="mt-4 space-y-6">
-      <li
-        v-for="(category, categoryIndex) in rows"
-        :key="category.id"
-        class="row border-hairline bg-surface rounded-[var(--r)] border"
-        :class="{
-          dragging: drag?.kind === 'category' && drag.id === category.id,
-          'drop-before': markerIsCategory(categoryIndex),
-          'drop-after': markerIsCategory(categoryIndex + 1) && categoryIndex === rows.length - 1,
-        }"
-        :draggable="draggable && grabbed === category.id"
-        @dragstart="beginDrag($event, { kind: 'category', id: category.id })"
-        @dragover="overCategory($event, categoryIndex)"
-      >
-        <!--
+      <!--
+        A pack with no categories is a valid, ordinary state — a pack somebody made a minute
+        ago — and not an error. It renders as an invitation, and every total above it reads
+        zero, which is the truth about an empty pack. `.blank` per DESIGN.md §9 — not a
+        bordered box.
+      -->
+      <div v-if="rows.length === 0" class="blank">
+        <p class="section-title">This pack has no categories yet.</p>
+        <p class="hint mt-2">
+          Categories are how a pack is grouped — Shelter, Sleep, Cooking, or whatever matches the
+          trip. Add one below, then fill it from your closet.
+        </p>
+      </div>
+
+      <!-- DESIGN.md §7: a ledger-style list on hairlines, not a box per category — the
+           category-to-category divider is the hairline `divide-y` draws; nothing here is
+           bordered or filled at rest. The drag affordances (`.row`, `.dragging`,
+           `.drop-before`/`.drop-after`) are untouched, in `<style scoped>` below. -->
+      <ul v-else class="divide-hairline mt-8 divide-y">
+        <li
+          v-for="(category, categoryIndex) in rows"
+          :key="category.id"
+          class="row"
+          :class="{
+            dragging: drag?.kind === 'category' && drag.id === category.id,
+            'drop-before': markerIsCategory(categoryIndex),
+            'drop-after': markerIsCategory(categoryIndex + 1) && categoryIndex === rows.length - 1,
+          }"
+          :draggable="draggable && grabbed === category.id"
+          @dragstart="beginDrag($event, { kind: 'category', id: category.id })"
+          @dragover="overCategory($event, categoryIndex)"
+        >
+          <!--
           NOTE THE ASYMMETRY WITH THE ITEM ROW BELOW, WHICH IS DELIBERATE AND IS THE PAIR TO
           READ TOGETHER. This `dragstart` has NO `.stop`; the item `<li>`'s has one. Both
           follow from the same fact: an item `<li>` is a DESCENDANT of the category `<li>`, so
@@ -900,51 +899,51 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           side and gets its own eight lines there, because it has to make the decision at
           runtime rather than in the template.
         -->
-        <div class="border-hairline flex flex-wrap items-end justify-between gap-4 border-b p-5">
-          <!--
+          <div class="border-hairline flex flex-wrap items-end justify-between gap-4 border-b p-5">
+            <!--
             The grip, and the only thing on this row that arms a drag. `aria-hidden` and not
             focusable on purpose: reordering is pointer-only (see the header), and a focusable
             handle a keyboard cannot then use would be the promise this component is careful
             not to make.
           -->
-          <span
-            v-if="enabled"
-            class="grip text-ink-3 shrink-0 self-center"
-            :class="{ busy: !draggable }"
-            aria-hidden="true"
-            @pointerdown="grab(category.id)"
-            @pointerup="release"
-          >
-            <GripVertical :size="16" />
-          </span>
+            <span
+              v-if="enabled"
+              class="grip text-ink-3 shrink-0 self-center"
+              :class="{ busy: !draggable }"
+              aria-hidden="true"
+              @pointerdown="grab(category.id)"
+              @pointerup="release"
+            >
+              <GripVertical :size="16" />
+            </span>
 
-          <form method="post" class="flex flex-1 flex-wrap items-end gap-3">
-            <input type="hidden" name="intent" :value="PACK_INTENT.renameCategory" />
-            <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
-            <div class="min-w-48 flex-1">
-              <label :for="`category-name-${category.id}`" :class="LABEL_CLASS">
-                Category name
-              </label>
-              <input
-                :id="`category-name-${category.id}`"
-                :name="PACK_CATEGORY_FORM_FIELD.name"
-                type="text"
-                :value="category.name"
-                :aria-describedby="
-                  category.renameError === null ? undefined : `category-name-error-${category.id}`
-                "
-                :aria-invalid="category.renameError === null ? undefined : 'true'"
-                :class="INPUT_CLASS"
-              />
-              <p
-                v-if="category.renameError !== null"
-                :id="`category-name-error-${category.id}`"
-                :class="ERROR_CLASS"
-              >
-                {{ category.renameError }}
-              </p>
-            </div>
-            <!--
+            <form method="post" class="flex flex-1 flex-wrap items-end gap-3">
+              <input type="hidden" name="intent" :value="PACK_INTENT.renameCategory" />
+              <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
+              <div class="min-w-48 flex-1">
+                <label :for="`category-name-${category.id}`" :class="LABEL_CLASS">
+                  Category name
+                </label>
+                <input
+                  :id="`category-name-${category.id}`"
+                  :name="PACK_CATEGORY_FORM_FIELD.name"
+                  type="text"
+                  :value="category.name"
+                  :aria-describedby="
+                    category.renameError === null ? undefined : `category-name-error-${category.id}`
+                  "
+                  :aria-invalid="category.renameError === null ? undefined : 'true'"
+                  :class="INPUT_CLASS"
+                />
+                <p
+                  v-if="category.renameError !== null"
+                  :id="`category-name-error-${category.id}`"
+                  :class="ERROR_CLASS"
+                >
+                  {{ category.renameError }}
+                </p>
+              </div>
+              <!--
               THE NAME SAYS WHICH ROW, in the same way the remove-item control at the bottom
               of an item row always has. A screen reader listing this page's controls reads
               them out of context, and a pack with nine categories otherwise produces nine
@@ -954,32 +953,32 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
               requires the accessible name to CONTAIN the visible one, which it does: the
               visible text is the first thing in the button and the context follows it.
             -->
-            <button type="submit" :class="QUIET_BUTTON_CLASS">
-              Rename <span class="sr-only">{{ category.name }}</span>
-            </button>
-          </form>
+              <button type="submit" :class="QUIET_BUTTON_CLASS">
+                Rename <span class="sr-only">{{ category.name }}</span>
+              </button>
+            </form>
 
-          <p class="text-ink-2 numeric text-sm">
-            <span :class="`font-medium ${BUCKET_TEXT_CLASS.base}`">
-              {{ formatWeight(category.baseGrams, props.weightSystem) }}
-            </span>
-            <span class="text-ink-3"> base of </span>
-            <span class="text-ink font-medium">
-              {{ formatWeight(category.totalGrams, props.weightSystem) }}
-            </span>
-          </p>
+            <p class="text-ink-2 numeric text-sm">
+              <span :class="`font-medium ${BUCKET_TEXT_CLASS.base}`">
+                {{ formatWeight(category.baseGrams, props.weightSystem) }}
+              </span>
+              <span class="text-ink-3"> base of </span>
+              <span class="text-ink font-medium">
+                {{ formatWeight(category.totalGrams, props.weightSystem) }}
+              </span>
+            </p>
 
-          <form v-if="!category.confirmingDelete" method="post">
-            <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
-            <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
-            <!-- Named, for the reason the Rename button above gives. -->
-            <button type="submit" :class="DANGER_BUTTON_CLASS">
-              Delete category <span class="sr-only">{{ category.name }}</span>
-            </button>
-          </form>
-        </div>
+            <form v-if="!category.confirmingDelete" method="post">
+              <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
+              <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
+              <!-- Named, for the reason the Rename button above gives. -->
+              <button type="submit" :class="DANGER_BUTTON_CLASS">
+                Delete category <span class="sr-only">{{ category.name }}</span>
+              </button>
+            </form>
+          </div>
 
-        <!--
+          <!--
           The reveal half of the two-step, rendered in place of the row's own delete button and
           naming the cascade BEFORE it happens. pack_items references pack_categories ON DELETE
           CASCADE (core_schema.sql:303), so deleting a category takes every item in it; a
@@ -989,76 +988,83 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           state of this component's own: what put the page in this state was a POST that wrote
           nothing, and the answer to it has to survive with JavaScript switched off.
         -->
-        <div v-if="category.confirmingDelete" class="border-rust/40 bg-rust/10 border-b px-5 py-4">
-          <h3 class="text-rust text-base">Confirm delete</h3>
-          <p class="text-ink-2 mt-2 text-sm">
-            Delete “{{ category.name }}” permanently?
-            {{
-              category.items.length === 0
-                ? 'It holds no items.'
-                : `Its ${category.items.length} item${category.items.length === 1 ? '' : 's'} will be removed from this pack with it.`
-            }}
-            This cannot be undone. Your closet is not affected — a pack item points at your gear and
-            never owns it.
-          </p>
-          <div class="mt-4 flex flex-wrap gap-3">
-            <form method="post">
-              <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
-              <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
-              <!--
+          <!--
+          DESIGN.md §2.5: a note may only lie directly on the paper, never inside a sheet, and
+          this reveal is inside the category row's own sheet — so it cannot take the
+          `.note.note-danger` wash the page-level pack-delete confirmation does. Emphasis
+          comes from rules, size and position instead: a rust heading, a hairline below it
+          (matching the header row above), and the same `.btn.btn-danger` box every
+          destructive control on the site uses.
+        -->
+          <div v-if="category.confirmingDelete" class="border-hairline border-b px-5 py-4">
+            <h3 class="section-title text-rust">Confirm delete</h3>
+            <p class="hint mt-2">
+              Delete “{{ category.name }}” permanently?
+              {{
+                category.items.length === 0
+                  ? 'It holds no items.'
+                  : `Its ${category.items.length} item${category.items.length === 1 ? '' : 's'} will be removed from this pack with it.`
+              }}
+              This cannot be undone. Your closet is not affected — a pack item points at your gear
+              and never owns it.
+            </p>
+            <div class="mt-4 flex flex-wrap gap-3">
+              <form method="post">
+                <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
+                <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
+                <!--
                 Value from the same constant `confirmsGearDeletion` compares against, never a
                 bare "1": the writer and the reader of this gate must not be able to drift
                 apart.
               -->
-              <input
-                type="hidden"
-                :name="BULK_FORM_FIELD.confirm"
-                :value="GEAR_DELETE_CONFIRMATION_VALUE"
-              />
-              <button type="submit" :class="CONFIRM_BUTTON_CLASS">
-                Delete category and its items
-              </button>
-            </form>
-            <a :href="props.selfPath" :class="CANCEL_LINK_CLASS">Cancel</a>
+                <input
+                  type="hidden"
+                  :name="BULK_FORM_FIELD.confirm"
+                  :value="GEAR_DELETE_CONFIRMATION_VALUE"
+                />
+                <button type="submit" class="btn btn-danger">Delete category and its items</button>
+              </form>
+              <a :href="props.selfPath" :class="CANCEL_LINK_CLASS">Cancel</a>
+            </div>
           </div>
-        </div>
 
-        <!--
+          <!--
           An empty category is a legitimate drop target and the only way to move the last item
           out of one — so it gets the same `dragover` the item list gets, on a paragraph rather
           than on an empty <ul>, which would have no height to aim at.
         -->
-        <p
-          v-if="category.items.length === 0"
-          class="text-ink-3 px-5 py-6 text-sm"
-          :class="{ 'drop-into': markerIsItem(category.id, 0) }"
-          @dragover="overItemArea($event, category.id, 0)"
-        >
-          Nothing in here yet. Add something from your closet below, or a one-off item.
-        </p>
-
-        <ul
-          v-else
-          class="divide-hairline divide-y"
-          @dragover="overItemArea($event, category.id, category.items.length)"
-        >
-          <li
-            v-for="(item, itemIndex) in category.items"
-            :key="item.id"
-            class="row px-5 py-4"
-            :class="{
-              dragging: drag?.kind === 'item' && drag.id === item.id,
-              'drop-before': markerIsItem(category.id, itemIndex),
-              'drop-after':
-                markerIsItem(category.id, itemIndex + 1) && itemIndex === category.items.length - 1,
-            }"
-            :draggable="draggable && grabbed === item.id"
-            @dragstart.stop="
-              beginDrag($event, { kind: 'item', id: item.id, categoryId: category.id })
-            "
-            @dragover="overItem($event, category.id, itemIndex)"
+          <p
+            v-if="category.items.length === 0"
+            class="text-ink-3 px-5 py-6 text-sm"
+            :class="{ 'drop-into': markerIsItem(category.id, 0) }"
+            @dragover="overItemArea($event, category.id, 0)"
           >
-            <!--
+            Nothing in here yet. Add something from your closet below, or a one-off item.
+          </p>
+
+          <ul
+            v-else
+            class="divide-hairline divide-y"
+            @dragover="overItemArea($event, category.id, category.items.length)"
+          >
+            <li
+              v-for="(item, itemIndex) in category.items"
+              :key="item.id"
+              class="row px-5 py-4"
+              :class="{
+                dragging: drag?.kind === 'item' && drag.id === item.id,
+                'drop-before': markerIsItem(category.id, itemIndex),
+                'drop-after':
+                  markerIsItem(category.id, itemIndex + 1) &&
+                  itemIndex === category.items.length - 1,
+              }"
+              :draggable="draggable && grabbed === item.id"
+              @dragstart.stop="
+                beginDrag($event, { kind: 'item', id: item.id, categoryId: category.id })
+              "
+              @dragover="overItem($event, category.id, itemIndex)"
+            >
+              <!--
               `.stop` ON `dragstart` IS NOT TIDINESS. This `<li>` sits inside the category
               `<li>`, which carries its own `dragstart`. Drag events bubble, so without the
               modifier every item drag would call `beginDrag` twice — once with
@@ -1073,41 +1079,41 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
               The category `<li>` deliberately does NOT carry `.stop`; see the note beside its
               own `dragstart` for why the two differ.
             -->
-            <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-              <p class="text-ink flex min-w-0 items-center gap-2 font-medium">
-                <span
-                  v-if="enabled"
-                  class="grip text-ink-3 shrink-0"
-                  :class="{ busy: !draggable }"
-                  aria-hidden="true"
-                  @pointerdown="grab(item.id)"
-                  @pointerup="release"
-                >
-                  <GripVertical :size="14" />
-                </span>
-                {{ item.displayName }}
-                <span v-if="item.isCustom" class="text-ink-3 text-xs font-normal">
-                  one-off item
-                </span>
-              </p>
-              <p class="numeric text-sm">
-                <span :class="`font-medium ${item.bucketClass}`">
-                  {{ formatWeight(item.lineWeightGrams, props.weightSystem) }}
-                </span>
-                <span v-if="item.quantity > 1" class="text-ink-3">
-                  ({{ formatWeight(item.unitWeightGrams, props.weightSystem) }} each)
-                </span>
-                <span v-if="item.linePrice !== null" class="text-ink-3">
-                  · {{ formatMoney(item.linePrice) }}
-                </span>
-              </p>
-            </div>
+              <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+                <p class="text-ink written written flex min-w-0 items-center gap-2 font-medium">
+                  <span
+                    v-if="enabled"
+                    class="grip text-ink-3 shrink-0"
+                    :class="{ busy: !draggable }"
+                    aria-hidden="true"
+                    @pointerdown="grab(item.id)"
+                    @pointerup="release"
+                  >
+                    <GripVertical :size="14" />
+                  </span>
+                  {{ item.displayName }}
+                  <span v-if="item.isCustom" class="system system text-ink-3 text-xs font-normal">
+                    one-off item
+                  </span>
+                </p>
+                <p class="numeric text-sm">
+                  <span :class="`font-medium ${item.bucketClass}`">
+                    {{ formatWeight(item.lineWeightGrams, props.weightSystem) }}
+                  </span>
+                  <span v-if="item.quantity > 1" class="text-ink-3">
+                    ({{ formatWeight(item.unitWeightGrams, props.weightSystem) }} each)
+                  </span>
+                  <span v-if="item.linePrice !== null" class="text-ink-3">
+                    · {{ formatMoney(item.linePrice) }}
+                  </span>
+                </p>
+              </div>
 
-            <form method="post" class="mt-3 flex flex-wrap items-center gap-3">
-              <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
-              <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+              <form method="post" class="mt-3 flex flex-wrap items-center gap-3">
+                <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
+                <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
 
-              <!--
+                <!--
                 THE ACCESSIBLE NAME STARTS WITH THE VISIBLE ONE, which is WCAG 2.5.3 (Label
                 in Name) and not a stylistic preference. The visible label is "Qty"; the
                 accessible name has to CONTAIN that string, or somebody driving the page by
@@ -1122,90 +1128,94 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                 visitor something is wrong and withholds the only thing that would let them
                 fix it.
               -->
-              <label class="text-ink-2 flex items-center gap-2 text-sm">
-                <span>Qty</span>
-                <input
-                  :name="PACK_ITEM_FORM_FIELD.quantity"
-                  type="text"
-                  inputmode="numeric"
-                  :value="item.values.quantity"
-                  :aria-label="`Qty for ${item.spokenName}`"
-                  :aria-describedby="
-                    item.quantityInvalid ? `item-${item.id}-error-quantity` : undefined
-                  "
-                  :aria-invalid="item.quantityInvalid ? 'true' : undefined"
-                  class="border-hairline bg-surface text-ink aria-invalid:border-rust w-16 rounded-[var(--r-sm)] border px-2 py-1 text-sm"
-                />
-              </label>
+                <label class="text-ink-2 flex items-center gap-2 text-sm">
+                  <span class="system system">Qty</span>
+                  <input
+                    :name="PACK_ITEM_FORM_FIELD.quantity"
+                    type="text"
+                    inputmode="numeric"
+                    :value="item.values.quantity"
+                    :aria-label="`Qty for ${item.spokenName}`"
+                    :aria-describedby="
+                      item.quantityInvalid ? `item-${item.id}-error-quantity` : undefined
+                    "
+                    :aria-invalid="item.quantityInvalid ? 'true' : undefined"
+                    class="field w-16"
+                  />
+                </label>
 
-              <!--
+                <!--
                 ONE CONTROL, THREE OPTIONS — never two checkboxes. The fourth combination two
                 checkboxes make easiest to produce (worn AND consumable) is refused by
                 pack_items_worn_consumable_exclusive and would make the pack's own totals throw
                 on read. A radio group cannot express it at all: the browser itself refuses to
-                let two radios of one name be checked. See PACK_ITEM_CARRIAGES.
+                let two radios of one name be checked. See PACK_ITEM_CARRIAGES. Presented as one
+                segmented control (DESIGN.md §6: a choice of three or fewer), the same box
+                the one-off item form's carriage field uses.
               -->
-              <fieldset class="flex flex-wrap items-center gap-2">
-                <legend class="sr-only">How {{ item.spokenName }} is carried</legend>
-                <label
-                  v-for="carriage in PACK_ITEM_CARRIAGES"
-                  :key="carriage"
-                  :class="CARRIAGE_OPTION_CLASS"
-                  :title="PACK_ITEM_CARRIAGE_MEANINGS[carriage]"
-                >
-                  <!-- `aria-describedby` on each radio rather than on the fieldset: support
+                <fieldset class="flex flex-wrap items-center gap-2">
+                  <legend class="sr-only">How {{ item.spokenName }} is carried</legend>
+                  <div class="segmented">
+                    <label
+                      v-for="carriage in PACK_ITEM_CARRIAGES"
+                      :key="carriage"
+                      class="segment"
+                      :title="PACK_ITEM_CARRIAGE_MEANINGS[carriage]"
+                    >
+                      <!-- `aria-describedby` on each radio rather than on the fieldset: support
                        for a description on a grouping element is inconsistent, and the
                        invalid state is set here, so the explanation belongs on the same
                        node as the thing it explains. -->
+                      <input
+                        type="radio"
+                        :name="PACK_ITEM_FORM_FIELD.carriage"
+                        :value="carriage"
+                        :checked="carriage === item.values.carriage"
+                        :aria-describedby="
+                          item.carriageInvalid ? `item-${item.id}-error-carriage` : undefined
+                        "
+                        :aria-invalid="item.carriageInvalid ? 'true' : undefined"
+                      />
+                      {{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}
+                    </label>
+                  </div>
+                </fieldset>
+
+                <label class="text-ink-2 flex items-center gap-2 text-sm">
                   <input
-                    type="radio"
-                    :name="PACK_ITEM_FORM_FIELD.carriage"
-                    :value="carriage"
-                    :checked="carriage === item.values.carriage"
-                    :aria-describedby="
-                      item.carriageInvalid ? `item-${item.id}-error-carriage` : undefined
-                    "
-                    :aria-invalid="item.carriageInvalid ? 'true' : undefined"
+                    type="checkbox"
+                    :name="PACK_ITEM_FORM_FIELD.packed"
+                    value="on"
+                    :checked="item.values.packed !== ''"
+                    class="checkbox"
                   />
-                  {{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}
+                  Packed
                 </label>
-              </fieldset>
 
-              <label class="text-ink-2 flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  :name="PACK_ITEM_FORM_FIELD.packed"
-                  value="on"
-                  :checked="item.values.packed !== ''"
-                  class="accent-blue"
-                />
-                Packed
-              </label>
-
-              <!-- Named, for the reason the category Rename button gives: an item row per
+                <!-- Named, for the reason the category Rename button gives: an item row per
                    piece of gear means a pack of forty items otherwise offers forty buttons
                    called "Save". -->
-              <button type="submit" :class="QUIET_BUTTON_CLASS">
-                Save <span class="sr-only">{{ item.spokenName }}</span>
-              </button>
-            </form>
+                <button type="submit" :class="QUIET_BUTTON_CLASS">
+                  Save <span class="sr-only">{{ item.spokenName }}</span>
+                </button>
+              </form>
 
-            <!-- One `id` per FAILED FIELD, not one for the list: the quantity input and the
+              <!-- One `id` per FAILED FIELD, not one for the list: the quantity input and the
                  carriage radios each point at their own message, so a screen reader reads
                  the sentence belonging to the control it is on rather than every sentence on
                  the row. See `ItemRow.errors` for why the field name is carried this far. -->
-            <ul v-if="item.errors.length > 0" class="mt-2 space-y-1">
-              <li
-                v-for="entry in item.errors"
-                :id="`item-${item.id}-error-${entry.field}`"
-                :key="entry.field"
-                :class="ERROR_CLASS"
-              >
-                {{ entry.message }}
-              </li>
-            </ul>
+              <ul v-if="item.errors.length > 0" class="mt-2 space-y-1">
+                <li
+                  v-for="entry in item.errors"
+                  :id="`item-${item.id}-error-${entry.field}`"
+                  :key="entry.field"
+                  :class="ERROR_CLASS"
+                >
+                  {{ entry.message }}
+                </li>
+              </ul>
 
-            <!--
+              <!--
               ONE CLICK, NOT TWO, and this is the one destructive control on the page that is
               not behind the reveal-then-confirm step. It removes an APPEARANCE, not a piece of
               gear: a referenced item's closet row is untouched (rule 1 of the core schema),
@@ -1213,31 +1223,45 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
               carry the step — deleting a category, deleting the pack — each destroy rows
               nothing else holds a copy of, which is the distinction the gesture is spent on.
             -->
-            <form method="post" class="mt-2">
-              <input type="hidden" name="intent" :value="PACK_INTENT.removeItem" />
-              <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
-              <button
-                type="submit"
-                class="text-ink-3 hover:text-rust text-xs underline transition-colors"
-              >
-                Remove {{ item.spokenName }} from this pack
-              </button>
-            </form>
-          </li>
-        </ul>
-      </li>
-    </ul>
+              <form method="post" class="mt-2">
+                <input type="hidden" name="intent" :value="PACK_INTENT.removeItem" />
+                <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+                <button
+                  type="submit"
+                  class="text-ink-3 hover:text-rust text-xs underline transition-colors"
+                >
+                  Remove {{ item.spokenName }} from this pack
+                </button>
+              </form>
+            </li>
+          </ul>
+        </li>
+      </ul>
+    </div>
   </section>
 </template>
 
 <style scoped>
 /*
- * THE ONLY SHADOW IN THE PRODUCT, AND IT IS A TOKEN. "Nothing casts a shadow at rest.
- * Elevation is expressed with --surface, --sunk and --hairline. Shadows are reserved for
- * transient overlays" (src/styles/tokens.css, CONTRIBUTING.md). The value lives in
- * tokens.css as --shadow-drag, with a dark cut, because CONTRIBUTING.md's rule is that a
- * colour the palette lacks gets RAISED rather than invented at a call site — and a black
- * shadow at 22% is one of the values that most needs the dark cut it would not otherwise get.
+ * THE ONLY LIFT SHADOW IN THE PRODUCT, AND IT IS A TOKEN. It used to be the only shadow of
+ * any kind, and used to need an exemption: "nothing casts a shadow at rest" was a standing
+ * rule, and this was written as its single admitted exception.
+ *
+ * PK-64 SUPERSEDED THAT RULE, so this no longer needs an exemption and no longer has one.
+ * Be precise about what it is now the only one OF, because the obvious phrasing is wrong:
+ * every .sheet and .strip on the site carries an ambient shadow as well as the §2.4 corner
+ * curl, and this component's own root element is a .sheet. So this is not the only shadow
+ * here, nor the only uniform one.
+ *
+ * What it is the only one of is a LIFT — the only shadow that claims something has been
+ * picked up off the page. The curl says "a sheet resting on paper" and the ambient says
+ * "resting slightly above it"; a dragged row is in the visitor's hand, which is a different
+ * physical claim and wants a different shadow. A SECOND lift would be the moment to
+ * re-read this paragraph rather than to add a token.
+ *
+ * The value lives in tokens.css as --shadow-drag, because a colour invented at a call site
+ * is a colour with no reviewer. Its dark cut went with dark mode, and it is now mixed from
+ * --shadow-ink like every other shadow — warm, never black.
  *
  * WHAT THIS IS ACTUALLY DRAWN ON, because an earlier version of this comment described a
  * mechanism the browser does not have. It said the row was "lifted, following a pointer, over
@@ -1247,14 +1271,12 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
  * So the shadow is painted on the in-flow row sitting in the list at 0.55 opacity — the row
  * left behind, not the one in motion.
  *
- * IT IS STILL WITHIN THE RULE, and the honest reading is the narrow one. The rule bans
- * shadows AT REST; the state this selector matches is the interval between `dragstart` and
- * `dragend` and nothing else, cleared by `endDrag` on every exit including an abandoned drag.
+ * IT IS STILL TRANSIENT, which is what keeps it honest. The state this selector matches is
+ * the interval between `dragstart` and `dragend` and nothing else, cleared by `endDrag` on
+ * every exit including an abandoned drag.
  * What the shadow does is mark WHICH row the gesture is carrying, on a list where the faded
  * row and its neighbours are otherwise the same shape — the drag image is a snapshot the
- * visitor is looking at, not a thing they are looking for. Nothing else on this surface casts
- * a shadow, at rest or otherwise, and a second one is a reason to re-read the rule rather
- * than to add a second token.
+ * visitor is looking at, not a thing they are looking for.
  */
 .dragging {
   opacity: 0.55;

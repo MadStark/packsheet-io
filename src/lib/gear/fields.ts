@@ -187,7 +187,15 @@ export const GEAR_SORT_COLUMNS: Record<GearSortKey, GearItemColumn> = {
  * Every labelled column header the closet list renders, in render order, with
  * `key: null` marking one that is not sortable. The Status column is absent because
  * PK-62 removed it — a three-value field an icon beside the name says faster (see
- * `GearStatusIcon.astro`).
+ * `GearStatusIcon.astro`). The Added column is absent for a different reason: PK-64's
+ * Notebook Paper conversion found that the closet's 1000px content column cannot hold
+ * nine columns without a cell wrapping, and a wrapped cell breaks the ledger's 40px row
+ * rhythm for every row below it (DESIGN.md §3). Added was the least-scanned column and
+ * its value is already on the item's own page, so it is the one that goes — the header
+ * and its `<td>` only. `added` STAYS a valid `?sort=` value: `GEAR_SORT_KEYS` and
+ * `GEAR_SORT_COLUMNS` are untouched, so a bookmarked `?sort=added` still orders the list
+ * by `acquired_on`, exactly as PK-62 kept `category`/`brand`/weight-range filters working
+ * by URL after removing their own UI (see `unsurfacedFilterParams` in query.ts).
  *
  * WHY THIS IS HERE AND NOT IN THE PAGE. "The Brand column header becomes a sort link"
  * is one of PK-62's requirements, and a list written in `src/pages/gear/index.astro`
@@ -204,21 +212,36 @@ export const GEAR_SORT_COLUMNS: Record<GearSortKey, GearItemColumn> = {
  * WHAT THIS STILL DOES NOT CAPTURE: the `<tbody>` cells in `src/pages/gear/index.astro`
  * are a SEPARATE, hand-maintained list in the same order, and nothing checks the two
  * move together. Adding an entry here without adding the matching `<td>` there silently
- * misaligns every row after it. This diff exercised exactly that coupling — removing the
- * Status column meant deleting an entry here AND a cell there. Keep them in step by
- * reading; there is no compiler help.
+ * misaligns every row after it. This diff exercised exactly that coupling twice over —
+ * removing the Status column meant deleting an entry here AND a cell there, and PK-64
+ * removing Added meant the same pair again. Keep them in step by reading; there is no
+ * compiler help.
  */
 export const GEAR_LIST_COLUMNS: readonly {
   readonly key: GearSortKey | null;
   readonly label: string;
+  /**
+   * Whether this column holds figures, which decides that its header and its cells are
+   * right-aligned (DESIGN.md §7 — "figures are written, and right-aligned").
+   *
+   * IT IS A FIELD RATHER THAN A PREDICATE OVER THE LABEL, and that is the point. PK-64
+   * first wrote it as `label === 'Qty' || label === 'Weight' || label === 'Price'` on the
+   * page, which keys a layout decision off display copy: renaming Qty to Quantity would
+   * compile, ship, and quietly lose the alignment. It cannot be derived from `key`
+   * either — Qty is a figure and is not sortable.
+   *
+   * Putting it here means a new column cannot be added without answering the question,
+   * and puts the answer somewhere a test can reach it: `vitest.config.ts` excludes
+   * `src/pages/**`.
+   */
+  readonly numeric: boolean;
 }[] = [
-  { key: 'name', label: 'Name' },
-  { key: 'brand', label: 'Brand' },
-  { key: null, label: 'Category' },
-  { key: null, label: 'Qty' },
-  { key: 'weight', label: 'Weight' },
-  { key: 'price', label: 'Price' },
-  { key: 'added', label: 'Added' },
+  { key: 'name', label: 'Name', numeric: false },
+  { key: 'brand', label: 'Brand', numeric: false },
+  { key: null, label: 'Category', numeric: false },
+  { key: null, label: 'Qty', numeric: true },
+  { key: 'weight', label: 'Weight', numeric: true },
+  { key: 'price', label: 'Price', numeric: true },
 ];
 
 // ---------------------------------------------------------------------------

@@ -3631,7 +3631,7 @@ describe('the allowlist machinery, exercised on lists written here rather than o
    */
   it('reports a Supabase package in the client pass that nothing in it imports', () => {
     const vue = join(repoRoot, 'node_modules', 'vue', 'dist', 'vue.runtime.esm-bundler.js');
-    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const island = join(repoRoot, 'src', 'components', 'PackContents.vue');
     const orphan = join(repoRoot, 'node_modules', '@supabase', 'ssr', 'dist', 'module', 'index.js');
     const build: BuildGraph = {
       graph: new Map([[island, new Set([vue])]]),
@@ -3654,7 +3654,7 @@ describe('the allowlist machinery, exercised on lists written here rather than o
   // and the package stops being reported on its own, because the boundary is the thing
   // somebody can go and edit. Same graph, one edge different.
   it('reports the importer instead, once something in the pass imports the package', () => {
-    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const island = join(repoRoot, 'src', 'components', 'PackContents.vue');
     const pkg = join(repoRoot, 'node_modules', '@supabase', 'ssr', 'dist', 'module', 'index.js');
     const deep = join(
       repoRoot,
@@ -3689,7 +3689,7 @@ describe('the allowlist machinery, exercised on lists written here rather than o
   // package name as the resolved path, which is what keeps one import from being one
   // finding per spelling.
   it('recognises the bare specifier shape and names the same package', () => {
-    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const island = join(repoRoot, 'src', 'components', 'PackContents.vue');
     const resolved = join(repoRoot, 'node_modules', '@supabase', 'ssr', 'dist', 'index.js');
     const build: BuildGraph = {
       graph: new Map([[island, new Set(['@supabase/ssr', resolved])]]),
@@ -3707,7 +3707,7 @@ describe('the allowlist machinery, exercised on lists written here rather than o
 
   it('ignores client modules that are neither in the choke point nor on the allowlist', () => {
     const vue = join(repoRoot, 'node_modules', 'vue', 'dist', 'vue.runtime.esm-bundler.js');
-    const island = join(repoRoot, 'src', 'components', 'ThemeToggle.vue');
+    const island = join(repoRoot, 'src', 'components', 'PackContents.vue');
     const authModule = join(repoRoot, 'src', 'lib', 'auth', 'index.ts');
     const build: BuildGraph = {
       graph: new Map(),
@@ -3724,7 +3724,7 @@ describe('the allowlist machinery, exercised on lists written here rather than o
     // Add the island to the allowlist and it becomes a violation — the same module, the
     // same build, reported only because somebody promised it was server-only.
     expect(
-      checkAuthStaysOffTheClient(build, repoRoot, ['src/components/ThemeToggle.vue']).map(
+      checkAuthStaysOffTheClient(build, repoRoot, ['src/components/PackContents.vue']).map(
         (v) => v.module,
       ),
     ).toEqual([island, authModule]);

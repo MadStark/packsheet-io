@@ -112,13 +112,6 @@ const loadError = listError ? GENERIC_LOAD_ERROR : null;
 // it is an ordinary state rather than an error — a new account has no packs, and the first
 // thing it should see is an invitation to make one, not a blank page.
 const listIsEmpty = !loadError && packs.length === 0;
-
-const LABEL_CLASS = 'text-ink-2 block text-sm';
-const INPUT_CLASS =
-  'border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm aria-invalid:border-rust';
-const ERROR_CLASS = 'text-rust mt-1 text-sm';
-const ALERT_CLASS =
-  'border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm';
 ---
 
 <Layout
@@ -126,23 +119,36 @@ const ALERT_CLASS =
   description="Every pack list you have built in Packsheet, with its weight and item count."
 >
   <GearNav />
-  <main class="mx-auto max-w-5xl px-6 py-10">
-    <h1 class="text-3xl">Your packs</h1>
-
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
+    {
+      /* PK-64 (Notebook Paper). A cover sheet carrying the title, a sheet holding the
+         create form, and a sheet holding the list as a ledger — the "a sheet holding a
+         list" and "a sheet holding a form" patterns src/pages/gear/index.astro already
+         sets. Both alerts are notes lying directly on the paper (§2.5), never inside a
+         sheet. */
+    }
     {
       writeError && (
-        <p role="alert" class={ALERT_CLASS}>
-          {writeError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{writeError}</p>
+        </div>
       )
     }
     {
       loadError && (
-        <p role="alert" class={ALERT_CLASS}>
-          {loadError}
-        </p>
+        <div class="note note-danger" role="alert">
+          <p>{loadError}</p>
+        </div>
       )
     }
+
+    <div class="sheet">
+      <div class="sheet-body">
+        <p class="eyebrow">Packs</p>
+        <h1 class="page-title mt-2">Your packs</h1>
+        <p class="aside mt-2">one for each trip</p>
+      </div>
+    </div>
 
     {
       /* The create form, rendered whether the list is empty or full — the C1 (PK-4 review)
@@ -157,104 +163,115 @@ const ALERT_CLASS =
          reads all three regardless and turns the two absent ones into SQL null, which is
          exactly what this form means by leaving them out. */
     }
-    <form method="POST" class="border-hairline bg-surface mt-6 rounded-[var(--r)] border p-5">
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
-        <div class="flex-1">
-          <label for="pack-name" class={LABEL_CLASS}>
-            New pack name <span aria-hidden="true" class="text-rust">*</span>
-          </label>
-          {
-            /* NOT the HTML `required` attribute, for the reason GearItemForm gives at
-               length: native constraint validation would block the submit in-browser, so
-               `parsePackForm` — the only place this rule is actually enforced, and the
-               only one a test can reach — would never run. `aria-required` says the same
-               thing to assistive technology without touching submission behaviour. */
-          }
-          <input
-            id="pack-name"
-            name={PACK_FORM_FIELD.name}
-            type="text"
-            value={formValues.name}
-            placeholder="Three days on the Cape Wrath Trail"
-            aria-required="true"
-            aria-describedby={formErrors.name ? 'pack-name-error' : undefined}
-            aria-invalid={formErrors.name ? 'true' : undefined}
-            class={INPUT_CLASS}
-          />
-          {
-            formErrors.name && (
-              <p id="pack-name-error" class={ERROR_CLASS}>
-                {formErrors.name}
-              </p>
-            )
-          }
-        </div>
-        <button
-          type="submit"
-          class="border-blue-deep text-blue-deep hover:bg-blue-tint shrink-0 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-        >
-          Create pack
-        </button>
+    <div class="sheet">
+      <div class="sheet-body">
+        <form method="POST">
+          <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
+            <div class="flex-1">
+              <label for="pack-name" class="field-label">
+                New pack name <span aria-hidden="true" class="field-required">*</span>
+              </label>
+              {
+                /* NOT the HTML `required` attribute, for the reason GearItemForm gives at
+                   length: native constraint validation would block the submit in-browser, so
+                   `parsePackForm` — the only place this rule is actually enforced, and the
+                   only one a test can reach — would never run. `aria-required` says the same
+                   thing to assistive technology without touching submission behaviour. */
+              }
+              <input
+                id="pack-name"
+                name={PACK_FORM_FIELD.name}
+                type="text"
+                value={formValues.name}
+                placeholder="Three days on the Cape Wrath Trail"
+                aria-required="true"
+                aria-describedby={formErrors.name ? 'pack-name-error' : undefined}
+                aria-invalid={formErrors.name ? 'true' : undefined}
+                class="field mt-1 w-full"
+              />
+              {
+                formErrors.name && (
+                  <p id="pack-name-error" class="field-error">
+                    {formErrors.name}
+                  </p>
+                )
+              }
+            </div>
+            <button type="submit" class="btn btn-primary shrink-0"> Create pack </button>
+          </div>
+        </form>
       </div>
-    </form>
+    </div>
 
     {
       loadError ? null : listIsEmpty ? (
-        <div class="border-hairline bg-surface mt-8 rounded-[var(--r)] border px-6 py-12 text-center">
-          <p class="text-ink-2">You have not built a pack yet.</p>
-          <p class="text-ink-3 mt-2 text-sm">
-            A pack is a list of what you are taking on one trip, grouped into categories and weighed
-            as you build it.
-          </p>
+        <div class="sheet">
+          {/* .blank stands in for .sheet-body — see paper.css's own comment on the class —
+              per DESIGN.md §9. Not a bordered box. */}
+          <div class="blank">
+            <p class="section-title">You have not built a pack yet.</p>
+            <p class="hint mt-2">
+              A pack is a list of what you are taking on one trip, grouped into categories and
+              weighed as you build it.
+            </p>
+          </div>
         </div>
       ) : (
-        <ul class="mt-8 space-y-3">
-          {packs.map(({ pack, totals }) => {
-            // EVERY NUMBER ON THIS ROW COMES FROM `totals`, which loadPackList produced
-            // with computeTotals (src/lib/totals.ts) from the same tree the row was fetched
-            // with. Nothing on this page adds up a weight or counts an item itself — a
-            // second summation here is exactly the duplication that makes the list and the
-            // editor disagree about a figure a visitor can see on both screens within one
-            // click of each other.
-            const tripType = packTripTypeLabel(pack.trip_type);
-            return (
-              <li class="border-hairline bg-surface rounded-[var(--r)] border">
-                <a
-                  href={packPath(pack.id)}
-                  class="hover:bg-sunk flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 rounded-[var(--r)] px-5 py-4 transition-colors"
-                >
-                  <span class="min-w-0">
-                    <span class="text-blue-deep block font-medium underline">{pack.name}</span>
-                    {tripType !== '' && (
-                      <span class="text-ink-3 mt-1 block text-sm">{tripType}</span>
-                    )}
-                  </span>
-                  <span class="text-ink-2 flex items-baseline gap-6 text-sm">
-                    {/* Blue for a base weight is the one non-interactive use the palette
-                        allows (CONTRIBUTING.md); the total beside it stays ink, because a
-                        total is not a base weight and colouring it blue would spend the
-                        signal on the number that needs it least. */}
-                    <span class="numeric">
-                      <span class="text-w-base font-medium">
+        <div class="sheet">
+          <div class="sheet-body">
+            <table class="ledger">
+              <caption class="sr-only">Your packs</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Trip type</th>
+                  <th scope="col" class="text-right">
+                    Base
+                  </th>
+                  <th scope="col" class="text-right">
+                    Total
+                  </th>
+                  <th scope="col" class="text-right">
+                    Items
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {packs.map(({ pack, totals }) => {
+                  // EVERY NUMBER ON THIS ROW COMES FROM `totals`, which loadPackList
+                  // produced with computeTotals (src/lib/totals.ts) from the same tree the
+                  // row was fetched with. Nothing on this page adds up a weight or counts an
+                  // item itself — a second summation here is exactly the duplication that
+                  // makes the list and the editor disagree about a figure a visitor can see
+                  // on both screens within one click of each other.
+                  const tripType = packTripTypeLabel(pack.trip_type);
+                  return (
+                    <tr>
+                      <td>
+                        <a
+                          href={packPath(pack.id)}
+                          class="text-blue-deep hover:text-blue-ink underline"
+                        >
+                          {pack.name}
+                        </a>
+                      </td>
+                      <td>{tripType === '' ? '—' : tripType}</td>
+                      {/* Blue for a base weight is the one non-interactive use the palette
+                          allows (CONTRIBUTING.md); the total beside it stays ink, because a
+                          total is not a base weight and colouring it blue would spend the
+                          signal on the number that needs it least. */}
+                      <td class="numeric text-w-base text-right">
                         {formatWeight(totals.base, weightSystem)}
-                      </span>
-                      <span class="text-ink-3"> base</span>
-                    </span>
-                    <span class="numeric">
-                      <span class="text-ink font-medium">
-                        {formatWeight(totals.total, weightSystem)}
-                      </span>
-                      <span class="text-ink-3"> total</span>
-                    </span>
-                    <span class="numeric">
-                      {totals.itemCount} item{totals.itemCount === 1 ? '' : 's'}
-                    </span>
-                  </span>
-                </a>
-              </li>
-            );
-          })}
-        </ul>
+                      </td>
+                      <td class="numeric text-right">{formatWeight(totals.total, weightSystem)}</td>
+                      <td class="numeric text-right">{totals.itemCount}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )
     }
   </main>

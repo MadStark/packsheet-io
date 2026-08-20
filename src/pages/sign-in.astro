@@ -133,94 +133,96 @@ if (Astro.request.method === 'POST') {
 ---
 
 <Layout title="Sign in — Packsheet" description="Sign in to your Packsheet account.">
-  <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
-    <a href={WELCOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
-      >Packsheet</a
-    >
-    <h1 class="mt-6 text-3xl">Sign in</h1>
+  {
+    /*
+    ONE SHEET, THE TITLE INSIDE IT (DESIGN.md §2.3): a cover sheet carrying only an h1 is a
+    second sheet doing no work. Narrow by constraining the inner column, not by abandoning
+    .paper-col — the 40px gutters stay consistent with every other page.
 
-    {
-      errorMessage && (
-        <p
-          role="alert"
-          class="border-rust/40 bg-rust/10 text-ink mt-6 rounded-[var(--r-sm)] border px-4 py-3 text-sm"
-        >
-          {errorMessage}
-        </p>
-      )
-    }
+    The error banner is a SIBLING ABOVE the sheet, never inside .sheet-body: §2.5 is explicit
+    that a note may only lie directly on the paper. See the PK-64 reference shots on the ticket.
+  */
+  }
+  <main class="paper-col flex min-h-svh flex-col items-center justify-center py-16">
+    <div class="flex w-full max-w-sm flex-col gap-[30px]">
+      {
+        errorMessage && (
+          <div class="note note-danger" role="alert">
+            <p>{errorMessage}</p>
+          </div>
+        )
+      }
 
-    <form method="POST" class="mt-8 space-y-4">
-      <input type="hidden" name={NEXT_PARAM} value={next} />
-      <div>
-        <label for="email" class="text-ink-2 block text-sm">Email</label>
-        <input
-          id="email"
-          name="email"
-          type="email"
-          autocomplete="email"
-          required
-          class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
-        />
+      <div class="sheet">
+        <div class="sheet-body">
+          <a href={WELCOME_PATH} class="eyebrow no-underline"> Packsheet </a>
+          <h1 class="page-title mt-2">Sign in</h1>
+          <hr class="sheet-rule" />
+
+          <form method="POST" class="flex flex-col gap-4">
+            <input type="hidden" name={NEXT_PARAM} value={next} />
+            <div>
+              <label for="email" class="field-label">Email</label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                autocomplete="email"
+                required
+                class="field mt-1 w-full"
+              />
+            </div>
+            <div>
+              <label for="password" class="field-label">Password</label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+                class="field mt-1 w-full"
+              />
+            </div>
+            <button type="submit" class="btn btn-primary w-full"> Sign in </button>
+          </form>
+
+          <div class="my-6 flex items-center gap-3" aria-hidden="true">
+            <span class="border-hairline h-px flex-1 border-t"></span>
+            <span class="eyebrow">or</span>
+            <span class="border-hairline h-px flex-1 border-t"></span>
+          </div>
+
+          <form method="POST">
+            <input type="hidden" name="intent" value="google" />
+            <input type="hidden" name={NEXT_PARAM} value={next} />
+            <button type="submit" class="btn w-full"> Continue with Google </button>
+          </form>
+
+          {
+            /* No `?next=` on this one, deliberately, unlike the sign-up link below it. The reset
+              journey leaves this browser for an inbox and comes back through
+              src/pages/auth/callback.ts, whose destination is set by the `?next=` that
+              requestPasswordReset put in the emailed link — carrying a second, older `next`
+              into the request page would be a value with nowhere to go and no way to survive
+              the round trip. See src/lib/auth-routes.ts for the two constants. */
+          }
+          <p class="hint mt-6">
+            <a href={FORGOT_PASSWORD_PATH} class="text-blue-deep hover:text-blue-ink underline">
+              Forgot your password?
+            </a>
+          </p>
+
+          <p class="hint mt-4">
+            New here?{' '}
+            <a
+              href={`${SIGN_UP_PATH}?next=${encodeURIComponent(next)}`}
+              class="text-blue-deep hover:text-blue-ink underline"
+            >
+              Create an account
+            </a>
+          </p>
+        </div>
       </div>
-      <div>
-        <label for="password" class="text-ink-2 block text-sm">Password</label>
-        <input
-          id="password"
-          name="password"
-          type="password"
-          autocomplete="current-password"
-          required
-          class="border-hairline bg-surface text-ink mt-1 w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
-        />
-      </div>
-      <button
-        type="submit"
-        class="border-blue-deep text-blue-deep hover:bg-blue-tint w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-      >
-        Sign in
-      </button>
-    </form>
-
-    <div class="my-6 flex items-center gap-3" aria-hidden="true">
-      <span class="border-hairline h-px flex-1 border-t"></span>
-      <span class="text-ink-3 text-xs tracking-wide uppercase">or</span>
-      <span class="border-hairline h-px flex-1 border-t"></span>
     </div>
-
-    <form method="POST">
-      <input type="hidden" name="intent" value="google" />
-      <input type="hidden" name={NEXT_PARAM} value={next} />
-      <button
-        type="submit"
-        class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk w-full rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-      >
-        Continue with Google
-      </button>
-    </form>
-
-    {
-      /* No `?next=` on this one, deliberately, unlike the sign-up link below it. The reset
-        journey leaves this browser for an inbox and comes back through
-        src/pages/auth/callback.ts, whose destination is set by the `?next=` that
-        requestPasswordReset put in the emailed link — carrying a second, older `next`
-        into the request page would be a value with nowhere to go and no way to survive
-        the round trip. See src/lib/auth-routes.ts for the two constants. */
-    }
-    <p class="text-ink-2 mt-6 text-sm">
-      <a href={FORGOT_PASSWORD_PATH} class="text-blue-deep hover:text-blue-ink underline">
-        Forgot your password?
-      </a>
-    </p>
-
-    <p class="text-ink-2 mt-4 text-sm">
-      New here?{' '}
-      <a
-        href={`${SIGN_UP_PATH}?next=${encodeURIComponent(next)}`}
-        class="text-blue-deep hover:text-blue-ink underline"
-      >
-        Create an account
-      </a>
-    </p>
   </main>
 </Layout>

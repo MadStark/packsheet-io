@@ -471,13 +471,29 @@ to notice. An external uptime monitor is the missing third leg, and is not yet s
 
 ## Design system
 
-Colours, typography and spacing live in `src/styles/tokens.css`, ported from the project's
-"Treeline" palette. Two rules the codebase depends on:
+The site is built in **Notebook Paper**, a design language written down in full at
+[`docs/design/DESIGN.md`](docs/design/DESIGN.md). The page is a sheet of squared notebook
+paper; content sits on flat white sheets lying on it; depth comes from a corner-curl shadow
+rather than from borders or colour. Its organising idea is one sentence — **the app prints,
+and the visitor writes** — and that is what divides the two typefaces: Inter sets anything the
+app says, Klee One sets anything the visitor entered, including every figure.
 
-1. **Blue only ever marks something interactive, or a base weight.** It is never
-   decorative.
-2. **Nothing casts a shadow at rest.** Elevation is expressed with surface, sunk and
-   hairline tokens. Shadows are for transient overlays only.
+The tokens live in `src/styles/tokens.css` and the language itself in `src/styles/paper.css`.
+`DESIGN.md` is their authority. That is a change worth stating plainly: `tokens.css` used to
+say it was ported from a "Treeline" palette page, and no such page ever existed — so the
+project's design authority pointed at nothing, and the token file had become the standard by
+default rather than by decision.
+
+One rule the codebase depends on:
+
+1. **Blue only ever marks something interactive, or a base weight.** It is never decorative.
+
+A second rule — _"nothing casts a shadow at rest"_ — was retired by PK-64 rather than dropped
+quietly: the corner curl **is** a shadow at rest, and it is what makes the sheets read as
+paper. See `CONTRIBUTING.md` for what survives of it.
+
+The language is **light only**. There is no dark mode and no theme toggle; paper is light, so
+the language is.
 
 Typefaces are self-hosted rather than loaded from a CDN, so that visiting a shared pack
 list does not disclose the reader's IP address to a third party. See

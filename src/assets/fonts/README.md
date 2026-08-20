@@ -1,14 +1,13 @@
 # Vendored typefaces
 
-These four `.woff2` files are committed deliberately rather than pulled from a package
+These three `.woff2` files are committed deliberately rather than pulled from a package
 or a CDN.
 
 | File | Family | Role | Axis / weight |
 | --- | --- | --- | --- |
-| `bricolage-grotesque-latin-var.woff2` | Bricolage Grotesque | display | variable, 200–800 |
-| `hanken-grotesk-latin-var.woff2` | Hanken Grotesk | body | variable, 100–900 |
-| `ibm-plex-mono-latin-400.woff2` | IBM Plex Mono | data | 400 |
-| `ibm-plex-mono-latin-500.woff2` | IBM Plex Mono | data | 500 |
+| `klee-one-latin-400.woff2` | Klee One | written | 400 |
+| `klee-one-latin-600.woff2` | Klee One | written | 600 |
+| `inter-latin-var.woff2` | Inter | system | variable, 100–900 (used 400–600) |
 
 ## Why vendored
 
@@ -18,23 +17,24 @@ that is not a trade worth making.
 
 ## Why latin only
 
-These were extracted from the Fontsource packages, which also ship Cyrillic, Vietnamese
-and latin-ext cuts. Bundling those would have put roughly four times the font weight into
-`dist/` for glyphs this audience does not render, against a hosting plan with a hard
+These are the latin cuts Google Fonts serves, taken once from `fonts.gstatic.com` and
+committed here. Both families also ship Cyrillic, Greek and Vietnamese cuts — and Klee
+One a full Japanese one — and bundling those would have put many times the font weight
+into `dist/` for glyphs this audience does not render, against a hosting plan with a hard
 bandwidth ceiling. The `@font-face` rules in `src/styles/fonts.css` carry a matching
 `unicode-range`, so text outside the latin range falls back to a system face.
 
-The Fontsource packages themselves are **not** dependencies — they were installed once to
-obtain these binaries and their licences, then removed.
+Nothing on the font path is a dependency: the binaries were fetched once, and the licence
+texts came from the upstream projects. Neither Google Fonts nor Fontsource is contacted at
+build time or at run time.
 
 ## Licensing
 
-All three families are licensed under the **SIL Open Font License 1.1**. Full texts are
-in `licenses/`, copied verbatim from the upstream packages.
+Both families are licensed under the **SIL Open Font License 1.1**. Full texts are in
+`licenses/`, copied verbatim from the upstream packages.
 
-- Bricolage Grotesque — © 2022 The Bricolage Grotesque Project Authors
-- Hanken Grotesk — © 2021 The Hanken Grotesk Project Authors
-- IBM Plex Mono — © 2017 IBM Corp.
+- Klee One — © 2020 The Klee Project Authors
+- Inter — © 2020 The Inter Project Authors
 
 **These files are not under the AGPL.** OFL 1.1 condition 5 requires the Font Software to
 be "distributed entirely under this license, and must not be distributed under any other
@@ -58,11 +58,11 @@ no benefit.
 
 The only ways to genuinely not distribute these fonts are to let a third party serve them
 (a CDN, rejected because it leaks every share-page visitor's IP) or to not use webfonts at
-all. Carrying ~14 KB of licence text is the cheaper trade.
+all. Carrying ~8.6 KB of licence text is the cheaper trade.
 
 ### Maintenance
 
 If a font file is ever added, replaced or re-subset here, update its licence and `NOTICE`
-in step. None of the three currently declares a Reserved Font Name, which is why the
+in step. Neither of the two currently declares a Reserved Font Name, which is why the
 subset versions may keep their original family names — re-check this if a family is
 swapped.

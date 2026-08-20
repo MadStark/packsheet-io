@@ -102,7 +102,7 @@ describe('GEAR_LIST_COLUMNS', () => {
   it('offers Brand as a sort link — PK-62 acceptance', () => {
     // `tests/gear-closet.test.ts` proves sort=brand WORKS against the database. This
     // proves the header OFFERS it, which is a different claim and was the uncovered one.
-    expect(GEAR_LIST_COLUMNS).toContainEqual({ key: 'brand', label: 'Brand' });
+    expect(GEAR_LIST_COLUMNS).toContainEqual({ key: 'brand', label: 'Brand', numeric: false });
   });
 
   it('no longer carries a Status column', () => {
@@ -111,9 +111,47 @@ describe('GEAR_LIST_COLUMNS', () => {
 
   it('renders Name and Brand as the two leading sortable headers, in that order', () => {
     expect(GEAR_LIST_COLUMNS.slice(0, 2)).toEqual([
-      { key: 'name', label: 'Name' },
-      { key: 'brand', label: 'Brand' },
+      { key: 'name', label: 'Name', numeric: false },
+      { key: 'brand', label: 'Brand', numeric: false },
     ]);
+  });
+
+  it('lists exactly the six columns the closet renders, in order', () => {
+    // THE WHOLE LIST, pinned. Every other assertion in this block checks one column or
+    // one property, so adding or removing a column changes a user-visible part of the
+    // product without any of them noticing — which is exactly what PK-64 did when it
+    // dropped Added. A column change should have to be a deliberate edit to this line.
+    //
+    // It also guards the coupling this constant's own comment warns about and cannot
+    // enforce: the `<tbody>` cells in src/pages/gear/index.astro are a separate,
+    // hand-maintained list in the same order, and a header added here without its
+    // matching `<td>` there silently misaligns every row after it.
+    expect(GEAR_LIST_COLUMNS.map((column) => column.label)).toEqual([
+      'Name',
+      'Brand',
+      'Category',
+      'Qty',
+      'Weight',
+      'Price',
+    ]);
+  });
+
+  it('marks exactly the figure columns numeric', () => {
+    // The alignment decision lives beside the column rather than being derived from its
+    // label. PK-64 first wrote it as `label === 'Qty' || ...` on the page, where renaming
+    // a column would compile, ship, and quietly lose the right-align.
+    const numeric = GEAR_LIST_COLUMNS.filter((column) => column.numeric).map((c) => c.label);
+    expect(numeric).toEqual(['Qty', 'Weight', 'Price']);
+  });
+
+  it('keeps ?sort=added working even though no header offers it any more', () => {
+    // PK-64 removed the Added COLUMN, not the sort key: `?sort=added` is a bookmarkable
+    // URL and still orders by acquired_on, exactly as PK-62 kept working the filters
+    // whose UI it removed. Nothing else asserts this, and the asymmetry is invisible —
+    // the list can be sorted by something the page no longer names.
+    expect(GEAR_SORT_KEYS).toContain('added');
+    expect(GEAR_SORT_COLUMNS.added).toBe('acquired_on');
+    expect(GEAR_LIST_COLUMNS.map((column) => column.key)).not.toContain('added');
   });
 
   it('leaves Category and Qty unsortable — neither has a sort key to link to', () => {

@@ -142,161 +142,162 @@ if (Astro.request.method === 'POST') {
 ---
 
 <Layout title="Your account — Packsheet" description="Manage your Packsheet account.">
-  <main class="mx-auto flex min-h-svh max-w-sm flex-col justify-center px-6 py-16">
-    <a href={HOME_PATH} class="text-ink-3 font-mono text-xs tracking-[0.18em] uppercase"
-      >Packsheet</a
-    >
-    <h1 class="mt-6 text-3xl">Your account</h1>
-
-    <p class="text-ink-2 mt-4 text-sm">Signed in as <span class="text-ink">{user.email}</span></p>
-
-    <p class="mt-6 text-sm">
-      <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
-        Go to your gear closet
-      </a>
-    </p>
-
-    <form method="POST" action="/auth/signout" class="mt-6">
-      <button
-        type="submit"
-        class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-      >
-        Sign out
-      </button>
-    </form>
-
-    {
-      /*
-      PK-67's Preferences section, ABOVE the delete-account block. Order is deliberate:
-      the destructive action stays last on the page, so adding an everyday setting does
-      not push it up next to the controls a visitor uses routinely.
-
-      A RADIO GROUP, NOT A SELECT OR A TOGGLE SWITCH — the same structural choice PK-63
-      made for the status selector, and for the same reasons. Both options are visible at
-      once, so the choice is legible without opening anything; the whole thing is a real
-      POST that works with JavaScript disabled; and a fieldset with a legend gives assistive
-      technology the grouping that a pair of loose inputs would not. A toggle switch would
-      additionally have to decide which system is the "on" state, which is a claim neither
-      metric nor imperial has any business making about the other.
-
-      NO CLIENT-SIDE PERSISTENCE ANYWHERE. This is an account setting, so it has to follow
-      the user to another browser — `localStorage` would make it a property of the device
-      instead, and the ticket's own acceptance criterion is that signing in elsewhere shows
-      the same choice. The server is the only place it is written.
-    */
-    }
-    <div class="border-hairline mt-12 border-t pt-8">
-      <h2 class="text-lg">Preferences</h2>
-      <form method="POST" class="mt-4">
-        <input type="hidden" name="intent" value={WEIGHT_SYSTEM_INTENT} />
-        <fieldset>
-          <legend class="text-ink-2 text-sm">Weight units</legend>
-          <div class="mt-3 flex flex-wrap gap-3">
-            {
-              WEIGHT_SYSTEMS.map((system) => (
-                <label class="border-hairline bg-surface hover:bg-sunk has-checked:border-blue-deep has-checked:text-blue-ink flex cursor-pointer items-center gap-2 rounded-[var(--r-sm)] border px-4 py-2 text-sm transition-colors">
-                  {/*
-                    `checked` is server-rendered from the stored value, which is what makes
-                    a successful save re-render as selected — the acceptance criterion the
-                    frontmatter's `weightSystem = chosen` line exists to satisfy. It is also
-                    why a REFUSED save leaves the previous choice checked rather than the
-                    one that failed to parse.
-                  */}
-                  <input
-                    type="radio"
-                    name={WEIGHT_SYSTEM_FIELD}
-                    value={system}
-                    checked={system === weightSystem}
-                    class="accent-blue-deep"
-                  />
-                  <span>{WEIGHT_SYSTEM_LABELS[system]}</span>
-                </label>
-              ))
-            }
-          </div>
-        </fieldset>
-        {
-          preferenceMessage && (
-            /* `role="status"` for the confirmation and `role="alert"` for the failure:
-               a save that worked is polite news, a save that did not is interrupting news.
-               The delete form on this page uses `role="alert"` for its own error the same
-               way. */
-            <p
-              role={preferenceFailed ? 'alert' : 'status'}
-              class={preferenceFailed ? 'text-rust mt-3 text-sm' : 'text-ink-2 mt-3 text-sm'}
-            >
-              {preferenceMessage}
-            </p>
-          )
-        }
-        <button
-          type="submit"
-          class="border-hairline bg-surface text-ink-2 hover:text-ink hover:bg-sunk mt-4 rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-        >
-          Save preferences
-        </button>
-      </form>
-    </div>
-
-    <div class="border-hairline mt-12 border-t pt-8">
+  {
+    /* One sheet, the title inside it, its three sections separated by .sheet-rule hairlines
+       rather than three sheets or bordered boxes (DESIGN.md §2.3, §2.6). Status and error
+       banners are page-level notes ABOVE the sheet — see the preferenceMessage block below —
+       because §2.5 says a note may only lie directly on the paper, never on a sheet. The
+       delete-confirmation mismatch stays a field-level error instead: it names what is wrong
+       with one specific field rather than announcing a page-level state, and a note could not
+       render inside the sheet at all. */
+  }
+  <main class="paper-col flex flex-col gap-[30px] py-[30px]">
+    <div class="mx-auto w-full max-w-md">
       {
-        !confirmingDelete && (
-          <div>
-            <h2 class="text-lg">Delete account</h2>
-            <p class="text-ink-2 mt-2 text-sm">
-              This permanently deletes your account and everything in it. This cannot be undone.
-            </p>
-            <a
-              href="?confirm-delete=1"
-              class="border-rust text-rust hover:bg-rust/10 mt-4 inline-block rounded-[var(--r-sm)] border px-4 py-2 text-sm font-medium transition-colors"
-            >
-              Delete account
-            </a>
+        preferenceMessage && (
+          /* `role="status"` for the confirmation and `role="alert"` for the failure: a save
+             that worked is polite news, a save that did not is interrupting news. The delete
+             form below uses `role="alert"` for its own error the same way. */
+          <div
+            class={preferenceFailed ? 'note note-danger mb-[30px]' : 'note mb-[30px]'}
+            role={preferenceFailed ? 'alert' : 'status'}
+          >
+            <p>{preferenceMessage}</p>
           </div>
         )
       }
 
-      {
-        confirmingDelete && (
-          <div>
-            <h2 class="text-rust text-lg">Confirm account deletion</h2>
-            <p class="text-ink-2 mt-2 text-sm">
-              This cannot be undone. Type <span class="text-ink font-medium">{user.email}</span>{' '}
-              below to confirm.
-            </p>
-            {deleteError && (
-              <p role="alert" class="text-rust mt-3 text-sm">
-                {deleteError}
-              </p>
-            )}
-            <form method="POST" class="mt-4 space-y-3">
-              <input type="hidden" name="intent" value={DELETE_ACCOUNT_INTENT} />
-              <input
-                type="text"
-                name={DELETE_ACCOUNT_CONFIRMATION_FIELD}
-                autocomplete="off"
-                required
-                aria-label="Type your email address to confirm"
-                class="border-hairline bg-surface text-ink w-full rounded-[var(--r-sm)] border px-3 py-2 text-sm"
-              />
-              <div class="flex gap-3">
-                <button
-                  type="submit"
-                  class="bg-rust rounded-[var(--r-sm)] px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-95"
-                >
-                  Permanently delete my account
-                </button>
-                <a
-                  href="/account"
-                  class="border-hairline text-ink-2 hover:text-ink rounded-[var(--r-sm)] border px-4 py-2 text-sm"
-                >
-                  Cancel
+      <div class="sheet">
+        <div class="sheet-body">
+          <a href={HOME_PATH} class="eyebrow no-underline"> Packsheet </a>
+          <h1 class="page-title mt-2">Your account</h1>
+          <hr class="sheet-rule" />
+
+          <p class="lead">
+            Signed in as <span class="text-ink font-medium">{user.email}</span>
+          </p>
+
+          <p class="hint mt-2">
+            <a href={GEAR_PATH} class="text-blue-deep hover:text-blue-ink underline">
+              Go to your gear closet
+            </a>
+          </p>
+
+          <form method="POST" action="/auth/signout" class="mt-6">
+            <button type="submit" class="btn"> Sign out </button>
+          </form>
+
+          <hr class="sheet-rule" />
+
+          {
+            /*
+            PK-67's Preferences section. Order is deliberate: the destructive action stays
+            last on the page, so adding an everyday setting does not push it up next to the
+            controls a visitor uses routinely.
+
+            ONE SEGMENTED CONTROL, NOT A RADIO STACK — DESIGN.md §6: a choice of three or
+            fewer says "exactly one of these is true", which a segmented control states and a
+            row of radios only implies. Real `<input type="radio">` elements still drive it
+            (the segment styling lives on the `<label>`s, see .segment in paper.css), which is
+            what keeps this a plain POST that works with JavaScript disabled and gives
+            assistive technology the same grouping a fieldset with a legend always did. A
+            toggle switch would additionally have to decide which system is the "on" state,
+            which is a claim neither metric nor imperial has any business making about the
+            other.
+
+            NO CLIENT-SIDE PERSISTENCE ANYWHERE. This is an account setting, so it has to
+            follow the user to another browser — `localStorage` would make it a property of
+            the device instead, and the ticket's own acceptance criterion is that signing in
+            elsewhere shows the same choice. The server is the only place it is written.
+          */
+          }
+          <h2 class="section-title">Preferences</h2>
+          <form method="POST" class="mt-4">
+            <input type="hidden" name="intent" value={WEIGHT_SYSTEM_INTENT} />
+            <fieldset>
+              <legend class="field-label">Weight units</legend>
+              <div class="segmented mt-3">
+                {
+                  WEIGHT_SYSTEMS.map((system) => (
+                    <label class="segment">
+                      {/*
+                        `checked` is server-rendered from the stored value, which is what makes
+                        a successful save re-render as selected — the acceptance criterion the
+                        frontmatter's `weightSystem = chosen` line exists to satisfy. It is also
+                        why a REFUSED save leaves the previous choice checked rather than the
+                        one that failed to parse.
+                      */}
+                      <input
+                        type="radio"
+                        name={WEIGHT_SYSTEM_FIELD}
+                        value={system}
+                        checked={system === weightSystem}
+                      />
+                      <span>{WEIGHT_SYSTEM_LABELS[system]}</span>
+                    </label>
+                  ))
+                }
+              </div>
+            </fieldset>
+            <button type="submit" class="btn mt-4"> Save preferences </button>
+          </form>
+
+          <hr class="sheet-rule" />
+
+          {
+            !confirmingDelete && (
+              <div>
+                <h2 class="section-title">Delete account</h2>
+                <p class="hint mt-2">
+                  This permanently deletes your account and everything in it. This cannot be undone.
+                </p>
+                <a href="?confirm-delete=1" class="btn btn-danger mt-4 no-underline">
+                  Delete account
                 </a>
               </div>
-            </form>
-          </div>
-        )
-      }
+            )
+          }
+
+          {
+            confirmingDelete && (
+              <div>
+                <h2 class="section-title text-rust">Confirm account deletion</h2>
+                <p class="hint mt-2">
+                  This cannot be undone. Type <span class="text-ink font-medium">{user.email}</span>{' '}
+                  below to confirm.
+                </p>
+                <form method="POST" class="mt-4 flex flex-col gap-3">
+                  <input type="hidden" name="intent" value={DELETE_ACCOUNT_INTENT} />
+                  <div>
+                    <input
+                      type="text"
+                      name={DELETE_ACCOUNT_CONFIRMATION_FIELD}
+                      autocomplete="off"
+                      required
+                      aria-label="Type your email address to confirm"
+                      aria-invalid={deleteError ? 'true' : undefined}
+                      class="field w-full"
+                    />
+                    {deleteError && (
+                      <p role="alert" class="field-error">
+                        {deleteError}
+                      </p>
+                    )}
+                  </div>
+                  <div class="flex gap-3">
+                    <button type="submit" class="btn btn-danger">
+                      Permanently delete my account
+                    </button>
+                    <a href="/account" class="btn btn-quiet no-underline">
+                      Cancel
+                    </a>
+                  </div>
+                </form>
+              </div>
+            )
+          }
+        </div>
+      </div>
     </div>
   </main>
 </Layout>
