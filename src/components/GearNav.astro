@@ -56,9 +56,9 @@ const links: readonly [href: string, label: string][] = [
 
 {
   /* THE STRIP (DESIGN.md §2.3) — a sheet with zero padding at a fixed height, lying on the
-     paper like every other surface. This used to be a `border-b` header, which §2.6 forbids
-     outright: in this language a border is not a separator, and depth comes from the sheet's
-     own shadow instead. The 30px top margin is the standard gap between papers.
+     paper like every other surface. This used to be a `border-b` header, which §13 refuses
+     outright ("borders as separators"): in this language depth comes from the sheet's own
+     shadow instead (§1). The 30px of top padding is the standard gap between papers.
 
      .paper-col rather than max-w-5xl: §3's content column is 1000px INCLUDING its 40px side
      padding, and every sheet on every page aligns to that same column. */

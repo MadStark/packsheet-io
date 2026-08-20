@@ -110,10 +110,18 @@
   --blue-tint: #e4f0fc;
 
   /*
-   * The state accents: mid-saturation earths, so none of them shouts. Unchanged
-   * byte for byte — the redesign changed the ground, the ink and the type, not
-   * what the colours mean. Where an accent has to be legible as text, use its
-   * -ink cut.
+   * The state accents: mid-saturation earths, so none of them shouts. Where an
+   * accent has to be legible as text, use its -ink cut.
+   *
+   * --moss, --ochre, --ochre-ink and --rust are unchanged byte for byte from the
+   * palette this replaced: the redesign changed the ground, the ink and the type,
+   * not what the colours mean.
+   *
+   * --worn IS NEW, and is worth naming as new rather than counting it among them.
+   * What existed before was --worn-ink #6e5c90, which had no call site; the purple
+   * that was actually rendered was a hard literal #7a6a9b sitting in --w-worn. This
+   * gives that literal a name and deletes the unused token, so the value below is
+   * what shipped and the one that did not is gone.
    */
   --moss: #3d7a52;
   --ochre: #b5822e;
@@ -124,14 +132,17 @@
   /*
    * Weight classes — base / worn / consumable.
    *
-   * Expressed as references rather than literals so the three stay tied to the
-   * accents they mean. That was originally done so they would follow the theme
-   * into dark mode; there is no dark mode any more, but the reason to keep it is
-   * now simpler — a base weight IS the blue of rule 1, and writing #0070d4 here a
-   * second time would let the two drift apart silently.
+   * All three are references rather than literals, so each stays tied to the accent
+   * it means. --w-base and --w-cons already were; --w-worn was a hard literal
+   * #7a6a9b and is newly one, which is what --worn above exists for.
    *
-   * --w-worn is set to --worn, which is #7a6a9b: 4.68:1 on paper and 4.81:1 on the
-   * sheet, so it clears AA as text, which is how PackContents.vue uses it.
+   * The original reason was that a reference follows the theme into dark mode.
+   * There is no dark mode any more, and the reason to keep it is now simpler: a
+   * base weight IS the blue of rule 1, and writing #0070d4 here a second time would
+   * let the two drift apart silently.
+   *
+   * --w-worn resolves to #7a6a9b: 4.68:1 on paper and 4.81:1 on the sheet, so it
+   * clears AA as text, which is how PackContents.vue uses it.
    */
   --w-base: var(--blue);
   --w-worn: var(--worn);
@@ -144,19 +155,31 @@
    *
    * This token predates the redesign and used to be justified as the single
    * exception to "nothing casts a shadow at rest". That rule is gone (see the
-   * header), so it no longer needs an exemption — but it is still the only
-   * uniform drop shadow on the site, and that is deliberate: a dragged row is
-   * genuinely lifted off the page in a way a resting sheet is not. Its dark cut
-   * went with dark mode.
+   * header), so it no longer needs an exemption.
+   *
+   * It is the only LIFT shadow on the site, which is a narrower claim than it
+   * looks and the accurate one: every sheet and strip also carries an ambient
+   * shadow under its corner curl. This is the only shadow that says something has
+   * been picked up off the page, which a dragged row has been and a resting sheet
+   * has not. Its dark cut went with dark mode.
    */
   --shadow-drag: 0 10px 24px rgba(var(--shadow-ink), 0.28);
 
   /*
    * Gear categories are fill-only — dots, bars and segments, where WCAG imposes no
-   * contrast requirement. Do not render a category name in its own colour: on the
-   * white sheet these range from 2.4:1 to 4.6:1 and most of them fail. The closet
-   * prints the name in ink and puts the colour in a 10px dot beside it, which is
-   * also what keeps §12's "colour is never the only signal" true.
+   * contrast requirement.
+   *
+   * DO NOT RENDER A CATEGORY NAME IN ITS OWN COLOUR. Measured on the white sheet, the
+   * ten run from 3.39:1 (--c-cooking) to 6.75:1 (--c-electronics), and exactly half of
+   * them fail AA for text: cooking, misc, clothing, water and food. Picking the five
+   * that pass would be worse than not doing it — the same list would then be styled two
+   * different ways for a reason no reader could see.
+   *
+   * NOTHING IN THE PRODUCT CURRENTLY RENDERS ONE. The closet sets the category name in
+   * ink with no dot at all, and `src/pages/gear/index.astro` carries the argument for
+   * why: the column is unconstrained free text, so there is no mapping onto these ten,
+   * and an invented one encodes nothing a reader can decode. `welcome.astro`'s specimen
+   * is the only call site, and it hand-picks five for five fixed rows.
    */
   --c-shelter: #4a6fa5;
   --c-sleep: #7a6a9b;

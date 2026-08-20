@@ -78,7 +78,12 @@ import { bulkSetCategory, bulkSetStatus, deleteGearItems } from '../../lib/gear/
 // are gone. `WEIGHT_UNITS` came in on the same import block on staging and is
 // deliberately NOT carried across: PK-62 removed the weight-range fieldset that was its
 // only consumer on this page.
-import { formatGearPrice, formatGearStatus, gearStatusMarker } from '../../lib/gear/format';
+import {
+  GEAR_MARKER_ROW_CLASS,
+  formatGearPrice,
+  formatGearStatus,
+  gearStatusMarker,
+} from '../../lib/gear/format';
 // PK-63: every link out of this list carries the current view as a return target, so
 // saving the item form lands the visitor back on the same filters, sort and page.
 import { gearFormHrefReturningTo } from '../../lib/gear/return-path';
@@ -792,15 +797,14 @@ function isNumericColumn(label: string): boolean {
                         {items.map((item) => {
                           const marker = gearStatusMarker(item.status);
                           return (
-                            <tr
-                              class={
-                                marker === 'wishlist'
-                                  ? 'row-wishlist'
-                                  : marker === 'retired'
-                                    ? 'row-retired'
-                                    : undefined
-                              }
-                            >
+                            /* The row's wash and left bar come from a TOTAL map in
+                               format.ts, not from equality checks here. Written as
+                               `=== 'wishlist' : === 'retired' : undefined`, a third
+                               marker would compile, paint nothing, and look exactly like
+                               `owned` — which is the failure GEAR_STATUS_MARKERS' own
+                               comment records having already removed once, from
+                               GearStatusIcon. */
+                            <tr class={marker === null ? undefined : GEAR_MARKER_ROW_CLASS[marker]}>
                               <td>
                                 <input
                                   type="checkbox"
@@ -895,7 +899,7 @@ function isNumericColumn(label: string): boolean {
                                     third ink at 4.11:1 on --paper-deep, which fails AA. */}
                                 {item.photo_path ? (
                                   <span
-                                    class="bg-paper-deep text-ink-2 inline-flex h-6 items-center justify-center rounded px-1.5 text-[10px] font-medium"
+                                    class="bg-paper-deep text-ink-2 inline-flex h-6 items-center justify-center rounded-[var(--radius)] px-1.5 text-[10px] font-medium"
                                     aria-hidden="true"
                                   >
                                     IMG
@@ -933,11 +937,10 @@ function isNumericColumn(label: string): boolean {
                     {/* DESIGN.md §4: a bulk-action select is the SYSTEM voice, because
                         "Owned" here is an instruction to the app, not part of an item's
                         record — the opposite of the unit select `.field` was designed
-                        around. `.field` alone sets the written face and `.system` cannot
-                        win that tie by class alone (both are single-class rules in the
-                        same layer, and `.field`'s is the later one in paper.css), so the
-                        family is forced with a Tailwind utility, which — being in the
-                        utilities layer — beats both regardless of source order. */}
+                        around. This is THE call site that `.system` exists for, and the
+                        reason paper.css writes it as `.system.system`: as a single class
+                        it tied with `.field` on specificity and lost on source order, so
+                        `field system` read as though it worked and did nothing. */}
                     <select
                       id="bulk-status"
                       name={BULK_FORM_FIELD.status}

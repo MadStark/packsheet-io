@@ -246,9 +246,12 @@ const BUCKET_LABELS: Record<WeightBucket, string> = {
 };
 /** Blue for base weight is the one non-interactive use of blue the palette allows
  *  (CONTRIBUTING.md, and `--w-base` is literally `var(--blue)` in `src/styles/tokens.css`).
- *  The other two are their own tokens with their own dark cuts. None is decorative: each
- *  marks which total a number belongs to. Compiler-checked as a `Record<WeightBucket, …>` so
- *  a fourth bucket fails to build here rather than rendering uncoloured. */
+ *  The other two are aliases in the same shape — `--w-worn` is `var(--worn)` and
+ *  `--w-cons` is `var(--ochre)` — so each stays tied to the accent it means rather than
+ *  repeating its hex. (They used to be described as carrying dark cuts; PK-64 removed dark
+ *  mode, so no token in this product has one.) None is decorative: each marks which total a
+ *  number belongs to. Compiler-checked as a `Record<WeightBucket, …>` so a fourth bucket
+ *  fails to build here rather than rendering uncoloured. */
 const BUCKET_TEXT_CLASS: Record<WeightBucket, string> = {
   base: 'text-w-base',
   worn: 'text-w-worn',
@@ -1240,17 +1243,21 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 
 <style scoped>
 /*
- * THE ONLY UNIFORM DROP SHADOW IN THE PRODUCT, AND IT IS A TOKEN. It used to be the only
- * shadow of any kind, and used to need an exemption: "nothing casts a shadow at rest" was a
- * standing rule, and this was written as its single admitted exception.
+ * THE ONLY LIFT SHADOW IN THE PRODUCT, AND IT IS A TOKEN. It used to be the only shadow of
+ * any kind, and used to need an exemption: "nothing casts a shadow at rest" was a standing
+ * rule, and this was written as its single admitted exception.
  *
- * PK-64 SUPERSEDED THAT RULE. Notebook Paper's depth model is a shadow at rest — the corner
- * curl of DESIGN.md §2.4 is on every sheet on the site — so this no longer needs an
- * exemption and no longer has one. What survives of the rule is the part that still bites
- * here: no uniform drop shadows, and this is the one place that breaks it. That is
- * deliberate rather than overlooked. The curl says "a sheet resting on paper"; a dragged row
- * is genuinely picked up, which is a different physical claim and wants a different shadow.
- * A SECOND one would be the moment to re-read this paragraph rather than to add a token.
+ * PK-64 SUPERSEDED THAT RULE, so this no longer needs an exemption and no longer has one.
+ * Be precise about what it is now the only one OF, because the obvious phrasing is wrong:
+ * every .sheet and .strip on the site carries an ambient shadow as well as the §2.4 corner
+ * curl, and this component's own root element is a .sheet. So this is not the only shadow
+ * here, nor the only uniform one.
+ *
+ * What it is the only one of is a LIFT — the only shadow that claims something has been
+ * picked up off the page. The curl says "a sheet resting on paper" and the ambient says
+ * "resting slightly above it"; a dragged row is in the visitor's hand, which is a different
+ * physical claim and wants a different shadow. A SECOND lift would be the moment to
+ * re-read this paragraph rather than to add a token.
  *
  * The value lives in tokens.css as --shadow-drag, because a colour invented at a call site
  * is a colour with no reviewer. Its dark cut went with dark mode, and it is now mixed from
@@ -1269,9 +1276,7 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
  * every exit including an abandoned drag.
  * What the shadow does is mark WHICH row the gesture is carrying, on a list where the faded
  * row and its neighbours are otherwise the same shape — the drag image is a snapshot the
- * visitor is looking at, not a thing they are looking for. Nothing else on this surface casts
- * a shadow, at rest or otherwise, and a second one is a reason to re-read the rule rather
- * than to add a second token.
+ * visitor is looking at, not a thing they are looking for.
  */
 .dragging {
   opacity: 0.55;

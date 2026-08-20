@@ -153,8 +153,12 @@ Not optional, and not a later pass. New UI is expected to keep the placeholder's
 Lighthouse accessibility 100, WCAG AA contrast for text, visible focus indicators, and
 `prefers-reduced-motion` respected.
 
-If you add a colour combination, check its contrast. Several tokens in the palette pass in
-light mode and fail in dark, so "it looked fine" is not sufficient evidence.
+If you add a colour combination, check its contrast — "it looked fine" is not sufficient
+evidence. There is no dark mode to check against any more, but the palette still has values
+that pass on one ground and fail on another, and the third ink is the one to watch: `--ink-3`
+clears AA on the paper (4.51:1) and on a white sheet (4.64:1) and **nowhere else** — on
+`--paper-deep` it is 4.11:1 and fails. Half the ten category fills fail as text on white too,
+which is why they are documented as fill-only.
 
 ## Commit messages
 

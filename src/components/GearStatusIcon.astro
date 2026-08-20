@@ -39,9 +39,11 @@
 // glyphs also differ in SHAPE, so neither mode depends on hue being perceivable.
 //
 // WHY WISHLIST IS --ochre-ink AND NOT --ochre. This glyph sits on four different grounds
-// on the closet list, and the colour has to clear the bar on the worst of them. Measured
-// against the surfaces PK-64 actually produces — the white sheet, the 4% ink hover wash,
-// the 5.5% ochre wash a wishlist row carries, and that row hovered at 9%:
+// across the two surfaces that draw it, and the colour has to clear the bar on the worst
+// of them. On the CLOSET a wishlist glyph only ever appears on a wishlist row, so its
+// grounds are the 5.5% ochre wash and that row hovered at 9%; the plain sheet and the 4%
+// ink hover are the ITEM FORM's, where the same glyph sits in an unselected segment.
+// Measured against all four:
 //
 //     --ochre     #b5822e   3.39 / 3.14 / 3.20 / 3.09
 //     --ochre-ink #8a6118   5.52 / 5.11 / 5.21 / 5.03

@@ -61,12 +61,25 @@
   --color-c-misc: var(--c-misc);
 
   /*
-   * One radius, so `rounded` is the only shape utility this language has. The
-   * old --radius-sm / --radius-lg are not here because --r-sm and --r-lg are not
-   * in tokens.css any more: §6 puts 6px on every control and sheets are square,
-   * which left the other two steps describing nothing.
+   * THERE IS NO RADIUS ENTRY HERE, AND THAT IS DELIBERATE — read this before adding
+   * one back.
+   *
+   * `--radius-DEFAULT: var(--radius)` was here, and it did nothing. `DEFAULT` is not a
+   * Tailwind v4 theme key: bare `rounded` is a built-in utility fixed at 0.25rem, not a
+   * lookup into the `--radius-*` namespace. So every `rounded` in the markup rendered at
+   * 4px while this block claimed it was the design's 6px, and the compiled CSS said
+   * `.rounded{border-radius:.25rem}` with the string `radius-DEFAULT` appearing nowhere
+   * in it.
+   *
+   * That is exactly the silent failure the note at the top of this block warns about, and
+   * it is worth having been caught by it: a mapping that resolves to nothing does not
+   * fail the build, it just quietly renders the wrong thing.
+   *
+   * The language does not need the namespace. Every control's radius is set in
+   * `paper.css` as `border-radius: var(--radius)` on the component itself, and sheets are
+   * square. The one place markup needs a radius directly writes `rounded-[var(--radius)]`,
+   * which reads from the token and cannot drift from it.
    */
-  --radius-DEFAULT: var(--radius);
 }
 
 @layer base {

@@ -125,7 +125,7 @@ _(The yellow "sticky" variant and the index tab are both gone. See the appendix.
 
 ### 2.6 Ink and rules
 
-Everything drawn on a sheet is drawn in ink. Rules are 1px and horizontal only — vertical rules do not exist in this language, with the single exception of the hairlines separating figures in a totals row. Table body rows are separated by the **hairline** (`#e3dcd0`); the header row and any total row are underlined in full **ink** (`#1c1917`), which is what gives a table its ledger feel without borders. Section dividers inside a sheet are hairlines with 40px above and below. Nothing is boxed.
+Everything drawn on a sheet is drawn in ink. Rules are 1px and horizontal only — vertical rules do not exist in this language, with the single exception of the hairlines separating the headline figures of §7. (Not a table's totals row, which this said before implementation checked it: a totals row is separated from the body by a horizontal ink rule and has no vertical rules at all. The headline figures are the `<dl>` that sits flat inside a sheet, and the hairlines between them are the only verticals on the site.) Table body rows are separated by the **hairline** (`#e3dcd0`); the header row and any total row are underlined in full **ink** (`#1c1917`), which is what gives a table its ledger feel without borders. Section dividers inside a sheet are hairlines with 40px above and below. Nothing is boxed.
 
 ---
 

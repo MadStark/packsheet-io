@@ -7,7 +7,7 @@ or a CDN.
 | --- | --- | --- | --- |
 | `klee-one-latin-400.woff2` | Klee One | written | 400 |
 | `klee-one-latin-600.woff2` | Klee One | written | 600 |
-| `inter-latin-var.woff2` | Inter | system | variable, 400–600 |
+| `inter-latin-var.woff2` | Inter | system | variable, 100–900 (used 400–600) |
 
 ## Why vendored
 
@@ -58,7 +58,7 @@ no benefit.
 
 The only ways to genuinely not distribute these fonts are to let a third party serve them
 (a CDN, rejected because it leaks every share-page visitor's IP) or to not use webfonts at
-all. Carrying ~14 KB of licence text is the cheaper trade.
+all. Carrying ~8.6 KB of licence text is the cheaper trade.
 
 ### Maintenance
 

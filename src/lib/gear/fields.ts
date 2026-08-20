@@ -220,13 +220,28 @@ export const GEAR_SORT_COLUMNS: Record<GearSortKey, GearItemColumn> = {
 export const GEAR_LIST_COLUMNS: readonly {
   readonly key: GearSortKey | null;
   readonly label: string;
+  /**
+   * Whether this column holds figures, which decides that its header and its cells are
+   * right-aligned (DESIGN.md §7 — "figures are written, and right-aligned").
+   *
+   * IT IS A FIELD RATHER THAN A PREDICATE OVER THE LABEL, and that is the point. PK-64
+   * first wrote it as `label === 'Qty' || label === 'Weight' || label === 'Price'` on the
+   * page, which keys a layout decision off display copy: renaming Qty to Quantity would
+   * compile, ship, and quietly lose the alignment. It cannot be derived from `key`
+   * either — Qty is a figure and is not sortable.
+   *
+   * Putting it here means a new column cannot be added without answering the question,
+   * and puts the answer somewhere a test can reach it: `vitest.config.ts` excludes
+   * `src/pages/**`.
+   */
+  readonly numeric: boolean;
 }[] = [
-  { key: 'name', label: 'Name' },
-  { key: 'brand', label: 'Brand' },
-  { key: null, label: 'Category' },
-  { key: null, label: 'Qty' },
-  { key: 'weight', label: 'Weight' },
-  { key: 'price', label: 'Price' },
+  { key: 'name', label: 'Name', numeric: false },
+  { key: 'brand', label: 'Brand', numeric: false },
+  { key: null, label: 'Category', numeric: false },
+  { key: null, label: 'Qty', numeric: true },
+  { key: 'weight', label: 'Weight', numeric: true },
+  { key: 'price', label: 'Price', numeric: true },
 ];
 
 // ---------------------------------------------------------------------------

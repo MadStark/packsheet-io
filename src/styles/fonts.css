@@ -6,9 +6,13 @@
  * party, and the share page is served to strangers who never log in. Vendoring also
  * lets Vite fingerprint the files so they cache immutably.
  *
- * Latin-only is deliberate. The full Fontsource packages also ship Cyrillic,
- * Vietnamese and latin-ext cuts; bundling those would have put ~4x the font weight
- * into dist/ for glyphs this audience does not render.
+ * Latin-only is deliberate. Both families also ship Cyrillic, Greek and Vietnamese
+ * cuts — and Klee One a full Japanese one — so bundling everything would have put
+ * many times this weight into dist/ for glyphs this audience does not render. The
+ * unicode-range on each rule below is what makes text outside latin fall back to a
+ * system face rather than pulling a cut that is not there.
+ *
+ * See src/assets/fonts/README.md for provenance and the licensing argument.
  */
 
 @font-face {
