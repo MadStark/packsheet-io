@@ -258,6 +258,11 @@ const updated = Astro.url.searchParams.get('updated') === '1';
   <GearNav />
   <main class="paper-col flex flex-col gap-[30px] py-[30px]">
     {
+      /* NOT data-gear-overlay-notice: "Saved." is a success status, not a form problem —
+         src/lib/gear/overlay.ts only ever opens this page's editor in response to a
+         submit that failed, so there is nothing here for it to lift. */
+    }
+    {
       updated && (
         <div class="note" role="status">
           <p>Saved.</p>
@@ -266,8 +271,15 @@ const updated = Astro.url.searchParams.get('updated') === '1';
     }
 
     {
+      /* data-gear-overlay-notice on both banners below, same contract new.astro's own
+         two carry: src/lib/gear/overlay.ts lifts whichever is present into the modal
+         when an intercepted submit comes back from the server with errors, found by
+         attribute rather than by the `.note.note-danger` class, which is styling and
+         could change independently of what the overlay needs to find. */
+    }
+    {
       writeError && (
-        <div class="note note-danger" role="alert">
+        <div class="note note-danger" role="alert" data-gear-overlay-notice>
           <p>{writeError}</p>
         </div>
       )
@@ -275,7 +287,7 @@ const updated = Astro.url.searchParams.get('updated') === '1';
 
     {
       Object.keys(formErrors).length > 0 && (
-        <div class="note note-danger" role="alert">
+        <div class="note note-danger" role="alert" data-gear-overlay-notice>
           <p class="text-sm font-medium">Fix the following before saving:</p>
           <ul class="mt-2 list-disc space-y-1 pl-5 text-sm">
             {Object.values(formErrors).map((message) => (
@@ -286,6 +298,13 @@ const updated = Astro.url.searchParams.get('updated') === '1';
       )
     }
 
+    {
+      /* Deliberately NOT data-gear-overlay-notice: this is the delete confirmation, not
+         a form-errors banner, and this repo forbids modal "are you sure?" dialogs — the
+         two-step server flow (a plain POST re-rendering this same page with the note
+         below) is the deliberate replacement, and lifting it into the overlay's modal
+         would recreate exactly the pattern that flow exists to avoid. */
+    }
     {
       pendingDelete && (
         <div class="note note-danger">
@@ -341,9 +360,9 @@ const updated = Astro.url.searchParams.get('updated') === '1';
 
     <div class="sheet">
       <div class="sheet-body">
-        <p class="eyebrow">Gear</p>
-        <h1 class="page-title mt-2">{item.name}</h1>
-        <p class="aside mt-2">weigh it once</p>
+        <h1 class="page-title" data-gear-overlay-title>
+          {item.name}
+        </h1>
         <hr class="sheet-rule" />
 
         <GearItemForm

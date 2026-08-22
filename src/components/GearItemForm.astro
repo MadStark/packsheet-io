@@ -113,7 +113,7 @@ function invalid(field: string): 'true' | undefined {
 const acquiredOnMax = acquiredOnFutureCutoff();
 ---
 
-<form method="POST">
+<form method="POST" data-gear-overlay-form>
   {intentField && <input type="hidden" name={intentField.name} value={intentField.value} />}
   {
     /* The same mechanism sign-in.astro and sign-up.astro use for their own `next`
@@ -503,7 +503,30 @@ const acquiredOnMax = acquiredOnFutureCutoff();
     </div>
 
     <div>
-      <label for="notes" class="field-label"> Notes </label>
+      {
+        /* "(private)" states an RLS FACT, not a UI toggle: gear_items.notes is already
+           owner-only under row-level security, so this parenthetical tells the visitor
+           something already true of the field rather than offering a switch that turns
+           privacy on. It is the one field on this form whose contents no one else can
+           ever read, and the only way to know that was to know the schema.
+
+           PLAIN LABEL TEXT, IN NO SPAN OF ITS OWN, and both halves of that are
+           deliberate. The obvious move is to de-emphasise the parenthetical against the
+           word it qualifies, and the obvious token for "quieter" is --ink-2, because
+           that is what .hint and .aside read in. It would do the opposite here:
+           .field-label is --ink-3 (paper.css), and tokens.css records --ink-3 as chosen
+           to sit "visibly lighter than --ink-2 so the label hierarchy survives" — so
+           --ink-2 inside an --ink-3 label is DARKER than the label, and "(private)"
+           would end up shouting over "Notes". Italics would be the other reach, and
+           this codebase has none anywhere; the design language never sanctioned one, and
+           a lone italic here would be inventing a type style at a call site, which
+           DESIGN.md refuses for colour and refuses for the same reason here.
+
+           So it stays the label's own ink and the label's own weight. It also stays
+           INSIDE the <label>, not beside it, so it is announced with the field instead
+           of being read as loose text a screen reader never ties to the textarea. */
+      }
+      <label for="notes" class="field-label"> Notes (private) </label>
       <textarea id="notes" name={GEAR_FORM_FIELD.notes} class="field mt-1 w-full"
         >{values.notes}</textarea
       >
@@ -512,10 +535,20 @@ const acquiredOnMax = acquiredOnFutureCutoff();
 
   <hr class="sheet-rule" />
 
+  {
+    /* data-gear-overlay-submit and data-gear-overlay-cancel are read by
+       src/lib/gear/overlay.ts, which moves the submit button into the modal's own
+       footer and drops the cancel link entirely — a modal supplies its own native
+       dismissal (Esc, the backdrop, its own close control), so a second "Cancel" link
+       inside it would be redundant. Both attributes are inert on an ordinary page
+       render: nothing here reads them outside the overlay, and the markup below still
+       has to keep working exactly as it does today as a plain POSTed form with no
+       JavaScript, which is why it is otherwise untouched. */
+  }
   <div class="flex gap-3">
-    <button type="submit" class="btn btn-primary">
+    <button type="submit" class="btn btn-primary" data-gear-overlay-submit>
       {submitLabel}
     </button>
-    <a href={cancelHref} class="btn"> Cancel </a>
+    <a href={cancelHref} class="btn" data-gear-overlay-cancel> Cancel </a>
   </div>
 </form>
