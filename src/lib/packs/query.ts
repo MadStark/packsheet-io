@@ -248,6 +248,17 @@ export type PackTreeRow = NonNullable<Awaited<ReturnType<typeof _packTreeQuery>>
  */
 export const PACK_EDIT_SELECT = `${PACK_TREE_SELECT}, pack_notes(notes)`;
 
+/**
+ * `PACK_EDIT_SELECT`'s row shape, derived the same way `PackTreeRow` is derived from
+ * `PACK_TREE_SELECT` above — from the query itself, via `ReturnType<typeof …>`, so it can
+ * never drift from the select it names. `_packEditQuery` is never called.
+ */
+function _packEditQuery(client: PacksheetClient) {
+  return client.from('packs').select(PACK_EDIT_SELECT);
+}
+
+export type PackEditRow = NonNullable<Awaited<ReturnType<typeof _packEditQuery>>['data']>[number];
+
 export async function loadPackForEdit(client: PacksheetClient, userId: string, packId: string) {
   return client
     .from('packs')
@@ -259,6 +270,29 @@ export async function loadPackForEdit(client: PacksheetClient, userId: string, p
     .order('position', { referencedTable: 'pack_categories.pack_items', ascending: true })
     .order('id', { referencedTable: 'pack_categories.pack_items', ascending: true })
     .maybeSingle();
+}
+
+/**
+ * The unwrap `loadPackForEdit`'s caller needs, moved here rather than left in page
+ * frontmatter (PK-72's independent review). `vitest.config.ts` excludes `src/pages/**`
+ * from the test run — see this module's own "WHY THIS LIVES IN src/lib/" above — so a
+ * page-level `pack.pack_notes[0]?.notes` had no test able to catch a schema change that
+ * turned this embed into a different shape.
+ *
+ * The `[0]` is not defensive, it is what PostgREST returns: `pack_notes.pack_id` is the
+ * table's primary key, so the relationship really is one-to-one, but PostgREST infers
+ * cardinality from the foreign key rather than from the primary key, and the FK here is
+ * the composite `(user_id, pack_id) references packs (user_id, id)` every child table in
+ * this schema uses — which PostgREST does not recognise as to-one, so the embed always
+ * arrives as a one-element array rather than an object. Verified against the running
+ * stack rather than assumed.
+ *
+ * `?? null` covers exactly one case — a pack with no note has no row — which is the state
+ * `update_pack_details` leaves behind when someone clears the field, and the state every
+ * pack created before this migration is in.
+ */
+export function packNoteFromEditRow(row: Pick<PackEditRow, 'pack_notes'>): string | null {
+  return row.pack_notes[0]?.notes ?? null;
 }
 
 // ---------------------------------------------------------------------------

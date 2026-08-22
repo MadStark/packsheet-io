@@ -62,6 +62,14 @@ interface Props {
   title: string;
   values: PackFormValues;
   errors: Readonly<Record<string, string>>;
+  /**
+   * A write (not validation) failure behind this form — e.g. `update_pack_details` returning
+   * zero rows because the pack was deleted in another tab. Optional and usually `null`: both
+   * pages also carry a page-level `writeError` of their own for their OTHER failure paths,
+   * and only pass this prop the value when it belongs to this dialog's own save. See the
+   * render below for why the message has to live here rather than out on the page.
+   */
+  writeError?: string | null;
   /** The submit button's label — "Create pack" or "Save details". */
   submitLabel: string;
   /** Where Cancel goes: the page the dialog was opened from, without the opening param. */
@@ -75,7 +83,8 @@ interface Props {
   intentField?: { readonly name: string; readonly value: string };
 }
 
-const { id, open, title, values, errors, submitLabel, cancelHref, intentField } = Astro.props;
+const { id, open, title, values, errors, writeError, submitLabel, cancelHref, intentField } =
+  Astro.props;
 
 /**
  * The form's id, referenced by the Save button in the shell's `actions` slot. A slot
@@ -103,6 +112,26 @@ const MARKER_CLASS = 'text-ink-2 normal-case tracking-normal';
 
   <form method="POST" id={FORM_ID} class="space-y-4">
     {intentField && <input type="hidden" name={intentField.name} value={intentField.value} />}
+
+    {
+      /* WHY THIS MESSAGE LIVES HERE NOW, NOT ONLY ON THE PAGE. Both pages also set a
+         page-level `writeError` and re-open this dialog on the exact same failure — the
+         write behind this form failed, e.g. `update_pack_details` returned zero rows because
+         the pack was deleted in another tab. But re-opening the dialog is what makes that
+         page-level alert unreachable: this is a real <dialog> in the top layer, with a scrim,
+         full-bleed below 640px, sitting on top of the one paragraph that would have explained
+         the failure. Rendering it in here, above the field the visitor is looking at, is the
+         only way the message and the reopened form are ever seen together. `.field-error`
+         rather than `.note`/`.note-danger`: a note may only lie directly on the paper
+         (paper.css §2.5), never inside a sheet-like container such as this dialog. */
+    }
+    {
+      writeError && (
+        <p class="field-error" role="alert">
+          {writeError}
+        </p>
+      )
+    }
 
     <div>
       <label for="pack-name" class={LABEL_CLASS}>

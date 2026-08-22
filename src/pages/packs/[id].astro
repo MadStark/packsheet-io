@@ -21,7 +21,7 @@ import { readWeightSystem } from '../../lib/profile';
 import { WEIGHT_ENTRY_UNIT, formatWeight } from '../../lib/units';
 import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
 import { PACKS_PATH, PACK_EDIT_PARAM, packEditHref, packPath } from '../../lib/packs/routes';
-import { loadPackForEdit } from '../../lib/packs/query';
+import { loadPackForEdit, packNoteFromEditRow } from '../../lib/packs/query';
 import {
   addGearItemsToCategory,
   createCustomPackItem,
@@ -593,23 +593,11 @@ if (Astro.request.method === 'POST') {
  */
 const totals = computeTotals(pack);
 
-/**
- * AN ARRAY WITH AT MOST ONE ROW IN IT, and the `[0]` is not defensive — it is what
- * PostgREST returns.
- *
- * `pack_notes.pack_id` is the table's primary key, so the relationship really is one-to-one
- * and never more. PostgREST cannot see that: it infers cardinality from the foreign key,
- * and this one is the composite `(user_id, pack_id) references packs (user_id, id)` that
- * every child table in this schema uses to make cross-tenant re-parenting unrepresentable.
- * A composite FK is not recognised as a to-one relationship, so the embed arrives as a
- * one-element array rather than an object. Verified against the running stack rather than
- * assumed.
- *
- * `?? null` therefore covers exactly one case — a pack with no note has no row — which is
- * the state `update_pack_details` leaves behind when someone clears the field, and the
- * state every pack created before this migration is in.
- */
-const packNote: string | null = pack.pack_notes[0]?.notes ?? null;
+// The array-to-value unwrap lives in src/lib/packs/query.ts now, as packNoteFromEditRow —
+// see that function's own comment for why the embed is a one-element array rather than an
+// object, and why this could not stay page frontmatter (vitest.config.ts excludes
+// src/pages/** from the test run, so nothing here was ever exercised by a test).
+const packNote: string | null = packNoteFromEditRow(pack);
 
 const packValues: PackFormValues =
   packValuesOverride ?? packToFormValues({ ...pack, notes: packNote });
@@ -710,7 +698,18 @@ const CANCEL_LINK_CLASS = 'btn';
     </div>
 
     {
-      writeError && (
+      /* NOT shown while the details dialog is open. `showDetailsDialog` is true only via the
+         `?edit` param or `packValuesOverride`, and the latter is set by — and only by — the
+         two `savePack` failure branches (see that constant's own comment), so `writeError`
+         co-occurring with `showDetailsDialog` on this page only ever happens on a `savePack`
+         failure. That message now renders inside the dialog itself instead (see
+         PackDetailsDialog's own `writeError` prop) — the dialog would otherwise cover this
+         note with its scrim, same defect PK-72's independent review found on `/packs`. The
+         other nine intents never set `showDetailsDialog`, so this note still renders for all
+         of them exactly as before. */
+    }
+    {
+      writeError && !showDetailsDialog && (
         <div class="note note-danger" role="alert">
           <p>{writeError}</p>
         </div>
@@ -1316,6 +1315,7 @@ const CANCEL_LINK_CLASS = 'btn';
       title="Pack details"
       values={packValues}
       errors={packErrors}
+      writeError={writeError}
       submitLabel="Save details"
       cancelHref={selfPath}
       intentField={{ name: 'intent', value: PACK_INTENT.savePack }}

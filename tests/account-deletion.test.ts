@@ -39,6 +39,14 @@ beforeAll(async () => {
   // which is the empty-fixture trap this file's own comments warn about.
   await alice.client.from('profiles').upsert({ user_id: alice.id, weight_units: 'imperial' });
   await bob.client.from('profiles').upsert({ user_id: bob.id, weight_units: 'imperial' });
+
+  // PK-72: Alice's pack gets a private note too, for the identical reason the profiles
+  // upsert above exists — `pack_notes` is a table that only ever holds a row when its
+  // owner typed one, so the deletion below has to be proved against a fixture that
+  // actually put one there.
+  await alice.client
+    .from('pack_notes')
+    .insert({ pack_id: alicePack.packId, notes: 'Bring extra socks' });
 });
 
 describe('a signed-in user deletes their own account', () => {
@@ -79,12 +87,19 @@ describe('a signed-in user deletes their own account', () => {
     // see that migration's own note on why the guarantee is kept total rather than
     // "total except for the newest table".
     const profiles = await adminSql('select user_id from profiles where user_id = $1', [alice.id]);
+    // The seventh table, added by PK-72's own migration — see
+    // `20260819000000_pack_notes.sql`'s "six tables becomes seven" comment for why it is
+    // named here even though its composite FK to `packs` would already cascade it.
+    const packNotes = await adminSql('select pack_id from pack_notes where pack_id = $1', [
+      alicePack.packId,
+    ]);
 
     expect(packs).toEqual([]);
     expect(categories).toEqual([]);
     expect(items).toEqual([]);
     expect(gear).toEqual([]);
     expect(profiles).toEqual([]);
+    expect(packNotes).toEqual([]);
   });
 
   // The other half of "exactly this user's rows and nobody else's". Everything above

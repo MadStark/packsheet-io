@@ -330,9 +330,7 @@ describe('createPack', () => {
     expect(noteRow.notes).toBe('Bring extra socks');
 
     expect(
-      await adminSql(`select pack_id from public.pack_notes where pack_id = $1`, [
-        withoutNote.id,
-      ]),
+      await adminSql(`select pack_id from public.pack_notes where pack_id = $1`, [withoutNote.id]),
     ).toEqual([]);
   });
 });

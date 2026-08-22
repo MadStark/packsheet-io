@@ -147,15 +147,14 @@ const listIsEmpty = !loadError && packs.length === 0;
       /* PK-64 (Notebook Paper). A cover sheet carrying the title and the create action,
          and a sheet holding the list as a ledger — the "a sheet holding a
          list" and "a sheet holding a form" patterns src/pages/gear/index.astro already
-         sets. Both alerts are notes lying directly on the paper (§2.5), never inside a
-         sheet. */
-    }
-    {
-      writeError && (
-        <div class="note note-danger" role="alert">
-          <p>{writeError}</p>
-        </div>
-      )
+         sets. The load error is a note lying directly on the paper (§2.5), never inside a
+         sheet.
+
+         `writeError` used to render as a second note here, but `showCreateDialog` already
+         reopens the dialog on every path that sets it (see that constant's own comment: one
+         of its three conditions IS `writeError !== null`), so a note here was never once
+         visible — the dialog's scrim covers it. It renders inside the dialog now instead;
+         see PackDetailsDialog's own `writeError` prop. */
     }
     {
       loadError && (
@@ -287,6 +286,7 @@ const listIsEmpty = !loadError && packs.length === 0;
       title="Create a pack"
       values={formValues}
       errors={formErrors}
+      writeError={writeError}
       submitLabel="Create pack"
       cancelHref={PACKS_PATH}
     />

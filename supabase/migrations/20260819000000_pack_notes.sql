@@ -283,3 +283,43 @@ comment on function public.update_pack_details(uuid, text, text, text, text) is
 revoke all on function public.update_pack_details(uuid, text, text, text, text)
   from public, anon, service_role;
 grant execute on function public.update_pack_details(uuid, text, text, text, text) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- delete_own_account() — six tables becomes seven
+-- ---------------------------------------------------------------------------
+--
+-- See 20260817000000_user_profiles.sql's "five tables becomes six" comment for the full
+-- argument; this is the same argument for pack_notes. `pack_notes` is a new user-owned
+-- table (it has a `user_id` column) and was never added to this function when this file
+-- created it. Its own `on delete cascade` from `packs` would remove it correctly on its
+-- own — which is exactly why it still has to be named here rather than despite that: the
+-- function's guarantee is "this deletes the caller's data by name, and nothing another
+-- user owns", and a table missing from the list is one whose removal depends on a cascade
+-- firing correctly. Placed before the `packs` delete, alongside `pack_items` and
+-- `pack_categories`, since it is a leaf that references `packs` through the same
+-- composite `(user_id, pack_id) references packs (user_id, id)` foreign key those two
+-- tables use.
+create or replace function public.delete_own_account()
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+  delete from public.pack_items where user_id = (select auth.uid());
+  delete from public.pack_categories where user_id = (select auth.uid());
+  delete from public.pack_notes where user_id = (select auth.uid());
+  delete from public.packs where user_id = (select auth.uid());
+  delete from public.gear_items where user_id = (select auth.uid());
+  delete from public.profiles where user_id = (select auth.uid());
+  delete from auth.users where id = (select auth.uid());
+$$;
+
+comment on function public.delete_own_account() is
+  'Deletes every row the calling user owns — pack_items, pack_categories, pack_notes, packs, gear_items, profiles, then the auth.users row itself, in that leaf-to-root order — and nothing another user owns. Takes no arguments: auth.uid() is the only identity it can ever act on. SECURITY DEFINER because ordinary policies on our own tables cannot express deleting the identity itself, and because authenticated holds no privilege on auth.users at all. Deletes seven tables by name rather than relying on auth.users cascading them, because letting Postgres interleave cascades from one statement hits a referential-integrity race — see the comment above the function in 20260811000000_account_deletion.sql for the reproduction. Callable only by authenticated; see the revoke/grant immediately below.';
+
+-- `create or replace function` PRESERVES the existing ACL, so the revoke and grant already
+-- in force still hold — re-stating them here is belt and braces against a future edit that
+-- reaches for `drop function` and `create` instead, which does NOT preserve the ACL, in
+-- exactly the way 20260817000000_user_profiles.sql re-states them for the same function.
+revoke all on function public.delete_own_account() from public, anon;
+grant execute on function public.delete_own_account() to authenticated;
