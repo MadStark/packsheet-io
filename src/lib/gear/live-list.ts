@@ -32,10 +32,11 @@
  * a list that "sometimes shows the wrong page" with no reproduction. A click handler bound to
  * a link this module itself just replaced looks like a sort header that "stops working after
  * the first click" with no error anywhere — the listener is not broken, it is gone, attached
- * to a node no longer in the document. A swap that returns zero regions on a session-expiry
- * redirect looks like a filter that "just doesn't do anything" instead of the sign-in page the
- * visitor actually needs. Each of those has a rule below that exists only because one of them
- * was the failure mode, not a hypothetical.
+ * to a node no longer in the document. A swap that refreshes fewer regions than the page has —
+ * zero of them on a session-expiry redirect, one of them on a load-error render that answers
+ * 200 with no list — looks like a filter that "just doesn't do anything" instead of the
+ * sign-in page or the error note the visitor actually needs. Each of those has a rule below
+ * that exists only because one of them was the failure mode, not a hypothetical.
  *
  * ---------------------------------------------------------------------------
  * THE PAGE CONTRACT THIS MODULE IS WRITTEN AGAINST
@@ -79,7 +80,12 @@
  * until someone notices the list never moves.
  */
 
-import { GEAR_DEFAULT_DIRECTION, GEAR_DEFAULT_SORT } from './fields';
+import {
+  GEAR_DEFAULT_DIRECTION,
+  GEAR_DEFAULT_SORT,
+  effectiveGearStatuses,
+  isGearStatus,
+} from './fields';
 
 // ---------------------------------------------------------------------------
 // The attribute vocabulary
@@ -129,16 +135,34 @@ export const LIVE_SUMMARY_ATTRIBUTE = 'data-gear-summary';
  * the tick) or has genuinely never arrived (attribute absent — the handler submits the form
  * and the visitor gets a full-page navigation, exactly as before PK-70).
  *
- * WHAT THE ORDER INSIDE THIS MODULE STILL BUYS. `initGearLiveList` sets this attribute
- * synchronously, first thing, before it installs a listener of its own. That closes the
- * narrower window where a tick arriving between "this module started initialising" and "this
- * module is ready" would be handled by neither: with the attribute set first, such a tick is
- * swallowed by the fallback's early return and then handled by this module's own listener,
- * rather than being submitted full-page by one and updated in place by the other.
+ * WHAT THE ORDER INSIDE THIS MODULE STILL BUYS, AND WHAT IT DOES NOT. `initGearLiveList`
+ * sets this attribute synchronously, first thing, before it installs a listener of its own.
+ * An earlier version of this paragraph sold that ordering as closing a "narrower window"
+ * where a tick arriving between "this module started initialising" and "this module is
+ * ready" would be "swallowed by the fallback's early return and then handled by this
+ * module's own listener" — and that window does not exist, in either direction. From the
+ * `setAttribute` call to the last `addEventListener`, `initGearLiveList` is one synchronous
+ * run with no `await` and no suspension point anywhere in it, and JavaScript is
+ * single-threaded: no `change` event can be DISPATCHED partway through a synchronous
+ * function. Nor is the described recovery how dispatch works — an event that fires before a
+ * listener is attached is simply never heard by it, not caught by one handler and redirected
+ * to another. The real invariant is stronger and simpler: the attribute and every listener
+ * land together, in one tick, so there is no window of ANY width for a tick to fall between
+ * them.
  *
- * AN EARLIER VERSION OF THIS PARAGRAPH DESCRIBED THE OPPOSITE ARRANGEMENT — that the inline
- * script "checks for this attribute before installing its listener" and "reads it exactly
- * once" — and it was wrong in a way worth recording, because it reads as plausible and would
+ * The ordering is therefore a guard against a FUTURE regression, not a fix for a gap
+ * observed today. The moment someone adds an `await` inside `initGearLiveList` — a dynamic
+ * `import()`, a feature probe — that single run becomes two, and a tick landing in the new
+ * gap is heard by whichever half has already been installed. With the attribute set first,
+ * that tick reaches neither handler and does nothing (recoverable: the visitor ticks again);
+ * with it set last, it reaches the fallback and navigates full-page while this module is
+ * mid-init. Setting it first is the ordering that stays correct if the assumption above ever
+ * stops holding.
+ *
+ * AN EARLIER VERSION OF THE FIRE-TIME PARAGRAPH ABOVE DESCRIBED THE OPPOSITE ARRANGEMENT —
+ * that the inline script "checks for this attribute before installing its listener" and
+ * "reads it exactly once" — and it was wrong in a way worth recording, because it reads as
+ * plausible and would
  * have made the fallback fire on every visit alongside the in-place update. It was caught
  * while wiring the page up against it.
  */
@@ -290,6 +314,20 @@ function findElementById(root: ParentNode, id: string): Element | null {
   return null;
 }
 
+/** Every id under `root` that carries `LIVE_REGION_ATTRIBUTE`, skipping any region with no
+ *  `id` for the same reason `swapLiveRegions` skips it: nothing can be matched to it. Read on
+ *  the CURRENT document BEFORE a swap, never after, so the answer is "the regions this page
+ *  has" rather than "the regions this page has plus whatever the response just grafted into
+ *  one of them" — a fetched list region containing a nested region would otherwise change the
+ *  count the shortfall check in `initGearLiveList` is measured against. */
+function liveRegionIds(root: ParentNode): string[] {
+  const ids: string[] = [];
+  for (const region of root.querySelectorAll(`[${LIVE_REGION_ATTRIBUTE}]`)) {
+    if (region.id !== '') ids.push(region.id);
+  }
+  return ids;
+}
+
 /**
  * Grafts every region of `next` onto the matching region of `current`, in place, and reports
  * which ids it actually touched.
@@ -306,12 +344,26 @@ function findElementById(root: ParentNode, id: string): Element | null {
  * means the worst case is a region that did not update, which is recoverable (a full
  * navigation still works) rather than a list that visibly vanished.
  *
- * AN EMPTY RETURN IS THE CALLER'S SIGNAL THAT `next` WAS NOT A CLOSET PAGE AT ALL. The
- * realistic way to reach zero matches for EVERY region at once is a redirect to sign-in after
- * a session expired mid-visit: the fetched HTML is real, parses fine, and shares not one
- * region id with the page that requested it. `initGearLiveList` reads that as "fall back to
- * `navigate(url)`" — see its own note (g) — rather than silently leaving the last good list on
- * screen while the visitor is actually signed out.
+ * THE RETURNED LIST IS THE CALLER'S EVIDENCE THAT `next` WAS THE PAGE IT ASKED FOR, AND THE
+ * TEST IS "ALL OF THEM", NOT "ANY OF THEM" (PK-70 review). This paragraph used to say only
+ * that an EMPTY return means `next` was not a closet page at all — the realistic way to reach
+ * zero matches for every region at once being a redirect to sign-in after a session expired
+ * mid-visit, where the fetched HTML is real, parses fine, and shares not one region id with
+ * the page that requested it. That much is still true; what was wrong was treating zero as
+ * the only shortfall worth reporting.
+ *
+ * `#gear-actions` — the header's Import and Add-item links — is rendered by EVERY branch of
+ * `src/pages/gear/index.astro`, including the load-error branch that returns 200 OK with a
+ * `role="alert"` note and NO list and NO figures. A transient database error mid-update
+ * therefore produces a response this function matches exactly one region of: not zero, so a
+ * caller gating on zero reads it as success, syncs the form, rewrites the address bar and
+ * announces a count read back off the list it did NOT replace. The visitor's table and count
+ * sit unchanged under a URL that claims otherwise, and the server's own error note is parsed
+ * and thrown away. A partial swap means precisely what a zero swap means — "this was not the
+ * closet page we asked for" — and `initGearLiveList` now compares the ids it got back against
+ * the regions the CURRENT document actually has, treating any shortfall the same way, with
+ * zero as the extreme case of one rule rather than a special case of its own. See its note
+ * (g).
  *
  * `innerHTML` IS REPLACED, NOT THE ELEMENT ITSELF. Swapping the whole node would drop
  * `LIVE_REGION_ATTRIBUTE` and the `id` along with it — both live ON the element this function
@@ -390,21 +442,62 @@ export function liveStatusMessage(region: ParentNode): string {
  */
 
 /**
- * After a SORT swap the list is now ordered by a different column, but the form's own hidden
- * `sort`/`dir` inputs were rendered for the PREVIOUS order and nothing else updates them —
- * they are inside `#gear-filters`, which is never one of the swapped regions. Left alone, the
- * next keystroke in the search box would silently discard the sort the visitor just chose:
- * `filterFormUrl` reads those hidden inputs as part of the form's own fields, so a stale `dir`
- * would ride along into a request that has nothing to do with sorting at all.
+ * Writes `url` back into the form's own state: the hidden `sort`/`dir` inputs, and the three
+ * status checkboxes. Everything inside `#gear-filters` is server-rendered ONCE, for the query
+ * the page was loaded with, and `#gear-filters` is never one of the swapped regions — so
+ * every field in it that an in-place update changes the meaning of has to be written back
+ * here or it stays stranded on a query nobody is looking at any more.
  *
- * ONLY `sort` AND `dir` ARE TOUCHED. In particular the search input's OWN value is never
- * written here, even though `url` may carry a `q` this function could read. A visitor mid-word
- * in the search box — which is exactly when an `input`-triggered update fires — has their
- * caret position tied to that field's value; overwriting it out from under them, even with the
- * text they themselves just typed, would move the caret to the end of the field on every
- * keystroke and make the search box unusable while it has focus. `filterFormUrl` already reads
- * the field's live value directly, so there is nothing this function needs to write back for
- * search to keep working.
+ * After a SORT swap the list is now ordered by a different column, but the form's own hidden
+ * `sort`/`dir` inputs were rendered for the PREVIOUS order and nothing else updates them.
+ * Left alone, the next keystroke in the search box would silently discard the sort the
+ * visitor just chose: `filterFormUrl` reads those hidden inputs as part of the form's own
+ * fields, so a stale `dir` would ride along into a request that has nothing to do with
+ * sorting at all.
+ *
+ * THE STATUS CHECKBOXES ARE SYNCED HERE TOO, AND THIS FUNCTION USED TO SYNC ONLY `sort`/`dir`
+ * (PK-70 review). The old version of this comment argued that the hidden pair was the only
+ * server-decided default an in-place update could silently strand, and that was wrong in a
+ * way with a visible symptom. `effectiveGearStatuses` (src/lib/gear/fields.ts) resolves an
+ * EMPTY status selection to `GEAR_DEFAULT_STATUSES` — owned and wishlist — so a visitor who
+ * unticks Owned and then unticks Wishlist leaves all three boxes clear, `filterFormUrl` finds
+ * no checked `status` box and builds a URL carrying no `status` param at all, and the server
+ * answers that URL with owned + wishlist: MORE rows than the tick just removed, under three
+ * empty boxes claiming none are shown. Nothing throws, and the boxes and the list disagree
+ * for as long as the visitor stays on the page.
+ *
+ * That falsified two comments that already claimed the disagreement was impossible —
+ * `effectiveGearStatuses`'s own header in `src/lib/gear/fields.ts` ("a visitor can never see
+ * a box unticked next to a status that is still quietly present in the list"), and the
+ * `checkedStatuses` note in `src/pages/gear/index.astro` ("the ticked boxes below and the
+ * rows in the list cannot disagree"). Both are true of the SERVER render, which is all
+ * either was written against; neither survived a client that changes the list without
+ * re-rendering the form. Re-ticking the boxes here from the same resolver the server uses is
+ * what makes the claim true again on both paths, rather than true on one and quietly wrong on
+ * the other.
+ *
+ * IT IS `effectiveGearStatuses`, NOT A LOCAL "IF NONE, TICK TWO" RULE. The whole point of that
+ * function is that one implementation answers "what does an empty selection mean" for the
+ * query layer and the checkboxes at once; a second copy here would be exactly the drift it
+ * exists to prevent, and it would drift SILENTLY — both halves would still be individually
+ * valid. `isGearStatus` filters the raw params first because the URL is untrusted input and
+ * `parseGearQuery` drops the same unknown values server-side; an unrecognised `?status=` must
+ * resolve to the defaults here for the identical reason it does there.
+ *
+ * WRITTEN UNCONDITIONALLY ON EVERY SUCCESSFUL UPDATE — search, status, sort, page — not only
+ * after a status change. A URL is the whole of what the server was asked for, so writing all
+ * of it back is what makes "the form shows the query the list is showing" a property of every
+ * path rather than of the paths someone remembered to list.
+ *
+ * THE SEARCH INPUT'S OWN VALUE IS STILL NEVER WRITTEN HERE, even though `url` may carry a `q`
+ * this function could read. A visitor mid-word in the search box — which is exactly when an
+ * `input`-triggered update fires — has their caret position tied to that field's value;
+ * overwriting it out from under them, even with the text they themselves just typed, would
+ * move the caret to the end of the field on every keystroke and make the search box unusable
+ * while it has focus. `filterFormUrl` already reads the field's live value directly, so there
+ * is nothing this function needs to write back for search to keep working. A checkbox has no
+ * caret and no in-progress state to destroy, which is why the same argument does not extend
+ * to it.
  */
 export function syncFilterFormToUrl(form: HTMLFormElement, url: string): void {
   const parsed = new URL(url, form.action);
@@ -414,6 +507,14 @@ export function syncFilterFormToUrl(form: HTMLFormElement, url: string): void {
     sort.value = parsed.searchParams.get('sort') ?? GEAR_DEFAULT_SORT;
   if (direction instanceof HTMLInputElement)
     direction.value = parsed.searchParams.get('dir') ?? GEAR_DEFAULT_DIRECTION;
+
+  const statuses = effectiveGearStatuses(parsed.searchParams.getAll('status').filter(isGearStatus));
+  for (const box of form.querySelectorAll<HTMLInputElement>('input[name="status"]')) {
+    // `some` rather than `includes`: `statuses` is a `readonly GearStatus[]` and `box.value` is
+    // a bare `string`, and the cast that would let `includes` take it is a cast asserting
+    // something this function has not checked.
+    box.checked = statuses.some((status) => status === box.value);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -433,8 +534,12 @@ export interface GearLiveListDeps {
   /** Fetches `url` and resolves to the response body as text, or `null` for anything that is
    *  not a plain, same-document success: a thrown network error, a non-OK status, or a
    *  response that redirected somewhere this module did not ask for (a session-expiry
-   *  redirect to sign-in is the realistic case — see `swapLiveRegions`'s own note on the zero
-   *  -region fallback this feeds). `null` is a value, not an exception, precisely so
+   *  redirect to sign-in is the realistic case — see `swapLiveRegions`'s own note on the
+   *  region-shortfall fallback this feeds). That last clause is a real check and not an
+   *  aspiration: `fetch` follows a redirect transparently, so sign-in's HTML arrives as a
+   *  200 and only `response.redirected` plus a pathname comparison tells it from the closet
+   *  — implemented at the one call site, in `src/pages/gear/index.astro`'s bundled script,
+   *  which argues it there. `null` is a value, not an exception, precisely so
    *  `initGearLiveList` never needs a `try`/`catch` around ordinary control flow to tell "the
    *  server said no" apart from "a bug in this module". */
   fetchPage(url: string): Promise<string | null>;
@@ -468,13 +573,28 @@ export interface GearLiveListDeps {
  * BEHAVIOUR, IN THE ORDER IT RUNS:
  *
  *   (a) THE READY HANDSHAKE IS SET FIRST, before a single listener is installed — see
- *       `LIVE_READY_ATTRIBUTE`'s own header for the full argument. It has to be unconditional
- *       on reaching this point at all (not deferred behind, say, a successful first fetch),
- *       because the inline fallback script has already run by the time this module's own
- *       `<script>` executes and reads this attribute exactly once.
+ *       `LIVE_READY_ATTRIBUTE`'s own header, which is the one place the handshake is argued
+ *       and is deliberately not restated here. The half that matters at this line: the
+ *       inline fallback re-reads the attribute on EVERY `change` it handles, not once at
+ *       install time, so what this `setAttribute` decides is every tick from now on rather
+ *       than a single reading taken before this module ran. An earlier draft of this point
+ *       said the opposite — that the fallback "reads this attribute exactly once" — which is
+ *       the same wrong arrangement `LIVE_READY_ATTRIBUTE`'s header already records as a
+ *       superseded draft, restated independently here and left to contradict it. Hence the
+ *       cross-reference instead of a second description. It still has to be unconditional on
+ *       reaching this point at all (not deferred behind, say, a successful first fetch): a
+ *       module that has bound its listeners owns the checkboxes whether or not any fetch has
+ *       ever succeeded.
  *   (b) Search input is debounced by `GEAR_SEARCH_DEBOUNCE_MS`; each keystroke clears any
  *       pending update and schedules a new one, so only the last keystroke in a burst issues
- *       a fetch.
+ *       a fetch. THE FORM'S OWN `submit` IS ALSO INTERCEPTED, and it bypasses that debounce
+ *       entirely. Once the Apply button has been removed the search field is the form's only
+ *       text-like control, so HTML's implicit submission still fires on Enter — a genuine
+ *       full-page GET, from the single most common way anyone submits a search, on a ticket
+ *       whose acceptance criterion is that searching does not navigate. Listening for `input`
+ *       alone never saw it. An explicit Enter means "go now", not "wait and see if I keep
+ *       typing", so the pending debounce is cancelled rather than raced: leaving it to fire
+ *       would issue a second fetch for a query the first one already carried.
  *   (c) A status checkbox's `change` updates immediately — no debounce, because a checkbox
  *       does not fire `change` per keystroke; there is nothing to burst.
  *   (d) LIVE LINKS ARE BOUND WITH ONE DELEGATED LISTENER ON `doc`, NOT ONE PER LINK. A sort
@@ -485,26 +605,69 @@ export interface GearLiveListDeps {
  *       suggesting why — the same shape of failure `pairModalTriggers` in `modal.ts` was
  *       rewritten to avoid for the identical reason. Delegating to `doc`, which this module
  *       never replaces, is what survives every swap.
- *   (e) ON A SUCCESSFUL UPDATE: swap the regions, sync the form's `sort`/`dir`, then
+ *
+ *       A CLICK ALSO CANCELS THE PENDING DEBOUNCE AND WRITES ITS OWN `sort`/`dir` INTO THE
+ *       FORM BEFORE IT FETCHES (PK-70 review), which the status handler in (c) already did
+ *       and this one did not. Both halves fix the same silent loss. A debounced search still
+ *       in flight when a sort header is clicked read the form's hidden `sort`/`dir` BEFORE
+ *       the click, so if its response happens to land second it repaints the list in the old
+ *       order and takes the token with it — the visitor's click undone by nothing but
+ *       response timing, with no error and a URL that agrees with whichever request won.
+ *       Cancelling the pending timer removes the common case; syncing the clicked `href`'s
+ *       `sort`/`dir` into the form at CLICK time (not only after the response lands, which
+ *       still happens and is still the source of truth) means any update that starts after
+ *       the click builds its URL from the visitor's most recent intent even if its own
+ *       request resolves first.
+ *   (e) ON A SUCCESSFUL UPDATE: swap the regions, sync the form to the URL just applied —
+ *       `sort`/`dir` and the status checkboxes, see `syncFilterFormToUrl` — then
  *       `replaceUrl(url)` — REPLACE, NOT PUSH. Every keystroke in the search box is a distinct
  *       update; `pushState`-per-keystroke would mean the visitor's browser Back button has to
  *       be pressed once per character typed before it leaves this page at all, which is the
  *       opposite of what Back is for. `replaceState` keeps the address bar honest and
  *       shareable — the URL always names the filtered view currently on screen — without
  *       burying the page the visitor actually navigated FROM under a stack of keystrokes.
- *       Finally the live region's text is set to `liveStatusMessage(doc)`, announcing the new
- *       count.
+ *       Finally the new count is announced, by CLEARING the live region's text and setting
+ *       the real message on a following timer rather than assigning it directly. That is the
+ *       standard fix for a well-known ARIA problem, and the problem is the common case here,
+ *       not an edge: `liveStatusMessage` reports the "Showing X–Y of Z" range, a sort does
+ *       not change the range at all, and paging between two full pages changes only the
+ *       digits either side of the dash. NVDA and JAWS do not reliably re-announce a
+ *       `role="status"` region whose content is assigned the string it already held, so a
+ *       screen-reader visitor sorting a table hears nothing to confirm anything happened.
+ *       Writing `''` first makes every announcement a real content change. The timer is the
+ *       injected `setTimeoutImpl`, like the debounce, so a test can settle it without a
+ *       clock.
  *   (f) STALE RESPONSES ARE DISCARDED BY A MONOTONIC TOKEN. Typing fast issues overlapping
  *       fetches ("boo" then "boot" before "boo"'s response has landed) that can resolve in
  *       either order; painting whichever arrives LAST is wrong exactly when the network
  *       reorders them, silently showing a stale result set with nothing on screen to say it is
  *       stale. Every call to `update` takes the next token before it awaits anything; a
  *       response is applied only if its token is still the newest one issued.
- *   (g) FAILURE IS NEVER SILENT: a null/thrown `fetchPage`, or a `swapLiveRegions` that
- *       matched nothing (see that function's own note on what a zero-match response usually
- *       means), both fall back to `navigate(url)`. The alternative — leaving the control
- *       looking like it did nothing — is indistinguishable from "this feature is broken" to
- *       everyone who is not reading this file.
+ *   (g) FAILURE IS NEVER SILENT, AND "FAILURE" IS ANYTHING SHORT OF A COMPLETE SWAP. A
+ *       null `fetchPage`, a `swapLiveRegions` that did not refresh EVERY region this document
+ *       has, or a throw anywhere in `update` at all: each falls back to `navigate(url)`. The
+ *       alternative — leaving the control looking like it did nothing — is indistinguishable
+ *       from "this feature is broken" to everyone who is not reading this file. Two of those
+ *       three used to be weaker, and both were weak in the same direction (PK-70 review):
+ *
+ *         * The swap check read `swapped.length === 0`. `#gear-actions` renders in every
+ *           server branch INCLUDING the load-error one, which renders no list and no figures
+ *           and still answers 200, so a real failure came back with one region matched and
+ *           sailed through a gate looking for none. The check is now against
+ *           `liveRegionIds(doc)`: every region the current page has must have been swapped.
+ *           See `swapLiveRegions`'s own note.
+ *         * The `try` covered the `await deps.fetchPage(url)` and nothing after it, on the
+ *           reasoning that the seam is the only place a real browser call could throw. It is
+ *           not: `history.replaceState` is rate-limited in WebKit (~100 calls per 30s) and
+ *           throws `SecurityError` past the limit, which a 250ms debounce and sustained
+ *           typing can genuinely reach, and `region.innerHTML = …` inside `swapLiveRegions`
+ *           throws under a Trusted-Types-requiring CSP — a degradation this module's own
+ *           header already lists for the FETCH while the swap was left unguarded. Either one
+ *           produced an unhandled rejection and a control that did nothing, which is the
+ *           exact failure class the paragraph above says this module is built against. The
+ *           guard now wraps the whole body, and RE-CHECKS THE TOKEN before navigating: a
+ *           stale request that throws late must not yank the visitor off a fresher result
+ *           that already painted, which is (f)'s rule applied to the failure path.
  *   (h) FOR A `page:` LINK ONLY, after the swap the list region's own top is scrolled back
  *       into view — a multi-page list can be taller than the viewport, and without this,
  *       paging from row 50 leaves the visitor's scroll position wherever it was, looking at
@@ -549,41 +712,84 @@ export function initGearLiveList(doc: Document, deps: GearLiveListDeps): (() => 
   let latestToken = 0;
   let pendingSearch: ReturnType<typeof setTimeout> | null = null;
 
+  // (e) — CLEARED, THEN SET ON THE NEXT TIMER, never assigned in one go. A sort changes the
+  // order and not the range, so `liveStatusMessage` hands back the string already sitting in
+  // this element, and a `role="status"` region whose content does not CHANGE is not reliably
+  // re-announced by NVDA or JAWS — the visitor who just sorted the table hears nothing.
+  // Paging between two equally full pages is the same story. Writing `''` first is the
+  // standard answer, and it is the injected timer rather than the real one so a test can
+  // settle the announcement without waiting on a clock. See point (e) in this function's
+  // header for the whole argument.
+  function announce(message: string): void {
+    liveStatus.textContent = '';
+    setTimeoutFn(() => {
+      liveStatus.textContent = message;
+    }, 0);
+  }
+
   async function update(url: string, scrollRegionId: string | null): Promise<void> {
     const token = ++latestToken;
 
-    let html: string | null;
+    // (g) — THE WHOLE BODY, not just the fetch: `replaceUrl` and the swap's own `innerHTML`
+    // write both have real ways to throw in a real browser, and neither used to be covered.
     try {
-      html = await deps.fetchPage(url);
+      let html: string | null;
+      try {
+        // Still its own `catch` returning `null`: the seam DOCUMENTS `null` for "the server
+        // said no", and collapsing that into the outer guard would lose the distinction
+        // between an answer this module expects and a bug it does not.
+        html = await deps.fetchPage(url);
+      } catch {
+        html = null;
+      }
+
+      if (token !== latestToken) return; // (f) — superseded by a later update; drop this one.
+
+      if (html === null) {
+        deps.navigate(url); // (g)
+        return;
+      }
+
+      const nextDocument = new DOMParser().parseFromString(html, 'text/html');
+      // Read BEFORE the swap, for the reason `liveRegionIds` gives.
+      const expected = liveRegionIds(doc);
+      const swapped = swapLiveRegions(doc, nextDocument);
+      if (swapped.length !== expected.length) {
+        // (g) — a SHORTFALL, of which zero is only the extreme case: a load-error render
+        // shares `#gear-actions` with a healthy one and nothing else. See swapLiveRegions.
+        deps.navigate(url);
+        return;
+      }
+
+      syncFilterFormToUrl(form, url);
+      deps.replaceUrl(url); // (e) — replaceState, deliberately not pushState.
+      announce(liveStatusMessage(doc));
+
+      if (scrollRegionId !== null) {
+        // (h) — only reached for a page: link; see the caller below. Looked up fresh, after
+        // the swap, because the swap just replaced this region's own contents (though not the
+        // region element itself — swapLiveRegions rewrites innerHTML, not the node — so the id
+        // still resolves to the same element it did before the fetch).
+        const region = doc.getElementById(scrollRegionId);
+        if (region !== null) deps.scrollIntoView(region);
+      }
     } catch {
-      html = null;
+      // (g) — and (f) again: a stale request that throws LATE must not navigate away from a
+      // fresher result that already painted successfully. Only the newest update in flight is
+      // allowed to decide that this page is beyond in-place repair.
+      if (token !== latestToken) return;
+      deps.navigate(url);
     }
+  }
 
-    if (token !== latestToken) return; // (f) — superseded by a later update; drop this one.
-
-    if (html === null) {
-      deps.navigate(url); // (g)
-      return;
-    }
-
-    const nextDocument = new DOMParser().parseFromString(html, 'text/html');
-    const swapped = swapLiveRegions(doc, nextDocument);
-    if (swapped.length === 0) {
-      deps.navigate(url); // (g) — see swapLiveRegions's own note on what this usually means.
-      return;
-    }
-
-    syncFilterFormToUrl(form, url);
-    deps.replaceUrl(url); // (e) — replaceState, deliberately not pushState.
-    liveStatus.textContent = liveStatusMessage(doc);
-
-    if (scrollRegionId !== null) {
-      // (h) — only reached for a page: link; see the caller below. Looked up fresh, after
-      // the swap, because the swap just replaced this region's own contents (though not the
-      // region element itself — swapLiveRegions rewrites innerHTML, not the node — so the id
-      // still resolves to the same element it did before the fetch).
-      const region = doc.getElementById(scrollRegionId);
-      if (region !== null) deps.scrollIntoView(region);
+  /** Cancels a scheduled debounced search, for the three paths that supersede it rather than
+   *  race it: an explicit submit (b), a status tick (c) and a live-link click (d). All three
+   *  carry the search field's CURRENT value in the URL they are about to build, so the
+   *  pending fetch would only ask the same question again, one token later. */
+  function cancelPendingSearch(): void {
+    if (pendingSearch !== null) {
+      clearTimeoutFn(pendingSearch);
+      pendingSearch = null;
     }
   }
 
@@ -603,6 +809,25 @@ export function initGearLiveList(doc: Document, deps: GearLiveListDeps): (() => 
     );
   }
 
+  // (b) — Enter in the search field. HTML's implicit submission fires for the form's one
+  // text-like control even with no submit button on the page (the inline script removes
+  // Apply), so without this listener the most ordinary way to submit a search was the one
+  // path that still did a full-page GET — the in-place update bypassed entirely, on a ticket
+  // whose acceptance criterion is that searching does not navigate. No readiness check is
+  // needed before `preventDefault`: this listener only exists once `initGearLiveList` has
+  // installed it, which is what "the module is ready" means. Immediate, never debounced —
+  // Enter is "go now" — and it cancels the pending debounce rather than letting it fire a
+  // second, identical fetch afterwards.
+  form.addEventListener(
+    'submit',
+    (event) => {
+      event.preventDefault();
+      cancelPendingSearch();
+      void update(filterFormUrl(form), null);
+    },
+    { signal },
+  );
+
   // (c) — immediate on a status change. Any pending debounced search is cancelled first,
   // rather than left to fire on top of this: without it, ticking a status while a debounced
   // keystroke is still in flight would issue two fetches with two different windows to have
@@ -614,10 +839,7 @@ export function initGearLiveList(doc: Document, deps: GearLiveListDeps): (() => 
     box.addEventListener(
       'change',
       () => {
-        if (pendingSearch !== null) {
-          clearTimeoutFn(pendingSearch);
-          pendingSearch = null;
-        }
+        cancelPendingSearch();
         void update(filterFormUrl(form), null);
       },
       { signal },
@@ -646,6 +868,17 @@ export function initGearLiveList(doc: Document, deps: GearLiveListDeps): (() => 
       if (!(link instanceof HTMLAnchorElement)) return; // Nothing to fetch from.
 
       event.preventDefault();
+
+      // (d) — both halves of "the visitor's most recent intent wins", neither of which the
+      // token alone can give: a still-pending debounced search would otherwise fetch a URL
+      // built from the form as it was BEFORE this click and, resolving second, silently
+      // repaint the old order; and the same is true of any update that starts between now
+      // and this response landing, since `filterFormUrl` reads these hidden inputs. Syncing
+      // here is deliberately IN ADDITION to the sync after the response lands, which stays
+      // the source of truth — this one only stops the window in between lying.
+      cancelPendingSearch();
+      syncFilterFormToUrl(form, link.href);
+
       const scrollRegionId =
         kind.kind === 'page' ? (link.closest(`[${LIVE_REGION_ATTRIBUTE}]`)?.id ?? null) : null;
       void update(link.href, scrollRegionId);
@@ -654,7 +887,17 @@ export function initGearLiveList(doc: Document, deps: GearLiveListDeps): (() => 
   );
 
   return () => {
-    if (pendingSearch !== null) clearTimeoutFn(pendingSearch);
+    cancelPendingSearch();
     abort.abort();
+    // AND INVALIDATE WHATEVER IS ALREADY IN FLIGHT. Removing the listeners stops new updates
+    // from starting; it does nothing about an `update` already past its `await`, which would
+    // otherwise land after teardown and — on any failure path — call `deps.navigate(url)`,
+    // moving the visitor to a new page for a feature that was explicitly switched off.
+    // Bumping the token makes every in-flight update fail its own (f) check on the way back,
+    // which is the check that already exists for exactly this shape of "this answer is no
+    // longer wanted". Latent today, since `src/pages/gear/index.astro` discards this
+    // teardown — but a teardown that only half tears down is not a thing to leave for the
+    // first caller that does keep it.
+    latestToken += 1;
   };
 }

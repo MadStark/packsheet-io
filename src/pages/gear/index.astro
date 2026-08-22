@@ -358,6 +358,16 @@ const closetIsEmpty = !loadError && (optionRows ?? []).length === 0;
 // property of there being one function, not of two files being kept in step by hand — which
 // is also why the rule still lives in src/lib/ rather than here, `vitest.config.ts` excluding
 // `src/pages/**` from collection exactly as it did for PK-62.
+//
+// THAT CLAIM IS ABOUT THIS RENDER, AND IT TOOK A SECOND CALLER TO KEEP IT TRUE AFTER ONE
+// (PK-70 review). "Cannot disagree" was written against the server render and is exactly
+// right about it — one function, one answer, both halves built from it in the same pass. It
+// said nothing about what happens next, and PK-70's in-place update changes the list WITHOUT
+// re-rendering this form: unticking Owned and then Wishlist leaves all three boxes clear,
+// which `effectiveGearStatuses` resolves back to owned + wishlist server-side, so the list
+// grows under three empty boxes. `syncFilterFormToUrl` (src/lib/gear/live-list.ts) now
+// re-ticks the boxes from the same resolver after every in-place update, which is what makes
+// the sentence above true of the client path too rather than only of this one.
 const checkedStatuses = effectiveGearStatuses(query.statuses);
 
 // See `unsurfacedFilterParams` (src/lib/gear/query.ts) for what these are and why the
@@ -637,37 +647,42 @@ const listIsRendered = !loadError && !pendingDelete && !closetIsEmpty;
                       </label>
                     ))}
                   </div>
-                  {/* THE WCAG 3.2.2 ADVISORY THAT USED TO LIVE HERE IS GONE (PK-70), AND
-                      THIS IS THE ARGUMENT FOR REMOVING IT, because the comment it replaces
-                      insisted at length that it was load-bearing — "it is not decoration and
-                      it is not a tooltip: remove it and this auto-submit becomes an
-                      unannounced change of context".
+                  {/* THE WCAG 3.2.2 ADVISORY STAYS, REWORDED (PK-70 review), AND THE
+                      COMMENT THAT REMOVED IT WAS WRONG ABOUT WHERE THE RISK LIVES. It used
+                      to read `<p class="hint mt-1.5">Changing a status updates the
+                      list.</p>`, and PK-70 first deleted it under an argument that went:
+                      3.2.2 (On Input, Level A) requires an advisory where changing a setting
+                      causes a CHANGE OF CONTEXT; what made one owed here was the tick
+                      submitting the form and RELOADING THE PAGE; an in-place update is no
+                      new window, no new page, no focus moved, nothing opened, so the
+                      criterion has nothing to say and the requirement went with the
+                      behaviour, not with the sentence.
 
-                      The sentence was `<p class="hint mt-1.5">Changing a status updates the
-                      list.</p>`, and it was the advisory WCAG 3.2.2 (On Input, Level A)
-                      requires where changing a setting causes a change of context "unless the
-                      user has been advised of the behavior before using the component". What
-                      made it required was the BEHAVIOUR: ticking a box submitted the form and
-                      RELOADED THE PAGE. A new page is a change of context, so the advisory was
-                      owed.
+                      Every step of that is still true, and the conclusion still did not
+                      follow, because it put the residual reload risk in the wrong place:
+                      "that path only exists where the module failed to arrive … confined to
+                      a case nobody should be in". The reload risk is not confined to a
+                      failure at all. Read the inline script at the foot of this file: it
+                      runs during PARSING and calls `apply.remove()` UNCONDITIONALLY, before
+                      the deferred bundled module that sets `data-gear-live-ready` has begun
+                      executing. So on EVERY visit — not a failure mode, the ordinary one —
+                      there is a window from "the Apply button is gone" to "the module is
+                      ready" in which a tick falls to the fallback's `requestSubmit()` and
+                      genuinely reloads the page. It is as long as the bundle takes to load
+                      and run, and on a cold cache over a slow link that is not a
+                      theoretical few milliseconds.
 
-                      PK-70 removes that behaviour. A tick now updates a region of this page in
-                      place — no new window, no new page, no focus moved, nothing opened. None
-                      of those is a change of context under 3.2.2, so the success criterion has
-                      nothing to say about it and there is no advisory to owe. The requirement
-                      was never attached to the checkbox; it was attached to the navigation, and
-                      the navigation is what went. Removing the behaviour is what removes the
-                      requirement — not a decision that the advisory was surplus.
-
-                      THE NO-JS PATH DOES NOT PUT IT BACK. With no script running, these boxes
-                      change nothing until the visitor presses Apply — a button they pressed on
-                      purpose, which is a submission and not an "on input" event, and so was
-                      never 3.2.2's concern in the first place. The one behaviour that WOULD owe
-                      an advisory again is the inline fallback's own auto-submit, and that path
-                      only exists where the module failed to arrive; it is the same auto-submit
-                      as before and the same cost, now confined to a case nobody should be in.
-                      If that fallback ever becomes the ordinary path again, this sentence
-                      comes back with it. */}
+                      SO THE HONEST SENTENCE IS THE ONE THAT IS TRUE OF BOTH OUTCOMES, and
+                      that is the whole of the fix: "Changing a status updates the list
+                      below" describes the in-place update and the full reload equally well —
+                      the list below is what changes either way — and it is the advisory
+                      3.2.2 asks for in the case where the reload happens. Deliberately NOT
+                      made conditional on anything: the server cannot know whether the module
+                      will arrive, or when, which is the same argument the Apply button's own
+                      comment below makes for rendering unconditionally rather than guessing
+                      at a condition it cannot see. One always-true sentence, no cleverness,
+                      no way for it to be missing exactly when it was owed. */}
+                  <p class="hint mt-1.5">Changing a status updates the list below.</p>
                 </fieldset>
               </div>
 
@@ -1265,10 +1280,21 @@ const listIsRendered = !loadError && !pendingDelete && !closetIsEmpty;
     INTERCHANGEABLE. This script runs during parsing; the bundled module runs after it. At
     the moment the listeners below are installed the attribute is necessarily absent, so a
     check there would pass on every visit and arm the fallback every time. By the time a
-    visitor actually ticks a box the module has long since initialised — or has demonstrably
-    failed to, which is the case this fallback exists for. (`live-list.ts`'s own header
-    describes this as checking "before installing its listener"; the check has to be where
-    it is for the parse order that same paragraph sets out.)
+    visitor actually ticks a box the module has USUALLY initialised — or has demonstrably
+    failed to, which is the case this fallback exists for. (An earlier version of this
+    parenthetical pointed at `live-list.ts`'s header describing the check as happening
+    "before installing its listener"; that description was wrong and has been corrected
+    there, so there is no longer a contradiction to warn about. `LIVE_READY_ATTRIBUTE`'s
+    header is the one place the handshake is argued from both sides.)
+
+    "USUALLY", NOT "LONG SINCE", AND THE GAP IS WHY THE HINT ABOVE THE CHECKBOXES EXISTS.
+    The removal on the line below happens during parsing, unconditionally; the bundled module
+    is deferred and starts later. Between those two moments the Apply button is already gone
+    and nothing has set the attribute, so a tick landing in that window submits and reloads —
+    on every visit, for as long as the bundle takes to arrive. That is the ordinary path's own
+    tail, not a failure, and it is the case the status hint's WCAG 3.2.2 comment argues must
+    stay covered by a sentence that is true whether the list updates in place or the page
+    reloads.
 
     IT IS `hasAttribute`, NOT `=== 'true'`. The module writes the attribute with an EMPTY
     value — `form.setAttribute(LIVE_READY_ATTRIBUTE, '')` — so PRESENCE is the signal, and
@@ -1355,10 +1381,31 @@ const listIsRendered = !loadError && !pendingDelete && !closetIsEmpty;
     // to be parsed and grafted. There is no JSON endpoint behind this and deliberately never
     // will be — the server is the only thing that knows how to turn a GearQuery into rows,
     // which is the whole argument of live-list.ts's "not a second renderer" section.
+    //
+    // THE REDIRECT CHECK IS NOT BELT-AND-BRACES; WITHOUT IT THIS SEAM DOES NOT DO WHAT
+    // `GearLiveListDeps.fetchPage` SAYS IT DOES (PK-70 review). That interface promises null
+    // for "a response that redirected somewhere this module did not ask for (a session-expiry
+    // redirect to sign-in is the realistic case)", and this function used to test `response.ok`
+    // and nothing else — which that case passes. `fetch` follows a redirect TRANSPARENTLY: a
+    // visitor whose session expired mid-visit gets the sign-in page's HTML back as a 200, and
+    // `response.ok` cannot tell it apart from the closet. `response.redirected` plus a
+    // pathname comparison is the only signal at this seam that can. The module's own
+    // region-shortfall check would eventually catch it downstream — a sign-in page shares no
+    // region id with this one — but a documented check that does not exist is worse than no
+    // check: it is a claim the next reader will build on.
+    //
+    // THE COMPARISON IS ON PATHNAME, NOT THE WHOLE URL. Every in-place update asks for /gear
+    // with a different query string, and the server is free to normalise that query (drop a
+    // default, reorder a param) on a redirect back to the same page without any of it meaning
+    // "you are not where you asked to be". A different PATH is what means that.
     fetchPage: async (url) => {
       try {
         const response = await fetch(url, { headers: { accept: 'text/html' } });
-        return response.ok ? await response.text() : null;
+        if (!response.ok) return null;
+        if (response.redirected && new URL(response.url).pathname !== new URL(url).pathname) {
+          return null;
+        }
+        return await response.text();
       } catch {
         return null;
       }

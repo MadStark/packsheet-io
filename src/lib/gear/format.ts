@@ -120,17 +120,18 @@ const GEAR_STATUS_MARKERS: Record<GearStatus, GearStatusMarker | null> = {
   retired: 'retired',
 };
 
-/**
- * PK-70 REMOVED THE ROW TREATMENT THIS FILE USED TO NAME HERE. Up to PK-64, a marked row
- * additionally got a 5.5% wash of its state's colour and a 3px bar at its left edge
- * (DESIGN.md §7), driven by a `Record<GearStatusMarker, string>` this file exported as
- * `GEAR_MARKER_ROW_CLASS`, mapping each marker to its own row-wash class name. PK-70
- * removes the coloured rail down the left of every row without replacing it with anything
- * of this file's own: what still carries a non-owned status is the icon `gearStatusMarker`
- * resolves below, plus a strike drawn on a retired item's own name. Neither of those needs
- * a mapping in `src/lib/gear/` any more than the icon itself did — they are rendering
- * choices `src/pages/gear/index.astro` makes off the same `gearStatusMarker` return value
- * this file already produced, not a second decision this module has to keep total.
+/*
+ * PK-70 REMOVED THE ROW TREATMENT THIS FILE USED TO NAME HERE. From PK-64 until this
+ * ticket, a marked row additionally got a 5.5% wash of its state's colour and a 3px bar
+ * at its left edge (DESIGN.md §7), driven by a `Record<GearStatusMarker, string>` this
+ * file exported as `GEAR_MARKER_ROW_CLASS`, mapping each marker to its own row-wash class
+ * name. PK-70 removes the coloured rail down the left of every row without replacing it
+ * with anything of this file's own: what still carries a non-owned status is the icon
+ * `gearStatusMarker` resolves below, plus a strike drawn on a retired item's own name.
+ * Neither of those needs a mapping in `src/lib/gear/` any more than the icon itself did —
+ * they are rendering choices `src/pages/gear/index.astro` makes off the same
+ * `gearStatusMarker` return value this file already produced, not a second decision this
+ * module has to keep total.
  */
 
 /**

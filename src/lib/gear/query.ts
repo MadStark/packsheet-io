@@ -81,7 +81,9 @@ export interface GearQuery {
   search: string;
   /** Distinct, first-seen order, whatever `category` values were repeated in the URL. */
   categories: readonly string[];
-  /** Distinct, first-seen order, and only values `isGearStatus` accepts. */
+  /** Distinct, first-seen order, and only values `isGearStatus` accepts — but unlike
+   *  `categories`/`brands` below, empty here does NOT mean "no filter"; it resolves to
+   *  `GEAR_DEFAULT_STATUSES` (see `effectiveGearStatuses` in fields.ts). */
   statuses: readonly GearStatus[];
   /** Distinct, first-seen order, whatever `brand` values were repeated in the URL. */
   brands: readonly string[];
@@ -632,9 +634,10 @@ const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 0.5 * 10 ** -WEIGHT_DECIMALS;
  * The search/category/status/brand/weight filters every closet-list query needs.
  * Every row this visitor owns is a closet row — this function adds no SEPARATE hidden
  * tier of its own on top of the visitor's own filters, the way a soft delete's
- * `deleted_at is null` would. `status` is filtered exactly like every other field here,
- * through one `.in()` call, on whatever list `effectiveGearStatuses` resolves
- * `query.statuses` to. Deliberately does NOT add ordering, `.range()`, or the owner
+ * `deleted_at is null` would. `status` is filtered through the same `.in()` mechanism as
+ * every other field here, but — unlike them — unconditionally, on whatever list
+ * `effectiveGearStatuses` resolves `query.statuses` to; see the call site below for why.
+ * Deliberately does NOT add ordering, `.range()`, or the owner
  * scope — see `applyGearQuery` for the first two and `loadGearCloset` for the third.
  *
  * A NOTE FOR THE NEXT READER WHO DIFFS THIS AGAINST PK-4 OR PK-62. This paragraph used to

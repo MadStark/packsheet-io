@@ -115,11 +115,12 @@ export const GEAR_DEFAULT_STATUSES = ['owned', 'wishlist'] as const;
  * WHY IT IS A FUNCTION IN HERE RATHER THAN A TERNARY IN THE PAGE. `vitest.config.ts`
  * excludes `src/pages/**`, so a line written in `src/pages/gear/index.astro`'s
  * frontmatter cannot be asserted on by anything — and this particular line is one of
- * PK-62's four acceptance criteria ("unchecking every status shows the full closet, not
- * an empty one"). Inverting the condition here is a failing test; inverting it in the
- * page was a green suite and a closet that renders nothing, with the filter bar the
- * visitor would need to recover offering no state that fixes it. Same argument every
- * other module in this directory makes for itself.
+ * PK-62's four acceptance criteria ("unchecking every status shows a populated closet, not
+ * an empty one" — PK-62 phrased this as "the full closet"; PK-70 narrowed what an empty
+ * selection resolves to, see below). Inverting the condition here is a failing test;
+ * inverting it in the page was a green suite and a closet that renders nothing, with the
+ * filter bar the visitor would need to recover offering no state that fixes it. Same
+ * argument every other module in this directory makes for itself.
  *
  * A NOTE FOR THE NEXT READER WHO DIFFS THIS AGAINST PK-62'S TICKET. This function used to
  * return `GEAR_STATUSES` (all three) for an empty selection, and its own comment argued

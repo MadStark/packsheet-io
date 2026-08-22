@@ -71,6 +71,12 @@ function render(html: string): HTMLElement {
  * status element, and the two live regions — each toggleable off (`includeList`/
  * `includeHeadline`) so a test can build a response that is missing one, and each carrying
  * one summary line, one sort link and one pager link so a single fixture covers most tests.
+ *
+ * ALL THREE STATUS CHECKBOXES, as the page renders them, and not the two this fixture
+ * carried before PK-70's review: `syncFilterFormToUrl` now WRITES the boxes back as well as
+ * `filterFormUrl` reading them, and with only owned and wishlist present no test could tell
+ * "re-ticked to the default pair" from "left exactly as the visitor last clicked them" —
+ * the two states this fixture exists to keep apart.
  */
 function pageHtml(
   options: {
@@ -107,6 +113,7 @@ function pageHtml(
       <input id="q" name="q" type="search" value="" />
       <input type="checkbox" name="status" value="owned" checked />
       <input type="checkbox" name="status" value="wishlist" />
+      <input type="checkbox" name="status" value="retired" />
       <input type="hidden" name="sort" value="${sort}" />
       <input type="hidden" name="dir" value="${dir}" />
     </form>
@@ -427,6 +434,9 @@ describe('syncFilterFormToUrl', () => {
     const body = render(`
       <form id="f" method="GET" action="/gear">
         <input id="q" name="q" value="boo" />
+        <input type="checkbox" name="status" value="owned" />
+        <input type="checkbox" name="status" value="wishlist" />
+        <input type="checkbox" name="status" value="retired" />
         <input type="hidden" name="sort" value="name" />
         <input type="hidden" name="dir" value="asc" />
       </form>
@@ -434,8 +444,14 @@ describe('syncFilterFormToUrl', () => {
     return {
       form: body.querySelector('form') as HTMLFormElement,
       search: body.querySelector<HTMLInputElement>('#q') as HTMLInputElement,
+      statusBoxes: [...body.querySelectorAll<HTMLInputElement>('input[name="status"]')],
     };
   }
+
+  /** The values of the boxes that are ticked, in document order — "what the visitor can see
+   *  is selected", which is the whole of what the assertions below are about. */
+  const ticked = (boxes: HTMLInputElement[]): string[] =>
+    boxes.filter((box) => box.checked).map((box) => box.value);
 
   it('copies sort and dir from the URL into the hidden inputs', () => {
     const { form } = scene();
@@ -455,6 +471,39 @@ describe('syncFilterFormToUrl', () => {
 
     expect((form.elements.namedItem('sort') as HTMLInputElement).value).toBe('name');
     expect((form.elements.namedItem('dir') as HTMLInputElement).value).toBe('asc');
+  });
+
+  it('RE-TICKS THE STATUS BOXES TO THE DEFAULT THE SERVER ACTUALLY APPLIED when the URL names no status, so unticking every box cannot leave three empty boxes over a list of owned and wishlist rows', () => {
+    const { form, statusBoxes } = scene();
+    // EXACTLY THE FAILURE STATE PK-70's REVIEW FOUND, reproduced as a starting condition
+    // rather than described: the visitor unticked Owned, then unticked Wishlist. Every box
+    // is clear, so `filterFormUrl` finds no checked `status` box and the URL it built —
+    // the one this update actually asked the server for — carries no `status` param at all.
+    for (const box of statusBoxes) box.checked = false;
+
+    syncFilterFormToUrl(form, 'http://localhost/gear?q=boots');
+
+    // `effectiveGearStatuses` resolves an empty selection to GEAR_DEFAULT_STATUSES, so that
+    // URL returned owned and wishlist rows. Before this sync the boxes stayed clear and
+    // claimed the opposite of what the visitor was looking at.
+    expect(ticked(statusBoxes)).toEqual(['owned', 'wishlist']);
+  });
+
+  it('ticks EXACTLY the statuses the URL names when it names any, so the default resolution above cannot quietly override a real selection', () => {
+    const { form, statusBoxes } = scene();
+    statusBoxes[0].checked = true;
+
+    syncFilterFormToUrl(form, 'http://localhost/gear?status=retired');
+
+    expect(ticked(statusBoxes)).toEqual(['retired']);
+  });
+
+  it('ignores a status value the vocabulary does not recognise, resolving to the default pair exactly as parseGearQuery does server-side for the same URL', () => {
+    const { form, statusBoxes } = scene();
+
+    syncFilterFormToUrl(form, 'http://localhost/gear?status=borrowed');
+
+    expect(ticked(statusBoxes)).toEqual(['owned', 'wishlist']);
   });
 
   it("DOES NOT TOUCH THE SEARCH INPUT, even though the URL carries a q — writing it back would move a mid-word visitor's caret on every update", () => {
@@ -494,7 +543,7 @@ describe('initGearLiveList', () => {
   });
 
   it('DEBOUNCES THE SEARCH FIELD, so typing "boots" issues exactly one fetch rather than one per keystroke', async () => {
-    const { doc, form, fetchPage, timers, deps } = scene();
+    const { doc, form, fetchPage, replaceUrl, timers, deps } = scene();
     fetchPage.mockResolvedValue(pageHtml());
     initLiveList(doc, deps);
     const search = form.querySelector<HTMLInputElement>('#q') as HTMLInputElement;
@@ -515,10 +564,16 @@ describe('initGearLiveList', () => {
 
     expect(fetchPage).toHaveBeenCalledTimes(1);
     expect(new URL(fetchPage.mock.calls[0][0]).searchParams.get('q')).toBe('boots');
+    // The address bar is rewritten for THIS path too, not only for a sort click. A search
+    // and a status tick build their URL through `filterFormUrl` rather than off a link's
+    // `href` — a genuinely different route to the same `replaceUrl`, and until PK-70's
+    // review only the link route was pinned. A search that updates the list and leaves the
+    // URL naming the previous query is a page nobody can bookmark or reload back into.
+    expect(replaceUrl).toHaveBeenCalledWith(fetchPage.mock.calls[0][0]);
   });
 
-  it('fetches IMMEDIATELY on a status change, with no debounce', async () => {
-    const { doc, form, fetchPage, timers, deps } = scene();
+  it('fetches IMMEDIATELY on a status change, with no debounce, and rewrites the URL to match', async () => {
+    const { doc, form, fetchPage, replaceUrl, timers, deps } = scene();
     fetchPage.mockResolvedValue(pageHtml());
     initLiveList(doc, deps);
     const owned = form.querySelector<HTMLInputElement>('input[name="status"][value="owned"]');
@@ -529,6 +584,38 @@ describe('initGearLiveList', () => {
     // No timers.flush() here at all — the assertion is that this needed none.
     expect(fetchPage).toHaveBeenCalledTimes(1);
     expect(timers.pendingCount()).toBe(0);
+
+    await tick();
+    // The other `filterFormUrl` path (see the search test above) — same argument, and it is
+    // the one whose URL a visitor is most likely to want to keep.
+    expect(replaceUrl).toHaveBeenCalledWith(fetchPage.mock.calls[0][0]);
+  });
+
+  it('UPDATES IMMEDIATELY ON SUBMIT, so pressing Enter in the search field is an in-place update rather than the full-page GET implicit submission would otherwise perform', async () => {
+    const { doc, form, fetchPage, timers, deps } = scene();
+    fetchPage.mockResolvedValue(pageHtml({ summary: 'Showing 1–2 of 2' }));
+    initLiveList(doc, deps);
+    const search = form.querySelector<HTMLInputElement>('#q') as HTMLInputElement;
+
+    // A keystroke first, so there is a debounce pending for Enter to supersede: the module
+    // only ever listened for `input`, so before PK-70's review this form still had exactly
+    // one text-like field, no submit button, and therefore a live implicit submission that
+    // navigated away mid-debounce.
+    search.value = 'boots';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(timers.pendingCount()).toBe(1);
+
+    const submitted = new Event('submit', { bubbles: true, cancelable: true });
+    form.dispatchEvent(submitted);
+
+    // Cancelled, not raced: leaving the timer to fire would issue a second fetch for the
+    // query this one already carries.
+    expect(submitted.defaultPrevented).toBe(true);
+    expect(timers.pendingCount()).toBe(0);
+    // No flush anywhere above — an explicit Enter means "go now".
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+    expect(new URL(fetchPage.mock.calls[0][0]).searchParams.get('q')).toBe('boots');
+    await tick();
   });
 
   it("intercepts a plain click on a live link: preventDefault, and a fetch from that link's href", async () => {
@@ -643,6 +730,109 @@ describe('initGearLiveList', () => {
     expect(replaceUrl).not.toHaveBeenCalled();
   });
 
+  it('FALLS BACK TO navigate() WHEN THE SWAP REFRESHED ONLY SOME OF THE REGIONS, because a page that answers 200 with the header actions and no list is a load error, not a closet', async () => {
+    const { doc, form, fetchPage, navigate, replaceUrl, deps } = scene();
+    // The load-error render's shape: `#gear-actions` is emitted by EVERY branch of
+    // src/pages/gear/index.astro including the error one, `#gear-figures` and `#gear-list`
+    // by none of it — and the whole thing still comes back 200 OK with a role="alert" note.
+    // `includeList: false` is that shape in this fixture's vocabulary, the headline region
+    // standing in for the one region that is always there.
+    fetchPage.mockResolvedValue(pageHtml({ includeList: false }));
+    initLiveList(doc, deps);
+    const owned = form.querySelector<HTMLInputElement>('input[name="status"][value="owned"]');
+
+    owned!.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+
+    // One region matched, which is NOT zero — the gate this replaced. Treated as success it
+    // would sync the form, rewrite the address bar and announce a count read back off the
+    // list it had just failed to replace, leaving the visitor's rows unchanged under a URL
+    // claiming otherwise and the server's own error note parsed and discarded.
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(replaceUrl).not.toHaveBeenCalled();
+  });
+
+  it('ANNOUNCES THE NEW RANGE, clearing the live region first so an identical message still counts as a content change', async () => {
+    const { doc, fetchPage, timers, deps } = scene();
+    fetchPage.mockResolvedValue(pageHtml({ summary: 'Showing 1–12 of 47' }));
+    initLiveList(doc, deps);
+    const liveStatus = doc.getElementById(GEAR_LIVE_STATUS_ID) as HTMLElement;
+    // The case this technique exists for, set up rather than described: a sort changes the
+    // order and not the range, so the message about to be written is the one already here.
+    liveStatus.textContent = 'Showing 1–12 of 47';
+
+    doc
+      .querySelector(`a[${LIVE_LINK_ATTRIBUTE}="sort:price"]`)
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+    await tick();
+
+    // Assigning the same string to a role="status" region is not reliably re-announced by
+    // NVDA or JAWS; blanking it first is what makes the settled value below a real change.
+    expect(liveStatus.textContent).toBe('');
+    timers.flush();
+    expect(liveStatus.textContent).toBe('Showing 1–12 of 47');
+  });
+
+  it('ANNOUNCES NO_RESULTS_ANNOUNCEMENT when the swapped list carries no summary line at all, which is what the "no items match" block genuinely renders', async () => {
+    const { doc, form, fetchPage, timers, deps } = scene();
+    fetchPage.mockResolvedValue(pageHtml({ summary: null }));
+    initLiveList(doc, deps);
+    const liveStatus = doc.getElementById(GEAR_LIVE_STATUS_ID) as HTMLElement;
+
+    form
+      .querySelector<HTMLInputElement>('input[name="status"][value="owned"]')
+      ?.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+    timers.flush();
+
+    // Without this pair of tests the announcement — the only thing a screen-reader visitor
+    // gets told about an update that changed nothing they can see — could be deleted
+    // outright with the suite green.
+    expect(liveStatus.textContent).toBe(NO_RESULTS_ANNOUNCEMENT);
+  });
+
+  it("CANCELS A PENDING DEBOUNCED SEARCH ON A LIVE-LINK CLICK, and writes the clicked link's sort into the form before fetching, so a slower search cannot silently undo the sort", async () => {
+    const { doc, form, fetchPage, timers, deps } = scene();
+    fetchPage.mockResolvedValue(pageHtml({ sort: 'price', dir: 'asc' }));
+    initLiveList(doc, deps);
+    const search = form.querySelector<HTMLInputElement>('#q') as HTMLInputElement;
+    const link = doc.querySelector(`a[${LIVE_LINK_ATTRIBUTE}="sort:price"]`) as HTMLAnchorElement;
+
+    search.value = 'boots';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(timers.pendingCount()).toBe(1);
+
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+
+    // (a) The debounce is gone rather than left to fire behind this click — the status
+    // handler already did this and the click handler did not.
+    expect(timers.pendingCount()).toBe(0);
+    // (b) SYNCHRONOUSLY, before the fetch has resolved anything: any update that starts in
+    // this window reads these hidden inputs through `filterFormUrl`, and reading the
+    // pre-click order there is how a click gets undone by nothing but response timing.
+    expect((form.elements.namedItem('sort') as HTMLInputElement).value).toBe('price');
+    expect(new URL(filterFormUrl(form)).searchParams.get('sort')).toBe('price');
+    await tick();
+  });
+
+  it('FALLS BACK TO navigate() WHEN replaceUrl ITSELF THROWS, because everything past the fetch used to run outside the guard — and WebKit rate-limits replaceState to a SecurityError that sustained typing can reach', async () => {
+    const { doc, form, fetchPage, navigate, replaceUrl, deps } = scene();
+    fetchPage.mockResolvedValue(pageHtml());
+    replaceUrl.mockImplementation(() => {
+      throw new DOMException('rate limit', 'SecurityError');
+    });
+    initLiveList(doc, deps);
+
+    form
+      .querySelector<HTMLInputElement>('input[name="status"][value="owned"]')
+      ?.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+
+    // The alternative is an unhandled promise rejection and a control that silently does
+    // nothing — the exact "dead control" this module's header says it is written against.
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
   it('SCROLLS THE LIST REGION INTO VIEW after a page: link, and NOT after a sort: link', async () => {
     const { doc, fetchPage, scrollIntoView, deps } = scene();
     fetchPage.mockResolvedValue(pageHtml({ summary: 'Showing 13–24 of 47' }));
@@ -699,5 +889,29 @@ describe('initGearLiveList', () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('the teardown ALSO INVALIDATES AN UPDATE ALREADY IN FLIGHT, so a request that resolves after the feature was switched off cannot navigate the visitor somewhere they did not ask to go', async () => {
+    const { doc, form, fetchPage, navigate, replaceUrl, deps } = scene();
+    let resolveFetch!: (html: string | null) => void;
+    fetchPage.mockImplementation(() => new Promise((resolve) => (resolveFetch = resolve)));
+    const teardown = initGearLiveList(doc, deps);
+
+    // In flight, past its `await`, when teardown runs: removing listeners says nothing about
+    // a request that has already been issued.
+    form
+      .querySelector<HTMLInputElement>('input[name="status"][value="owned"]')
+      ?.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(fetchPage).toHaveBeenCalledTimes(1);
+
+    teardown?.();
+    // `null` is the failure path, which is the one with teeth: applied after teardown it
+    // calls `navigate` and yanks the visitor to a new page for a feature that was explicitly
+    // stopped. Bumping the token makes this response fail the module's own staleness check.
+    resolveFetch(null);
+    await tick();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(replaceUrl).not.toHaveBeenCalled();
   });
 });
