@@ -3,6 +3,13 @@ import '../styles/global.css';
 // Imported rather than hardcoded: Vite fingerprints the filename at build time,
 // so a literal /_astro/... path would 404 in production.
 import interUrl from '../assets/fonts/inter-latin-var.woff2?url';
+import Modal from '../components/Modal.astro';
+import {
+  GEAR_OVERLAY_DIALOG_ID,
+  OVERLAY_ACTIONS_ATTRIBUTE,
+  OVERLAY_BODY_ATTRIBUTE,
+  OVERLAY_HEADING_ATTRIBUTE,
+} from '../lib/gear/overlay';
 
 interface Props {
   title: string;
@@ -10,6 +17,22 @@ interface Props {
 }
 
 const { title, description } = Astro.props;
+
+/*
+  THE THREE MARKERS SPREAD RATHER THAN TYPED OUT, which is the opposite of the choice
+  Modal.astro makes for its own `data-modal*` attributes, and the two are consistent
+  once the reason is stated. Modal.astro's argument is that a CONSUMER types
+  `data-modal-open="…"` by hand in their own page, so the string has to be readable
+  somewhere. Nobody types these three anywhere: they exist only in this file and in
+  src/lib/gear/overlay.ts, which is the only code that ever looks for them. So there is
+  no readability to buy and there is a join to protect — rename one side and the dialog
+  still renders, still opens, and is silently never filled in, which looks exactly like
+  the ordinary "the script did not run, so the link navigated" path. The frontmatter can
+  import, so it does.
+*/
+const overlayHeadingAttrs = { [OVERLAY_HEADING_ATTRIBUTE]: '' };
+const overlayBodyAttrs = { [OVERLAY_BODY_ATTRIBUTE]: '' };
+const overlayActionsAttrs = { [OVERLAY_ACTIONS_ATTRIBUTE]: '' };
 
 // Astro.site is the configured production origin (astro.config.mjs); Astro.url is
 // this page's full URL, of which only the pathname is wanted here. Composing the two,
@@ -94,5 +117,78 @@ const canonicalURL = new URL(Astro.url.pathname, Astro.site);
     <div class="paper-page">
       <slot />
     </div>
+
+    {
+      /*
+      THE GEAR ITEM OVERLAY (PK-71), MOUNTED ONCE FOR THE WHOLE SITE.
+
+      A SIBLING AFTER .paper-page AND A DIRECT CHILD OF <body>, which keeps it outside
+      the stacking context .paper-page creates and therefore out of the ground/grain/page
+      ordering above entirely — read that comment before moving this. A presented
+      <dialog> lives in the TOP LAYER, above every stacking context on the page and
+      unreachable by z-index, so this element's DOM position decides nothing about how it
+      paints. What it does decide is the closed, in-flow case: `Modal.astro` renders
+      `display: none` until `[open]`, so a closed dialog occupies nothing here, and
+      putting it inside .paper-page would have made it a member of the page's own column
+      for no benefit at all.
+
+      IT RENDERS ON EVERY PAGE, CLOSED AND EMPTY, including pages with no gear links on
+      them. That is the entire mechanism: `initGearItemOverlay` installs ONE delegated
+      click listener on the document, so any page that links to /gear/new or /gear/{id}
+      gets the overlay without knowing this exists — which is what lets the closet
+      (src/pages/gear/index.astro) and the pack pages have it while PK-71 does not touch
+      a single line of either. See src/lib/gear/overlay.ts's header on why that mattered.
+      Until a matching link is clicked the dialog is inert: no listener of its own beyond
+      the shell's, nothing rendered, nothing focusable.
+
+      NO `open` PROP, EVER. This dialog is never server-opened. A direct visit to
+      /gear/new or /gear/{id} must render those pages as the ordinary full pages they are
+      today — that is the no-JS fallback the whole ticket rests on, and the destination
+      every intercepted link still falls through to when anything at all goes wrong.
+
+      A `title` SLOT RATHER THAN THE `label` PROP, and the difference is load-bearing
+      here in a way it is not for a modal with a fixed name. The accessible name has to
+      change per item ("Add gear", then an item's own name), and Modal.astro's own
+      reasoning on the two is that `aria-labelledby` WINS over `aria-label` in the accname
+      algorithm — so a `label` prop would have to be kept in step with the visible
+      heading by hand, from a script, forever, and the failure when it was not would be
+      an announced name silently disagreeing with the printed one. Pointing the dialog at
+      its own visible heading makes them the same string by construction; overlay.ts
+      replaces that one span's text and both move together.
+    */
+    }
+    <Modal id={GEAR_OVERLAY_DIALOG_ID}>
+      <Fragment slot="title"><span {...overlayHeadingAttrs}>Gear item</span></Fragment>
+      <div {...overlayBodyAttrs}></div>
+      <Fragment slot="actions">
+        {
+          /*
+          `class="contents"` so this wrapper generates no box of its own: the submit
+          button overlay.ts moves in here becomes a direct flex child of the modal's
+          actions footer and sits on its row beside Cancel. Without it the button would
+          be laid out inside a block-level div and the two controls would stack.
+        */
+        }
+        <div {...overlayActionsAttrs} class="contents"></div>
+        {
+          /*
+          CANCEL IS A REAL <form method="dialog">, exactly like the shell's own close
+          button and for the same reason (see Modal.astro beside it): the platform closes
+          the dialog on submit with no script involved, writing nothing, and it fires
+          `close` — so it lands on the same single teardown path ESC and the backdrop do.
+          It is why src/lib/gear/overlay.ts has no cancel handler at all, and why
+          prepareInjectedForm can delete the fetched form's own Cancel link outright: that
+          link navigates the whole page, which is not what Cancel means inside a dialog.
+        */
+        }
+        <form method="dialog"><button type="submit" class="btn">Cancel</button></form>
+      </Fragment>
+    </Modal>
+
+    <script>
+      import { initGearItemOverlay } from '../lib/gear/overlay';
+
+      initGearItemOverlay(document);
+    </script>
   </body>
 </html>

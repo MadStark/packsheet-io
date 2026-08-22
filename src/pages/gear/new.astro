@@ -161,8 +161,16 @@ if (Astro.request.method === 'POST') {
   <GearNav />
   <main class="paper-col flex flex-col gap-[30px] py-[30px]">
     {
+      /* data-gear-overlay-notice on both banners below: src/lib/gear/overlay.ts lifts
+         whichever of these is present into the modal dialog when a submit it intercepted
+         comes back from the server with errors, so it needs to find them by a contract
+         that will not shift out from under it — an attribute reserved for exactly this,
+         rather than the `.note.note-danger` class, which is styling and could change for
+         reasons that have nothing to do with what the overlay needs to find. */
+    }
+    {
       writeError && (
-        <div class="note note-danger" role="alert">
+        <div class="note note-danger" role="alert" data-gear-overlay-notice>
           <p>{writeError}</p>
         </div>
       )
@@ -170,7 +178,7 @@ if (Astro.request.method === 'POST') {
 
     {
       Object.keys(errors).length > 0 && (
-        <div class="note note-danger" role="alert">
+        <div class="note note-danger" role="alert" data-gear-overlay-notice>
           <p class="text-sm font-medium">Fix the following before saving:</p>
           <ul class="mt-2 list-disc space-y-1 pl-5 text-sm">
             {Object.values(errors).map((message) => (
@@ -183,17 +191,7 @@ if (Astro.request.method === 'POST') {
 
     <div class="sheet">
       <div class="sheet-body">
-        <p class="eyebrow">Gear</p>
-        <h1 class="page-title mt-2">Add gear</h1>
-        <p class="aside mt-2">weigh it once</p>
-        {
-          /* Real product-limitation copy, not the mockup's aside — kept in the system
-             voice (a `.hint`, not `.aside`) because this is the app explaining itself
-             rather than anything the visitor wrote. */
-        }
-        <p class="hint mt-2">
-          Photos aren't supported yet — that's a separate piece of work still to come.
-        </p>
+        <h1 class="page-title" data-gear-overlay-title>Add gear</h1>
         <hr class="sheet-rule" />
 
         <GearItemForm
