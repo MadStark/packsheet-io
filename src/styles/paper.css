@@ -889,34 +889,36 @@
   }
 
   /*
-   * A ROW'S STATE IS SHOWN AT ITS LEFT EDGE AND ACROSS THE ROW: a 5.5% wash of
-   * the state's colour and a 3px bar of it at the left edge. The row's status icon
-   * and, for retired, the strike through the name carry the same information in
-   * shape rather than hue, so nothing here depends on colour alone (§12).
+   * A ROW THAT FAILED IS MARKED AT ITS LEFT EDGE AND ACROSS THE ROW: a 5.5% wash of
+   * rust and a 3px bar of it at the left edge. This is DESIGN.md §9's alert treatment
+   * applied to a table row instead of to a note, and its one call site is the gear
+   * import's preview table (`src/pages/gear/import.astro`), where it marks a line the
+   * importer cannot accept. Colour is not doing the work alone there: that table has a
+   * Problem column carrying the reason in words (§12).
    *
-   * THERE IS NO .row-owned, AND THAT IS THE POINT. In a closet where most items
-   * are owned, a mark on every owned row is the most repeated thing in the table
-   * and says nothing. Mark the exceptions only.
+   * IT USED TO BE TWO CLASSES, AND THEY USED TO MARK GEAR STATUSES (PK-64). `.row-wishlist`
+   * washed a row in ochre and `.row-retired` washed it in rust, giving the closet a coloured
+   * rail down the left of every non-owned row. PK-70 removed that rail — DESIGN.md §7 records
+   * the amendment and the reasoning, the short version being that two of the three gear
+   * statuses are ordinary states of a closet rather than faults, so a rail down a third of
+   * the list was repeated colour carrying no urgency. What marks a non-owned row now is the
+   * status icon and, for retired, the strike through the name — shape rather than hue.
+   *
+   * `.row-retired` SURVIVED THE DELETION UNDER A NEW NAME rather than being dropped, because
+   * the import preview was already borrowing it for a failed row. Left as `.row-retired` it
+   * would have been a class named after a gear status that no longer marks gear; deleted
+   * outright it would have silently unstyled the one table that still needs it.
    */
-  .row-wishlist {
-    background-color: color-mix(in srgb, var(--ochre) 5.5%, transparent);
-    box-shadow: inset 3px 0 0 var(--ochre);
-  }
-
-  .row-retired {
+  .row-invalid {
     background-color: color-mix(in srgb, var(--rust) 5.5%, transparent);
     box-shadow: inset 3px 0 0 var(--rust);
   }
 
   /* Hovering a marked row deepens its own wash rather than replacing it with the
-     ink one — otherwise the row-state rules, which are less specific than
-     `.ledger tbody tr:hover`, lose the row's colour for as long as the pointer is
+     ink one — otherwise the row-state rule, which is less specific than
+     `.ledger tbody tr:hover`, loses the row's colour for as long as the pointer is
      over it. */
-  .ledger tbody tr.row-wishlist:hover {
-    background-color: color-mix(in srgb, var(--ochre) 9%, transparent);
-  }
-
-  .ledger tbody tr.row-retired:hover {
+  .ledger tbody tr.row-invalid:hover {
     background-color: color-mix(in srgb, var(--rust) 9%, transparent);
   }
 

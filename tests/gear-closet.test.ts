@@ -366,17 +366,49 @@ describe('filters compose correctly', () => {
   // ticket rests on, asserted head-on rather than incidentally. PK-60 removed soft
   // delete on the argument that `status = 'retired'` is where "I got rid of this but I
   // still want it in my history" lives (see the "Retired is the trash" section of
-  // supabase/migrations/20260813120000_gear_hard_delete.sql, and the same claim in
-  // `applyGearFilters`'s comment: the closet has no hidden tier a query has to filter
-  // back out). Every other assertion in this file that touches the two retired fixtures
-  // filters them AWAY — `status=owned` drops Trekking Poles, and so on — so all of them
-  // would stay green if retired items had quietly become invisible, which is exactly the
-  // regression that would turn one kind of gone back into two.
-  it('RETIRED STAYS IN THE CLOSET — an unfiltered query returns the retired items alongside the owned and wishlisted ones', async () => {
-    // All nine fixtures, retired ones included, in the default name-ascending order.
-    // Dutch Oven and Trekking Poles are the retired pair; a closet that applied any
-    // status floor of its own before the visitor's filters would be missing them.
+  // supabase/migrations/20260813120000_gear_hard_delete.sql). Every other assertion in
+  // this file that touches the two retired fixtures filters them AWAY — `status=owned`
+  // drops Trekking Poles, and so on — so all of them would stay green if retired items
+  // had quietly become invisible EVERYWHERE, which is exactly the regression that would
+  // turn one kind of gone back into two. This block is what proves they have not: retired
+  // items are still real rows in the table, still reachable by an explicit status
+  // selection, and still there when a visitor deliberately asks to see everything.
+  //
+  // A NOTE FOR THE NEXT READER WHO DIFFS THIS AGAINST PK-60 OR PK-4. This test used to
+  // assert that an UNFILTERED query (`filteredNames({})`) returned all nine fixtures,
+  // retired ones included — true when `applyGearFilters` applied no status filter at all
+  // for an empty selection. PK-70 makes that assertion actively wrong: an empty selection
+  // now resolves to `GEAR_DEFAULT_STATUSES` (owned, wishlist), so a fresh, unfiltered
+  // closet query no longer includes Dutch Oven or Trekking Poles. That is not "retired
+  // items quietly became invisible" — it is a deliberate, product-level default, and the
+  // fix here is what the ticket instructed rather than what would make this test pass by
+  // the shortest route: the assertion below is now explicit about which statuses it
+  // wants, in both directions, so it keeps meaning something rather than being weakened
+  // to match whatever the code happens to do.
+  it('RETIRED STAYS IN THE CLOSET — reachable by an explicit status, and by an explicit request for everything, even though it is no longer part of the default view', async () => {
+    // PK-70: the DEFAULT, unfiltered query — no `status` param at all — now excludes
+    // retired gear. Seven of the nine fixtures are owned or wishlist; Dutch Oven and
+    // Trekking Poles, the retired pair, are the two missing from this list.
     expect(await filteredNames({})).toEqual([
+      'Alpine Tent',
+      'Backpack',
+      'Bivy Sack',
+      'Camp Stove',
+      'Duffel Bag',
+      'Sleeping Bag',
+      'Sleeping Pad',
+    ]);
+
+    // They are reachable BY that status, unchanged from before PK-70: `retired` is an
+    // ordinary filterable value like any other, which is what makes the closet itself
+    // the trash the user can go and look in.
+    expect(await filteredNames({ status: 'retired' })).toEqual(['Dutch Oven', 'Trekking Poles']);
+
+    // And they are still genuinely IN the closet, not merely reachable by name: asking
+    // explicitly for all three statuses returns every fixture, retired included — proving
+    // PK-70 changed only what the DEFAULT resolves to, not what rows exist or what an
+    // explicit, all-inclusive request can still see.
+    expect(await filteredNames({ status: [...GEAR_STATUSES] })).toEqual([
       'Alpine Tent',
       'Backpack',
       'Bivy Sack',
@@ -387,11 +419,6 @@ describe('filters compose correctly', () => {
       'Sleeping Pad',
       'Trekking Poles',
     ]);
-
-    // And they are reachable BY that status too, not merely present in an unfiltered
-    // list: `retired` is an ordinary filterable value, which is what makes the closet
-    // itself the trash the user can go and look in.
-    expect(await filteredNames({ status: 'retired' })).toEqual(['Dutch Oven', 'Trekking Poles']);
   });
 
   it('search AND category — "Bag" alone matches two items, category=Sleep must narrow to one', async () => {
@@ -794,6 +821,54 @@ describe('sorting', () => {
     });
     expect(descError).toBeNull();
     expect(names(desc)).toEqual(['Dated Late', 'Dated Early', 'Undated Item']);
+  });
+
+  // `category` (PK-70) — a separate user, the same isolation the price/added null tests
+  // above use and for the same reason: `sortUser`'s own three rows never set `category`
+  // at all, so nothing in this fixture's own ordering could exercise it either way.
+  //
+  // THE CATEGORY ORDER MUST DISAGREE WITH THE NAME ORDER, for the identical reason the
+  // brand fixture's own comment gives above: `name` is the default sort and the fallback
+  // for an unrecognised sort key, so a `sort=category` that never reached
+  // GEAR_SORT_COLUMNS would come back in name order, and if the two happened to coincide
+  // this test would pass while the feature was entirely broken. 'Aaa-Category' (on
+  // ZULU ITEM) sorts before 'Zzz-Category' (on ALPHA ITEM), the opposite of those two
+  // rows' own name order.
+  it('sorts by category, both directions, and an uncategorised item is pinned LAST in both — PK-70', async () => {
+    const categoryUser = await createUser('gear-closet-sort-category');
+    const rows: GearInsert[] = [
+      { name: 'Alpha Item', category: 'Zzz-Category' },
+      { name: 'Zulu Item', category: 'Aaa-Category' },
+      { name: 'Middle Item' }, // category omitted entirely — the null this test needs
+    ];
+    const { error } = await categoryUser.client.from('gear_items').insert(rows);
+    expect(error).toBeNull();
+
+    const { items: asc, error: ascError } = await closetQuery(categoryUser, {
+      sort: 'category',
+      dir: 'asc',
+    });
+    expect(ascError).toBeNull();
+    expect(names(asc)).toEqual(['Zulu Item', 'Alpha Item', 'Middle Item']);
+
+    // `applyGearQuery` passes `nullsFirst: false` on every sort key (PK-61), so
+    // uncategorised gear reads as "at the end" whichever way the visitor sorted — not
+    // Postgres's own unpinned default, which would put it FIRST on descending.
+    const { items: desc, error: descError } = await closetQuery(categoryUser, {
+      sort: 'category',
+      dir: 'desc',
+    });
+    expect(descError).toBeNull();
+    expect(names(desc)).toEqual(['Alpha Item', 'Zulu Item', 'Middle Item']);
+
+    // And the guard that makes the above mean something: the name sort really does
+    // disagree, so "passes the category assertions" cannot be satisfied by name ordering.
+    const { items: byName, error: nameError } = await closetQuery(categoryUser, {
+      sort: 'name',
+      dir: 'asc',
+    });
+    expect(nameError).toBeNull();
+    expect(names(byName)).not.toEqual(names(asc));
   });
 });
 
@@ -1358,8 +1433,12 @@ describe('updateGearItem saves an owner’s edit and refuses a stranger’s', ()
 
     // A `status: 'retired'` edit does not remove the item from the closet — the same
     // guarantee section 2 asserts for the list, restated on the write path because this
-    // is the control PK-60 hands the user INSTEAD of a trash.
-    const closet = await closetQuery(user);
+    // is the control PK-60 hands the user INSTEAD of a trash. The status filter is
+    // explicit here, unlike an ordinary closet load: since PK-70 an unfiltered query no
+    // longer returns retired rows by default (see `effectiveGearStatuses`, fields.ts), so
+    // asking for `status=retired` by name is what actually exercises "still in the
+    // closet" rather than silently exercising "excluded from the default view" instead.
+    const closet = await closetQuery(user, { status: 'retired' });
     expect(closet.error).toBeNull();
     expect(names(closet.items)).toEqual(['After Edit']);
   });
@@ -1580,9 +1659,19 @@ describe('500 items remain responsive', () => {
       return `Perf Item ${String(i).padStart(4, '0')}`;
     });
 
+    // `status` is every value, explicitly. The fixture cycles all three GEAR_STATUSES
+    // across the 500 rows so the perf query below still filters and sorts over a
+    // realistic, heterogeneous closet, but the count/page arithmetic above was computed
+    // for the full 100-row Shelter subset regardless of status. Since PK-70 an
+    // unfiltered (no `status` param) query would default to owned+wishlist only and
+    // silently drop some of that subset's retired rows — this asks for all three by name
+    // so the expectations below stay about pagination/filtering/sorting at scale, the
+    // property this test exists for, rather than becoming an incidental test of the new
+    // status default.
     const start = performance.now();
     const { items, error, count, page } = await closetQuery(user, {
       category: 'Shelter',
+      status: [...GEAR_STATUSES],
       sort: 'weight',
       dir: 'asc',
       page: '2',

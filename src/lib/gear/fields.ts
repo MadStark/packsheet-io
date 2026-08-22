@@ -86,9 +86,31 @@ export const GEAR_STATUS_MEANINGS: Record<GearStatus, string> = {
 };
 
 /**
- * Which status checkboxes the closet's filter bar renders as TICKED, given the statuses
- * `parseGearQuery` actually found in the URL. This is the whole of PK-62's "zero checked
- * behaves as all three checked" rule.
+ * The statuses a closet query filters by, and the boxes the filter bar ticks, when the
+ * visitor has selected none — equivalently, what a `status`-less URL means. PK-70: a
+ * fresh, unfiltered closet no longer shows gear marked `retired`; a visitor sees `owned`
+ * and `wishlist` until they explicitly ask for `retired` too. Retired items are not
+ * hidden FROM the closet — `?status=retired` still returns exactly them, unchanged (see
+ * `applyGearFilters` in query.ts) — only from the DEFAULT, unfiltered view of it.
+ */
+export const GEAR_DEFAULT_STATUSES = ['owned', 'wishlist'] as const;
+
+/**
+ * Which statuses an "empty" selection actually means, for BOTH of the two places that
+ * question gets asked: which checkboxes the closet's filter bar renders as TICKED, given
+ * the statuses `parseGearQuery` actually found in the URL, and — since PK-70 —
+ * which statuses `applyGearFilters` filters `gear_items.status` by for that same query
+ * (query.ts imports this function rather than re-deriving its own default). One function
+ * answering both is what makes it structurally impossible for the ticked boxes and the
+ * returned rows to disagree: a visitor can never see a box unticked next to a status that
+ * is still quietly present in the list, or ticked next to one the query just filtered out.
+ *
+ * THE RENAME FROM `checkedGearStatuses` IS LOAD-BEARING, NOT COSMETIC. The old name
+ * described only the checkbox half of what this function has done since PK-62 — accurately,
+ * as far as it went — but PK-70 gave it a second, equally real caller in the query layer,
+ * and a name that advertises only the UI use is exactly the kind of name that lets a
+ * caller quietly stop sharing the function it was supposed to share, rather than one that
+ * makes "these two things must agree" obvious at every call site.
  *
  * WHY IT IS A FUNCTION IN HERE RATHER THAN A TERNARY IN THE PAGE. `vitest.config.ts`
  * excludes `src/pages/**`, so a line written in `src/pages/gear/index.astro`'s
@@ -99,14 +121,22 @@ export const GEAR_STATUS_MEANINGS: Record<GearStatus, string> = {
  * visitor would need to recover offering no state that fixes it. Same argument every
  * other module in this directory makes for itself.
  *
- * THE QUERY LAYER NEEDED NO MATCHING CHANGE, and that is the point rather than an
- * omission: `applyGearFilters` already applies no `status` filter at all for an empty
- * list, so "none ticked" and "all three ticked" were ALREADY the same result set. All
- * that was missing was rendering them as the same STATE, so that "default" and "cleared"
- * stop looking like two different things that behave identically.
+ * A NOTE FOR THE NEXT READER WHO DIFFS THIS AGAINST PK-62'S TICKET. This function used to
+ * return `GEAR_STATUSES` (all three) for an empty selection, and its own comment argued
+ * "THE QUERY LAYER NEEDED NO MATCHING CHANGE, and that is the point rather than an
+ * omission" — because `applyGearFilters` applied no `status` filter at all for an empty
+ * list, so "none ticked" and "all three ticked" were already the same result set, and this
+ * function only had to make them look like the same STATE. PK-70 makes both of those
+ * statements false at once: an empty selection is no longer "no floor", it resolves to
+ * `GEAR_DEFAULT_STATUSES` — owned and wishlist, retired excluded — and the query layer DOES
+ * need this function's answer now, because that is the only way "no `status` param at all"
+ * stops meaning "show me everything, retired included". What survives from PK-62 unchanged
+ * is the other half of the rule: unticking every box still must not produce an empty
+ * closet, and an explicit selection — an explicit all-three, or a bare `?status=retired` —
+ * is still returned exactly as given, never rewritten.
  */
-export function checkedGearStatuses(statuses: readonly GearStatus[]): readonly GearStatus[] {
-  return statuses.length === 0 ? GEAR_STATUSES : statuses;
+export function effectiveGearStatuses(statuses: readonly GearStatus[]): readonly GearStatus[] {
+  return statuses.length === 0 ? GEAR_DEFAULT_STATUSES : statuses;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,10 +146,34 @@ export function checkedGearStatuses(statuses: readonly GearStatus[]): readonly G
 /** The sort keys the closet list offers, as they appear in the URL's `sort` parameter.
  *  `brand` was added by PK-62 alongside its Brand column header becoming a sort link —
  *  ordering a closet by maker is the one grouping the removed Brand filter checkboxes
- *  used to provide, and a sort does it without a panel of every brand the visitor owns. */
-export const GEAR_SORT_KEYS = ['name', 'brand', 'weight', 'price', 'added'] as const;
+ *  used to provide, and a sort does it without a panel of every brand the visitor owns.
+ *  `category` was added the same way by PK-70: PK-62 removed the Category filter
+ *  checkboxes alongside Brand's (see `unsurfacedFilterParams` in query.ts), and a Category
+ *  sort link is the same substitute for the one grouping they used to provide. */
+export const GEAR_SORT_KEYS = ['name', 'brand', 'category', 'weight', 'price', 'added'] as const;
 
 export type GearSortKey = (typeof GEAR_SORT_KEYS)[number];
+
+/**
+ * What `?sort=` and `?dir=` mean when the URL omits them, or names something
+ * `isGearSortKey` refuses. Exported from this module — the closet's vocabulary — rather
+ * than written inline in `parseGearQuery`, because PK-70 gave the pair a SECOND reader:
+ * `syncFilterFormToUrl` in `src/lib/gear/live-list.ts` has to write the same two values
+ * into the filter form's hidden inputs after an in-place sort, and a client bundle cannot
+ * import `query.ts` to ask (that module reaches the Supabase client; this one imports a
+ * type and nothing else).
+ *
+ * THE ALTERNATIVE WAS TWO LITERALS IN TWO FILES, and it fails silently in the one direction
+ * that matters. Change the default here to `added` and, with the pair duplicated, the server
+ * would render a list ordered by date under a form still claiming `name` — the visitor's next
+ * keystroke would reorder the list they had not asked to reorder, with nothing thrown and
+ * nothing logged. Naming it once makes that a compile-time rename instead.
+ */
+export const GEAR_DEFAULT_SORT: GearSortKey = 'name';
+
+/** The other half of `GEAR_DEFAULT_SORT`; see there. Ascending, so a closet opens in
+ *  A-Z name order rather than in whichever order the rows happen to come back. */
+export const GEAR_DEFAULT_DIRECTION: 'asc' | 'desc' = 'asc';
 
 /** Narrows an untrusted `sort` query parameter, mirroring `isGearStatus` above. */
 export function isGearSortKey(value: unknown): value is GearSortKey {
@@ -152,6 +206,11 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
  * directions — not at the top of descending, which is where Postgres's own asymmetric
  * default (NULLS LAST ascending, NULLS FIRST descending) would otherwise put them.
  *
+ * `category` (PK-70) sorts by the raw column and needs no such argument of its own — it is
+ * nullable exactly the way `brand` is, and `applyGearQuery`'s global `nullsFirst: false`
+ * already pins an uncategorised row last in BOTH directions, the same mechanism and the
+ * same reasoning as the `brand` paragraph just above, not a second decision.
+ *
  * A NOTE FOR ANYONE READING THE PK-62 HISTORY. An earlier version of this paragraph
  * argued the opposite — that the Postgres default was deliberately left alone so that
  * descending stayed the exact reverse of ascending. That was true when PK-62 was written
@@ -178,6 +237,7 @@ export function isGearSortKey(value: unknown): value is GearSortKey {
 export const GEAR_SORT_COLUMNS: Record<GearSortKey, GearItemColumn> = {
   name: 'name',
   brand: 'brand',
+  category: 'category',
   weight: 'weight_grams',
   price: 'price',
   added: 'acquired_on',
@@ -238,7 +298,7 @@ export const GEAR_LIST_COLUMNS: readonly {
 }[] = [
   { key: 'name', label: 'Name', numeric: false },
   { key: 'brand', label: 'Brand', numeric: false },
-  { key: null, label: 'Category', numeric: false },
+  { key: 'category', label: 'Category', numeric: false },
   { key: null, label: 'Qty', numeric: true },
   { key: 'weight', label: 'Weight', numeric: true },
   { key: 'price', label: 'Price', numeric: true },

@@ -121,27 +121,17 @@ const GEAR_STATUS_MARKERS: Record<GearStatus, GearStatusMarker | null> = {
 };
 
 /**
- * THE ROW TREATMENT FOR EACH MARKER, and total for the same reason the map above is.
- *
- * PK-64 gives a marked row a 5.5% wash of its state's colour and a 3px bar at its left
- * edge (DESIGN.md §7). The first version of that wrote the mapping as a pair of `===`
- * checks in `src/pages/gear/index.astro` — precisely the shape the comment above records
- * having already removed once, from `GearStatusIcon.astro`, and it fails the same way: a
- * third marker compiles, yields `undefined`, and paints a row that looks exactly like
- * `owned`.
- *
- * `Record<GearStatusMarker, string>` is the enforcement. It lives here rather than on the
- * page because `vitest.config.ts` excludes `src/pages/**`, so a mapping written there is a
- * decision no test can reach.
- *
- * There is deliberately no entry for the unmarked default: `gearStatusMarker` returns
- * `null` for it, and `null` is a real answer meaning "this state is drawn by drawing
- * nothing", not an absence waiting to be filled in.
+ * PK-70 REMOVED THE ROW TREATMENT THIS FILE USED TO NAME HERE. Up to PK-64, a marked row
+ * additionally got a 5.5% wash of its state's colour and a 3px bar at its left edge
+ * (DESIGN.md §7), driven by a `Record<GearStatusMarker, string>` this file exported as
+ * `GEAR_MARKER_ROW_CLASS`, mapping each marker to its own row-wash class name. PK-70
+ * removes the coloured rail down the left of every row without replacing it with anything
+ * of this file's own: what still carries a non-owned status is the icon `gearStatusMarker`
+ * resolves below, plus a strike drawn on a retired item's own name. Neither of those needs
+ * a mapping in `src/lib/gear/` any more than the icon itself did — they are rendering
+ * choices `src/pages/gear/index.astro` makes off the same `gearStatusMarker` return value
+ * this file already produced, not a second decision this module has to keep total.
  */
-export const GEAR_MARKER_ROW_CLASS: Record<GearStatusMarker, string> = {
-  wishlist: 'row-wishlist',
-  retired: 'row-retired',
-};
 
 /**
  * The glyph (if any) for a `gear_items` row's status. Takes the widened `string` the

@@ -166,6 +166,17 @@ describe('parseGearQuery: status — validated against GearStatus', () => {
     const statuses: readonly GearStatus[] = parseGearQuery(PARAMS([['status', 'owned']])).statuses;
     expect(statuses).toEqual(['owned']);
   });
+
+  // PK-70 changed what an empty status list MEANS to `applyGearFilters` (see
+  // `effectiveGearStatuses` in fields.ts) but deliberately did not touch what
+  // `parseGearQuery` records for it: `GearQuery.statuses` is still exactly `[]` for a URL
+  // with no `?status=` at all, same as `categories`/`brands` for their own absent params
+  // (see "no ?category= at all is an empty array" above). The default is resolved later,
+  // at the point of use, never baked into the parsed query itself — this is the parse-side
+  // half of that contract.
+  it('no ?status= at all is an empty array, not null, undefined, or GEAR_DEFAULT_STATUSES', () => {
+    expect(parseGearQuery(new URLSearchParams()).statuses).toEqual([]);
+  });
 });
 
 describe('parseGearQuery: weight range (wmin/wmax/wunit)', () => {
@@ -288,6 +299,7 @@ describe('parseGearQuery: sort / dir', () => {
   it.each([
     ['name', 'name'],
     ['brand', 'brand'],
+    ['category', 'category'],
     ['weight', 'weight'],
     ['price', 'price'],
     ['added', 'added'],
@@ -474,6 +486,7 @@ describe('gearQueryToSearchParams / parseGearQuery: round trip', () => {
         ['dir', 'desc'],
       ],
     ],
+    ['sort by category ascending (PK-70)', [['sort', 'category']]],
     [
       'sort by price ascending on page 4',
       [
