@@ -103,6 +103,48 @@
   --ink-2: #6b6259;
   --ink-3: #7a7468;
 
+  /*
+   * THE RESTING BORDER OF A FIELD, and the SECOND place the field box stops
+   * agreeing with the button box. The first is the stamp shadow, which predates
+   * this token: §6 gives it to a button and withholds it from a field, because the
+   * stamp is what says "press me". What the two still share is the 6px radius and
+   * the white fill.
+   *
+   * PK-68: a field used to be drawn in --ink, the same near-black as the value
+   * typed inside it, so the outline competed with its own contents. It is now a
+   * warm grey between --ink and --rule: still unmistakably a box, but the value is
+   * what the eye lands on.
+   *
+   * WHAT KEEPS --ink, AND ON WHAT TEST. A button does, and so does the segmented
+   * control — because both carry the stamp, which is the line §6 actually draws
+   * between the two families. Do NOT reach for "it fills with ink when selected"
+   * as the reason: a checked .checkbox fills with ink too, and its resting border
+   * is this token, so that test would put the two on the same side and it does not
+   * describe what was done here. Table rules (--rule, --hairline) are a different
+   * job again (§7) and are untouched.
+   *
+   * #8a8074 is not a taste call. A field border is a UI component boundary, so
+   * WCAG 1.4.11 wants 3:1 against what sits either side of it, and this clears that
+   * on every ground in the palette rather than only on the white sheet:
+   *
+   *     --note #ffffff        3.87:1
+   *     --paper #fdfcf6       3.77:1
+   *     --paper-deep #f5f1e4  3.43:1
+   *
+   * All three are checked rather than just the sheet, because the three grounds do
+   * not fail together and the sheet is the most forgiving of them. The lighter pick
+   * this token was chosen over, #9d9284, is the plain case: 3.05:1 on the sheet, so
+   * a sheet-only check passes it, and 2.97:1 on --paper, so it is already below the
+   * floor on the ground most of the site is. (--paper-deep, at 2.70:1, is lower
+   * still, but it only becomes the BINDING row in the narrow band where --paper
+   * itself scrapes past 3:1 — it is the belt to --paper's braces, not the row that
+   * catches this example.)
+   *
+   * It also stays clear of #8c8578, which is --c-misc; the note above --ink-3
+   * records what that collision costs.
+   */
+  --field-line: #8a8074;
+
   /* Blue — interactive and base weight only. Unchanged from the old palette. */
   --blue: #0070d4;
   --blue-deep: #005aab;
