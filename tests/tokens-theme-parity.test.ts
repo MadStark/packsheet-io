@@ -150,10 +150,12 @@ describe('the token graph resolves', () => {
 /** The 6-digit hex a token is declared with, from the `:root` block in tokens.css. */
 function tokenValue(css: string, name: string): string {
   let found: string | undefined;
-  postcss.parse(css).walkDecls(name, (decl) => {
-    found = decl.value.trim();
+  postcss.parse(css).walkRules(':root', (rule) => {
+    rule.walkDecls(name, (decl) => {
+      found = decl.value.trim();
+    });
   });
-  if (found === undefined) throw new Error(`${name} is not declared in tokens.css`);
+  if (found === undefined) throw new Error(`${name} is not declared in :root in tokens.css`);
   return found;
 }
 
@@ -173,16 +175,38 @@ function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-/** Every border-ish declaration on the rule with exactly this selector. */
-function borderDecls(css: string, selector: string): string[] {
+/**
+ * Every border-COLOUR-bearing declaration on any rule targeting this class.
+ *
+ * "Any rule targeting", not "the rule whose selector is exactly this string", and the
+ * difference is the whole value of the helper. `paper.css` already carries
+ * `textarea.field` and `select.field`, so a compound selector is the shape a future
+ * author reaches for — and `input.field { border-color: var(--ink) }` appended anywhere
+ * in the file reverts every text input at higher specificity. An exact-match walk skips
+ * it and reports green. So each comma-separated part is tested for the class as a whole
+ * token, which matches `.field`, `input.field` and `.foo > .field` while still rejecting
+ * `.field-label` and `.field-hint`.
+ *
+ * `border-radius` is excluded: it matches /^border/ but carries no colour, and letting it
+ * in made the array something other than what its name says.
+ */
+function borderColorDecls(css: string, className: string): string[] {
+  // The leading `.` is what makes this a class selector, so the character BEFORE it is
+  // irrelevant — requiring a combinator there was the bug this helper exists to avoid:
+  // it skipped `input.field` (preceded by a tag name) and reported green on a revert.
+  // What must be constrained is the character AFTER, so `.field` does not match
+  // `.field-label` or `.field-hint`.
+  const token = className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const targets = new RegExp(`${token}([^\\w-]|$)`);
   const values: string[] = [];
   postcss.parse(css).walkRules((rule) => {
-    if (rule.selector !== selector) return;
-    rule.walkDecls(/^border/, (decl) => {
+    if (!rule.selector.split(',').some((part) => targets.test(part.trim()))) return;
+    rule.walkDecls(/^border(-(top|right|bottom|left))?(-color)?$/, (decl) => {
       values.push(decl.value);
     });
   });
-  if (values.length === 0) throw new Error(`no border declaration found on \`${selector}\``);
+  if (values.length === 0)
+    throw new Error(`no border declaration found targeting \`${className}\``);
   return values;
 }
 
@@ -196,12 +220,18 @@ function borderDecls(css: string, selector: string): string[] {
  * the box competes with its own contents again, which is precisely the complaint that
  * produced this token.
  *
- * It pins the value as well as the reference, because "soften the fields" has an obvious
- * wrong answer in the other direction: keep going until the outline is nearly --rule and
- * the field stops reading as a boxed control at all. The 3:1 floor below is WCAG 1.4.11
- * for a UI component boundary, and it is asserted against the SUNK ground as well as the
- * white sheet — #9d9284 passes on --note at 3.05:1 and fails on --paper-deep at 2.70:1,
- * so checking only the sheet would wave through the one mistake worth catching.
+ * It pins the value as well as the reference, in BOTH directions, because "soften the
+ * fields" has an obvious wrong answer either way. Too light and the outline approaches
+ * --rule until the field stops reading as a boxed control; too dark and it is ink again
+ * under a different name, which is the ticket's own failure condition and the one a
+ * floor-only check cannot see.
+ *
+ * The 3:1 numbers are WCAG 1.4.11 for a UI component boundary. The floor is asserted on
+ * all three grounds rather than just the white sheet because they do not fail together
+ * and the sheet is the most forgiving: #9d9284 reads 3.05:1 there and would pass a
+ * sheet-only check, while already sitting below the floor at 2.97:1 on --paper. Checking
+ * --paper-deep too costs one loop iteration and closes the narrow band where --paper
+ * itself only just clears.
  */
 describe('a field outline is softer than the value inside it', () => {
   const tokens = read('tokens.css');
@@ -223,24 +253,64 @@ describe('a field outline is softer than the value inside it', () => {
     expect(onNote(fieldLine)).toBeGreaterThan(onNote(tokenValue(tokens, '--rule')));
   });
 
+  it('stays far enough from --ink to be a different colour, not a darker shade of it', () => {
+    // THE CEILING, and the assertion this block was missing. Everything else here is a
+    // FLOOR — do not get too light — which leaves the direction that matters completely
+    // open: `--field-line: #1c1918` is one bit off ink, is the exact complaint that
+    // produced this ticket, and passed every other assertion in this file. A lower bound
+    // alone cannot express "no longer the same colour as the value inside".
+    //
+    // 3:1 against --ink is the same number WCAG 1.4.11 asks between two adjacent parts of
+    // a control, used here for the two things the outline must not merge with: the value
+    // it surrounds, and the ground it sits on. #8a8074 measures 4.51:1 against --ink.
+    expect(contrast(fieldLine, tokenValue(tokens, '--ink'))).toBeGreaterThanOrEqual(3);
+  });
+
   it('clears the 3:1 boundary floor on every ground in the palette', () => {
     for (const ground of ['--note', '--paper', '--paper-deep']) {
       expect(contrast(fieldLine, tokenValue(tokens, ground))).toBeGreaterThanOrEqual(3);
     }
   });
 
-  it.each(['.field', '.search', '.checkbox'])('draws %s in --field-line, never --ink', (sel) => {
-    const borders = borderDecls(paper, sel);
+  it.each(['.field', '.search'])('draws %s in --field-line, never --ink', (sel) => {
+    const borders = borderColorDecls(paper, sel);
     expect(borders.some((value) => value.includes('var(--field-line)'))).toBe(true);
     expect(borders.filter((value) => value.includes('var(--ink)'))).toEqual([]);
   });
 
-  it.each(['.btn', '.segmented'])('leaves %s in --ink — a button is not a field', (sel) => {
-    // The other direction of the same revert: softening the fields must not creep into
-    // the button box. DESIGN.md §6 calls the segmented control "the button's box split
-    // by 1px ink dividers", and its selected segment fills with ink.
-    expect(borderDecls(paper, sel).some((value) => value.includes('var(--ink)'))).toBe(true);
+  it('draws .checkbox in --field-line at rest, and fills back to --ink when checked', () => {
+    // The checkbox is the one field whose CHECKED state is still ink on purpose — border
+    // included, so it renders as the solid ink square §6 describes rather than a
+    // near-black fill inside a lighter ring. So it cannot use the blanket rule above:
+    // resting must be --field-line, and :checked must put the border back.
+    const resting = borderColorDecls(paper, '.checkbox').filter(
+      (value) => !value.includes('var(--ink)'),
+    );
+    expect(resting.some((value) => value.includes('var(--field-line)'))).toBe(true);
+
+    const checked: string[] = [];
+    postcss.parse(paper).walkRules('.checkbox:checked', (rule) => {
+      rule.walkDecls(/^border(-color)?$/, (decl) => {
+        checked.push(decl.value);
+      });
+      rule.walkDecls('background-color', (decl) => {
+        checked.push(decl.value);
+      });
+    });
+    expect(checked.filter((value) => value.includes('var(--ink)'))).toHaveLength(2);
   });
+
+  it.each(['.btn', '.segmented', '.segment', '.file-field'])(
+    'leaves %s in --ink — a button is not a field',
+    (sel) => {
+      // The other direction of the same revert: softening the fields must not creep into
+      // the button box. DESIGN.md §6 calls the segmented control "the button's box split
+      // by 1px ink dividers" — .segment carries those dividers, so softening it alone
+      // would leave a half-softened control that .segmented's own assertion cannot see.
+      // .file-field covers ::file-selector-button, the one button the browser draws.
+      expect(borderColorDecls(paper, sel).some((value) => value.includes('var(--ink)'))).toBe(true);
+    },
+  );
 });
 
 describe('the language is light only', () => {

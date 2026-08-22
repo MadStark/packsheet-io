@@ -618,9 +618,10 @@
   /*
    * §6 — search alone is a bare underline with an icon, no box. It takes the field
    * line rather than ink for the same reason a field box does (PK-68) — here the
-   * rule IS the whole control, so an ink one drowned the query sitting on it. And it
-   * is
-   * the SYSTEM voice: the test is "did the visitor write this onto their list" — a
+   * rule IS the whole control, so an ink one drowned the query sitting on it.
+   *
+   * And it is the SYSTEM voice: the test is "did the visitor write this onto their
+   * list" — a
    * category they typed is on the list, a search query is a question asked of the
    * app and gone a moment later.
    */
@@ -660,8 +661,15 @@
    * A 15px square in the same field box at 3px radius, so its resting border is
    * --field-line like every other field (PK-68). Checked, it still FILLS WITH INK
    * and shows a paper-coloured tick — the same "pressed fills with ink" move the
-   * segmented control uses, rather than a new idea. Softening the outline does not
-   * soften the fill: an unchecked box is a field, a checked one is an answer.
+   * segmented control uses, rather than a new idea.
+   *
+   * CHECKED TAKES THE BORDER BACK TO INK, and that line is load-bearing rather than
+   * tidy-minded. Softening only the resting border and leaving :checked alone looks
+   * right in the rule but wrong on screen: the fill is --ink and the ring around it
+   * would still be --field-line, which is 4.51:1 away from it, so a ticked box
+   * renders as a near-black square inside a visibly lighter outline instead of the
+   * solid ink square §6 describes. Only the RESTING border was in scope; checked is
+   * a state, like focus and error, and states were to keep what they had.
    *
    * Applied to the <input> itself, so a label around it is plain markup. The tick
    * is a background image rather than a pseudo-element, because pseudo-elements on
@@ -687,6 +695,7 @@
   }
 
   .checkbox:checked {
+    border-color: var(--ink);
     background-color: var(--ink);
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 15 15'%3E%3Cpath d='M3.4 7.7l2.7 2.8 5.4-6' fill='none' stroke='%23fdfcf6' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
