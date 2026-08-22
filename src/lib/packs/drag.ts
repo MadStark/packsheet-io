@@ -14,8 +14,9 @@
  * decides the rule does not apply to them. The component itself CAN be server-rendered in
  * the suite — `tests/packs-drag.test.ts` does, with Vue's own `renderToString`, which needs
  * no DOM. What cannot be reached is any INTERACTION: `environment: 'node'` means no
- * `DragEvent`, no `dataTransfer` and no `getBoundingClientRect`, and neither
- * `@vue/test-utils` nor `jsdom` is a dependency to supply them. So a decision taken inside
+ * `DragEvent`, no `dataTransfer` and no `getBoundingClientRect`, `@vue/test-utils` is not a
+ * dependency to supply them, and this file does not opt into the `jsdom` environment PK-69
+ * added (which only `tests/modal.test.ts` uses). So a decision taken inside
  * a drag handler is a decision nothing can execute. All three functions below were taken out
  * of such a handler, and a wrong answer to any of them is SILENT: an off-by-one in
  * `dropTargetIndex` is invisible in the middle of a list and shows up only at its ends, a

@@ -69,8 +69,9 @@
  * deliberate to the point of being the design: everything below is event plumbing and
  * markup, because a decision taken inside a drag handler in this repository is a decision
  * nothing can execute. `tests/packs-drag.test.ts` can server-render this component —
- * `renderToString` needs no DOM — but `vitest.config.ts` sets `environment: 'node'` and
- * neither `@vue/test-utils` nor `jsdom` is a dependency, so there is no `DragEvent`, no
+ * `renderToString` needs no DOM — but `vitest.config.ts` sets `environment: 'node'`,
+ * `@vue/test-utils` is not a dependency, and that file does not opt into the `jsdom`
+ * environment PK-69 added for `tests/modal.test.ts`, so there is no `DragEvent`, no
  * `dataTransfer` and no `getBoundingClientRect` to drive one with.
  *
  * THAT ARGUMENT COVERS THE POINTER HANDLERS AND NOTHING ELSE, which PK-37's independent

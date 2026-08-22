@@ -10,22 +10,24 @@
 // module's header for why a `<script>` block is code nothing in this repository can execute.
 //
 // ---------------------------------------------------------------------------
-// IT DEPARTS FROM THE WRITTEN DESIGN LANGUAGE, AND SAYS SO
+// THE DESIGN LANGUAGE SANCTIONS THIS SURFACE, AND ONLY THIS ONE
 // ---------------------------------------------------------------------------
 //
-// `docs/design/DESIGN.md` §13 refuses "two overlapping papers": "nothing lies on a sheet and
-// nothing hangs off one." A modal is exactly that — a sheet lying on top of the page, with
-// the page dimmed behind it. This component knowingly departs from the language on the
-// strength of the design feedback that asks for popups in five places, and it is written
-// down here rather than quietly done, because §13's other refusals (tilt, tape, boxed cards
-// inside cards, borders as separators) are still in force and this is not a licence to
-// revisit them.
+// `docs/design/DESIGN.md` §2.5 used to read "No two papers ever overlap. Nothing lies on top
+// of a sheet, and nothing hangs off its edge", with no exception, and §13 restated it as a
+// refusal. A modal is exactly what that forbade. PK-69 amended both rather than shipping a
+// component that quietly contradicted the authority: §2.5 now permits a modal specifically,
+// on the argument that it is not part of the page — it covers the page rather than sitting
+// in it, lives in the top layer, dims and inerts what is behind, and leaves nothing when it
+// closes. The appendix records the change.
 //
-// DESIGN.md IS NOT UPDATED BY THIS TICKET. A sibling ticket owns that file, and a second
-// edit to it here is a merge conflict that breaks whichever of the two lands second. When
-// the language is amended, this paragraph is what the amendment should be arguing with.
+// THE AMENDMENT IS NARROW AND THIS IS NOT A LICENCE TO REVISIT THE REST. Overlap for
+// EMPHASIS is still refused: a note may not lie on a sheet, nothing hangs off an edge, and
+// §13's other refusals (tilt, tape, boxed cards inside cards, borders as separators) are
+// untouched. If a second surface here ever stops being a dismissible interruption and starts
+// being decoration, it is outside what was agreed.
 //
-// What the shell does keep is everything §13 is actually protecting. The sheet is `--note`
+// What the shell keeps is everything the rule was actually protecting. The sheet is `--note`
 // on a `--shadow-ink` scrim, never black (tokens.css: "a black shadow on warm paper reads as
 // a hole"). It is square, because sheets are square (§6 puts the 6px radius on controls, not
 // on surfaces). It does not animate, because paper does not (§11) — which is also why there
