@@ -644,6 +644,14 @@ const AUTH_CONSUMERS: readonly string[] = [
   // the pack under the caller's own policies. Answers JSON; renders no markup and hydrates
   // nothing, which is what keeps it off the client pass.
   'src/pages/packs/reorder.ts',
+  // The add-to-pack dialog's closet page (PK-74), named by PACK_CLOSET_PATH: GET-only, no
+  // write handler at all. Reads Astro.locals.user and redirects a signed-out caller to
+  // sign-in rather than reading anything; builds a request-scoped client via
+  // createAuthClient and issues the one read this endpoint exists for — loadGearCloset,
+  // the gear closet page's own query, scoped to user_id for the identical reason
+  // gear/index.astro's entry above states. No RPC, no privileged key. Answers JSON;
+  // renders no markup and hydrates nothing, which is what keeps it off the client pass.
+  'src/pages/packs/closet.ts',
 ];
 
 /** The allowlist as absolute ids, to be compared against graph keys. Entries are written
