@@ -679,11 +679,21 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
    *  running. */
   const SELF_PATH = `/packs/${PACK_ID}?q=tarp`;
 
-  /** The per-row delete control, as it renders. The `sr-only` span is what distinguishes it
-   *  from every other "Delete category" on the page for somebody listening rather than
-   *  looking, and matching on it here means this marker cannot also match the confirmation
-   *  step's "Delete category and its items". */
-  const DELETE_CATEGORY_BUTTON = 'Delete category <span class="sr-only"';
+  /**
+   * The per-row delete control, as it renders. Matching on the closing tag means this marker
+   * cannot also match the confirmation step's "Delete category and its items", which is a
+   * different control with a longer sentence.
+   *
+   * PK-73 CHANGED THE SPELLING, and the change is worth knowing about because it fixed a real
+   * defect. The button used to be `Delete category<span class="sr-only"> {name}</span>` — a
+   * visible word followed by a hidden tail — and the single leading space inside that hidden
+   * span does not survive Vue's `whitespace: 'condense'`, so the accessible name came out as
+   * "Delete categoryShelter" with the two run together. It is now two spans: the visible word
+   * marked `aria-hidden`, and the whole sentence hidden, so the accessible name is a literal
+   * string in the template. WCAG 2.5.3 still holds — the visible label is the first words of
+   * the accessible one.
+   */
+  const DELETE_CATEGORY_BUTTON = '>Delete category</span>';
 
   const tree: TreeCategory[] = [
     category(CATEGORY_ID, 0, [
@@ -804,6 +814,30 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     expect(html).toContain('Remove Tarp from this pack');
   });
 
+  /**
+   * PK-73 moved three of those four controls into a per-row `…` menu and turned quantity into
+   * a stepper, and the assertion above still passes BECAUSE the shapes did not change: they
+   * are still `<form method="post">` with the same hidden intent and id fields, still named
+   * through the same constants, and still in the server output. That is the whole claim this
+   * describe block exists to make, so it is worth pinning that the menu did not smuggle in a
+   * dependency on JavaScript to reach them.
+   *
+   * `tests/pack-contents-row.test.ts` is where the menu's own behaviour is tested — what each
+   * form posts, that the pressed button's carriage is the only one submitted, that the
+   * decrement is disabled at 1. This is only the no-JS half.
+   */
+  it('reaches the moved controls without JavaScript', async () => {
+    const html = await render();
+    // A disclosure, not a button waiting for a click handler — and closed, so a forty-item
+    // pack does not render forty open menus for a visitor whose bundle never arrives.
+    expect(html).toContain('<details class="row-menu"');
+    expect(html).not.toMatch(/<details[^>]*\sopen[\s>]/);
+    // The stepper posts through the same field the free number input used to.
+    expect(html).toMatch(
+      new RegExp(`<button[^>]*name="${PACK_ITEM_FORM_FIELD.quantity}" value="\\d+"`),
+    );
+  });
+
   /** CLAIM 1, for the per-category controls: rename, and the first half of the delete gate. */
   it('renders the per-category controls as plain forms that post', async () => {
     const html = await render();
@@ -858,9 +892,28 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     expect(html).toContain('aria-invalid="true"');
   });
 
-  /** And a failed item save renders what the VISITOR TYPED, not what is stored — the whole
-   *  reason `rawPackItemFormValues` exists. */
-  it('shows the rejected input back on the row that failed', async () => {
+  /**
+   * A failed item save renders its message on the row it belongs to.
+   *
+   * THIS TEST USED TO ASSERT SOMETHING STRONGER AND PK-73 RETIRED THAT CLAIM DELIBERATELY.
+   * It read "shows the rejected input back on the row that failed", and pinned that the row
+   * redisplayed `itemError.values` — the visitor's own refused quantity in the number field,
+   * their chosen carriage still checked in the radio group — rather than silently reverting to
+   * the stored row and inviting them to save the revert back. That was the right behaviour
+   * for a row with a free text field and a radio group on it.
+   *
+   * There is no field left to redisplay. Quantity is two buttons carrying numbers this
+   * component computes from the STORED value, carriage is three buttons carrying three
+   * constants, and packed is one button carrying the opposite of what is stored. A rejected
+   * submission therefore leaves nothing for the visitor to correct in place — the change did
+   * not happen, the stored state is what is true, and showing it is not a silent revert. What
+   * survives, and is asserted here, is that they are TOLD: the message renders, on that row,
+   * with the id its control points at.
+   *
+   * See `ItemRow`'s own note in the component for the second reason `values` could not be
+   * reused for the hidden fields even if a field had wanted it.
+   */
+  it('renders the message for a failed item save on the row that failed', async () => {
     const html = await render({
       itemError: {
         itemId: ITEM_ID,
@@ -870,10 +923,13 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     });
 
     expect(html).toContain('Enter a whole number greater than zero for quantity.');
-    expect(html).toContain('value="0"');
-    // The carriage the submission carried, not the stored `carried` — a re-render that
-    // silently reverted it would invite the visitor to save the revert back.
-    expect(html).toMatch(/name="carriage" value="worn"[^>]*checked/);
+    expect(html).toContain(`id="item-${ITEM_ID}-error-quantity"`);
+    // The stepper still offers a step from the STORED quantity of 1, not from the refused 0:
+    // the increment goes to 2, and there is no button offering to save -1.
+    expect(html).toMatch(
+      new RegExp(`<button[^>]*name="${PACK_ITEM_FORM_FIELD.quantity}" value="2"`),
+    );
+    expect(html).not.toContain(`name="${PACK_ITEM_FORM_FIELD.quantity}" value="-1"`);
   });
 
   /**
@@ -893,9 +949,45 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
     });
 
     expect(html).toContain(`id="item-${ITEM_ID}-error-quantity"`);
-    expect(html).toMatch(
-      new RegExp(`aria-describedby="item-${ITEM_ID}-error-quantity"[^>]*aria-invalid="true"`),
-    );
+    expect(html).toContain(`aria-describedby="item-${ITEM_ID}-error-quantity"`);
+    // And the carriage message, when there is one, is pointed at by the control that would
+    // change it — which is the `…` menu now rather than a radio group on the row.
+    const withCarriageError = await render({
+      itemError: {
+        itemId: ITEM_ID,
+        errors: { carriage: 'Choose how this item is carried.' },
+        values: { quantity: '1', carriage: '', packed: '' },
+      },
+    });
+    expect(withCarriageError).toContain(`aria-describedby="item-${ITEM_ID}-error-carriage"`);
+  });
+
+  /**
+   * `aria-invalid` WENT WITH THE FIELDS, and its absence is asserted rather than left to be
+   * noticed, because "the attribute is missing" is otherwise indistinguishable from an
+   * oversight.
+   *
+   * It marks a control whose VALUE is invalid. The category rename still has one — that is a
+   * text field holding a name the server refused. The item row has no field left: the stepper
+   * buttons each carry one number this component computed, and the carriage buttons each carry
+   * one of three constants, so there is no value on any of them a visitor chose and none of
+   * them can be invalid. What a screen reader needs is the ASSOCIATION with the message, and
+   * that is what the test above pins.
+   */
+  it('keeps aria-invalid on the field that can hold one, and nowhere else', async () => {
+    const renameFailed = await render({
+      renameError: { categoryId: CATEGORY_ID, message: 'Enter a name for this category.' },
+    });
+    expect(renameFailed).toContain('aria-invalid="true"');
+
+    const itemFailed = await render({
+      itemError: {
+        itemId: ITEM_ID,
+        errors: { quantity: 'Enter a whole number greater than zero for quantity.' },
+        values: { quantity: '0', carriage: 'worn', packed: 'on' },
+      },
+    });
+    expect(itemFailed).not.toContain('aria-invalid="true"');
   });
 
   /**
@@ -922,14 +1014,25 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
   });
 
   /**
-   * The repeated-name problem, pinned on the control the review named. A pack of forty items
-   * otherwise offers forty buttons called "Save" and nothing tells them apart out of context;
-   * the visible word still comes first, which is what keeps 2.5.3 satisfied.
+   * The repeated-name problem, pinned on the controls that have it. A pack of forty items
+   * otherwise offers forty controls called "Remove" and nothing tells them apart out of
+   * context; the visible word is still the first words of the accessible name, which is what
+   * keeps WCAG 2.5.3 satisfied.
+   *
+   * PK-73 CHANGED THE CAST. There is no Save button — every control on the row is its own
+   * submission now — and Rename moved into the category's `…` menu. The naming rule did not
+   * change and neither did the reason for it; what changed is the spelling, from a visible
+   * word with an `sr-only` tail to a hidden full sentence beside an `aria-hidden` visible one.
+   * See `DELETE_CATEGORY_BUTTON` for the whitespace defect that forced the rewrite.
    */
-  it('distinguishes the per-row Save buttons by the row they belong to', async () => {
+  it('distinguishes the repeated per-row controls by the row they belong to', async () => {
     const html = await render();
-    expect(html).toContain('Save <span class="sr-only"');
-    expect(html).toContain('Rename <span class="sr-only"');
+    expect(html).toContain('Rename Category 11111111-1111-4111-8111-111111111111');
+    expect(html).toContain('Remove Tarp from this pack');
+    expect(html).toContain('aria-label="Actions for Tarp"');
+    // The Save button is gone rather than hidden: a row with one would mean the old form had
+    // been left beside the new controls, and every step would post twice.
+    expect(html).not.toContain('>Save<');
   });
 
   // CLAIM 2. `draggable` and the grip are gated on `onMounted`, which does not run during
