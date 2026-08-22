@@ -495,15 +495,34 @@ describe('savedDetailFrom', () => {
 
   it('reports created true when nothing was requested (a create) and false when an item id was (an edit)', () => {
     expect(savedDetailFrom('https://packsheet.io/gear/new-id', base, null)?.created).toBe(true);
-    expect(savedDetailFrom('https://packsheet.io/gear/abc-123', base, 'abc-123')?.created).toBe(
-      false,
-    );
+    expect(
+      savedDetailFrom('https://packsheet.io/gear/abc-123?updated=1', base, 'abc-123')?.created,
+    ).toBe(false);
   });
 
   it('returns null when the redirect landed on /sign-in even though an item id was requested — an expired session must never be reported as a save', () => {
     expect(
       savedDetailFrom('https://packsheet.io/sign-in?next=%2Fgear%2Fabc-123', base, 'abc-123'),
     ).toBeNull();
+  });
+
+  /*
+   * FOUND IN AN INDEPENDENT REVIEW, NOT REASONED OUT IN ADVANCE. A session that only
+   * BLIPS — expired for the one check the middleware makes, good again by the time
+   * sign-in's own redirect is followed — writes NOTHING, and lands back on the exact
+   * same `/gear/{id}` shape a genuine edit-success redirect does, because that is what
+   * sign-in's `next` names. The two are indistinguishable by path shape alone; `updated`
+   * is the one string only `[id].astro`'s write branch emits.
+   */
+  it('returns null for an edit whose redirect landed on the bare /gear/{id} — indistinguishable from a genuine save by path shape alone, which is exactly what a bounce through /sign-in and back produces on a session that turned out to still be good', () => {
+    expect(savedDetailFrom('https://packsheet.io/gear/abc-123', base, 'abc-123')).toBeNull();
+  });
+
+  it('still accepts the bare /gear/{id} for a CREATE, whose bounce lands on /gear/new (naming no item) rather than on the created item’s own path, so the ambiguity above does not apply', () => {
+    expect(savedDetailFrom('https://packsheet.io/gear/abc-123', base, null)).toEqual({
+      id: 'abc-123',
+      created: true,
+    });
   });
 });
 
@@ -741,6 +760,23 @@ describe('initGearItemOverlay', () => {
       expect(nameInput.value).toBe('Edited before the failed save');
     });
 
+    it('reports "the server refused this save" rather than "could not reach the server" when the POST gets back a non-ok, non-redirected answer — the request was received and rejected, not lost', async () => {
+      const { dialog, form } = await opened(async (_url, init) => {
+        if (init?.method === 'POST') return okPage('', { ok: false });
+        return okPage(gearFormFixture());
+      });
+
+      form.dispatchEvent(submit());
+
+      await vi.waitFor(() => {
+        expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('refused');
+      });
+      expect(dialog.querySelector('[role="alert"]')?.textContent).not.toContain(
+        'could not reach the server',
+      );
+      expect(dialog.hasAttribute('open')).toBe(true);
+    });
+
     it('POSTs only once when the injected form is submitted twice before the first save resolves', async () => {
       const { dialog, form, calls } = await opened(async (_url, init) => {
         if (init?.method === 'POST') {
@@ -757,6 +793,153 @@ describe('initGearItemOverlay', () => {
       });
 
       expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1);
+    });
+
+    /*
+     * BOTH TESTS BELOW WERE WRITTEN AFTER AN INDEPENDENT REVIEW FOUND THIS RACE, NOT
+     * BEFORE — the generation counter's own comment claimed checking it "after every
+     * await is the whole guard", and neither of these two spots did. `deferred()` gives
+     * a test a POST promise it can resolve on its own schedule, which is what lets it
+     * park a save mid-flight, move the dialog on to a second item, and only then let the
+     * first one land — the exact shape a slow network plus an impatient visitor produces.
+     */
+    function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((r) => (resolve = r));
+      return { promise, resolve };
+    }
+
+    it('does not close the dialog or discard what is in it when a save that belonged to a DIFFERENT, already-abandoned session resolves after the visitor moved on to another item — but still dispatches the event, since the write itself really happened', async () => {
+      const { root, dialog } = site(`
+        <a id="a" href="${GEAR_PATH}/aaa">Item A</a>
+        <a id="b" href="${GEAR_PATH}/bbb">Item B</a>
+      `);
+      const linkA = root.querySelector('#a') as HTMLAnchorElement;
+      const linkB = root.querySelector('#b') as HTMLAnchorElement;
+
+      const postA = deferred<FakeResponse>();
+      const { fetch } = overlayFetch(async (url, init) => {
+        if (init?.method === 'POST') return postA.promise;
+        if (url.includes('/aaa')) return okPage(gearFormFixture({ title: 'Item A' }));
+        return okPage(gearFormFixture({ title: 'Item B' }));
+      });
+      initGearItemOverlay(document, { fetch });
+
+      let received: GearItemSavedDetail | null = null;
+      document.addEventListener(GEAR_ITEM_SAVED_EVENT, (event) => {
+        received = (event as CustomEvent<GearItemSavedDetail>).detail;
+      });
+
+      linkA.dispatchEvent(click());
+      await vi.waitFor(() => expect(formIn(dialog)).not.toBeNull());
+      (formIn(dialog) as HTMLFormElement).dispatchEvent(submit()); // A's save is now in flight
+
+      dialog.close(); // the visitor dismissed A before it answered
+      linkB.dispatchEvent(click());
+      await vi.waitFor(() => {
+        expect(dialog.querySelector(`[${OVERLAY_HEADING_ATTRIBUTE}]`)?.textContent).toBe('Item B');
+      });
+
+      // A's write answers now, long after the visitor moved on to B.
+      postA.resolve(okPage('', { redirected: true, url: `${ORIGIN}${GEAR_PATH}/aaa?updated=1` }));
+
+      await vi.waitFor(() => expect(received).not.toBeNull());
+      expect(received).toEqual({ id: 'aaa', created: false });
+
+      // B's session is untouched: still open, still showing B, not the placeholder a
+      // wrongful `controller.close()` would have reset it to.
+      expect(dialog.hasAttribute('open')).toBe(true);
+      expect(dialog.querySelector(`[${OVERLAY_HEADING_ATTRIBUTE}]`)?.textContent).toBe('Item B');
+      expect(formIn(dialog)).not.toBeNull();
+    });
+
+    it('does not navigate the visitor away when a save that belonged to an abandoned session resolves with no receipt (a session bounce) after they moved on to another item', async () => {
+      const { root, dialog } = site(`
+        <a id="a" href="${GEAR_PATH}/aaa">Item A</a>
+        <a id="b" href="${GEAR_PATH}/bbb">Item B</a>
+      `);
+      const linkA = root.querySelector('#a') as HTMLAnchorElement;
+      const linkB = root.querySelector('#b') as HTMLAnchorElement;
+
+      const postA = deferred<FakeResponse>();
+      const { fetch } = overlayFetch(async (url, init) => {
+        if (init?.method === 'POST') return postA.promise;
+        if (url.includes('/aaa')) return okPage(gearFormFixture({ title: 'Item A' }));
+        return okPage(gearFormFixture({ title: 'Item B' }));
+      });
+      initGearItemOverlay(document, { fetch });
+
+      const assign = vi.fn();
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...window.location, assign },
+      });
+
+      linkA.dispatchEvent(click());
+      await vi.waitFor(() => expect(formIn(dialog)).not.toBeNull());
+      (formIn(dialog) as HTMLFormElement).dispatchEvent(submit());
+
+      dialog.close();
+      linkB.dispatchEvent(click());
+      await vi.waitFor(() => {
+        expect(dialog.querySelector(`[${OVERLAY_HEADING_ATTRIBUTE}]`)?.textContent).toBe('Item B');
+      });
+
+      // A's session bounced to sign-in and wrote nothing — but the visitor is on B now.
+      postA.resolve(okPage('', { redirected: true, url: `${ORIGIN}/sign-in?next=%2Fgear%2Faaa` }));
+      await vi.waitFor(() => expect(warnings.length).toBeGreaterThan(0));
+
+      // Not navigated away from whatever they are doing with B, and B is untouched.
+      expect(assign).not.toHaveBeenCalled();
+      expect(dialog.hasAttribute('open')).toBe(true);
+      expect(dialog.querySelector(`[${OVERLAY_HEADING_ATTRIBUTE}]`)?.textContent).toBe('Item B');
+    });
+
+    it('does not clear the in-flight guard for a NEWER session when an OLDER, abandoned save finally settles — so a second POST for the item still being saved cannot slip through', async () => {
+      const { root, dialog } = site(`
+        <a id="a" href="${GEAR_PATH}/aaa">Item A</a>
+        <a id="b" href="${GEAR_PATH}/bbb">Item B</a>
+      `);
+      const linkA = root.querySelector('#a') as HTMLAnchorElement;
+      const linkB = root.querySelector('#b') as HTMLAnchorElement;
+
+      const postA = deferred<FakeResponse>();
+      const postCalls: string[] = [];
+      const { fetch } = overlayFetch(async (url, init) => {
+        if (init?.method === 'POST') {
+          postCalls.push(url);
+          if (url.includes('/aaa')) return postA.promise;
+          // B's own save never resolves within this test — what matters is whether a
+          // SECOND POST for B is ever attempted, not how the first one would end.
+          return new Promise<FakeResponse>(() => {});
+        }
+        if (url.includes('/aaa')) return okPage(gearFormFixture({ title: 'Item A' }));
+        return okPage(gearFormFixture({ title: 'Item B' }));
+      });
+      initGearItemOverlay(document, { fetch });
+
+      linkA.dispatchEvent(click());
+      await vi.waitFor(() => expect(formIn(dialog)).not.toBeNull());
+      (formIn(dialog) as HTMLFormElement).dispatchEvent(submit()); // A: submitting = true
+
+      dialog.close(); // onClose resets submitting/injectedSubmit for the session that just ended
+      linkB.dispatchEvent(click());
+      await vi.waitFor(() => {
+        expect(dialog.querySelector(`[${OVERLAY_HEADING_ATTRIBUTE}]`)?.textContent).toBe('Item B');
+      });
+      const formB = formIn(dialog) as HTMLFormElement;
+      formB.dispatchEvent(submit()); // B: submitting = true, B's own POST now outstanding
+
+      expect(postCalls.filter((u) => u.includes('/bbb'))).toHaveLength(1);
+
+      // A's abandoned save finally answers. Without the generation check in the
+      // `finally`, this clears `submitting` and re-enables B's (still in flight) button.
+      postA.resolve(okPage('', { redirected: true, url: `${ORIGIN}${GEAR_PATH}/aaa?updated=1` }));
+      await vi.waitFor(() => expect(dialog.hasAttribute('open')).toBe(true)); // let A's handler run
+
+      formB.dispatchEvent(submit()); // the visitor, or a stray Enter, tries again
+
+      expect(postCalls.filter((u) => u.includes('/bbb'))).toHaveLength(1);
     });
   });
 

@@ -512,6 +512,21 @@ export function submissionBody(form: HTMLFormElement): URLSearchParams {
  * link it intercepted; inferring it from the response would mean asking whether the id
  * changed, which is not the same question and answers wrongly the moment the fallback
  * above is used.
+ *
+ * ONE MORE BOUNCE THE PATH SHAPE ALONE CANNOT TELL FROM A RECEIPT, found after the
+ * fallback above was already fixed: a genuinely EXPIRED session lands on `/sign-in`,
+ * which is not a gear path and is already refused — but a session that only BLIPS,
+ * expiring for the one check the middleware makes and being good again by the time
+ * sign-in's own redirect is followed, lands back on `/gear/{id}` having written
+ * NOTHING, and that URL has the same shape a receipt does. For an edit this is
+ * distinguishable, because `next` is always stripped: `src/pages/gear/[id].astro`'s
+ * success branch therefore always takes its `returnPath === null` fork and always
+ * redirects to `/gear/{id}?updated=1` — never a bare `/gear/{id}` — while the bounce
+ * lands on the bare path (sign-in's `next` is the request's own path, captured before
+ * anything was written). Requiring `updated=1` for an edit is what a bounce cannot
+ * produce and a write always does. A create needs no such check: its own bounce lands
+ * back on `/gear/new` (sign-in's `next` there), which names no item at all and is
+ * already refused by the `landed.itemId === null` test below.
  */
 export function savedDetailFrom(
   responseUrl: string,
@@ -520,6 +535,12 @@ export function savedDetailFrom(
 ): GearItemSavedDetail | null {
   const landed = overlayTargetFor(responseUrl, base);
   if (landed === null || landed.itemId === null) return null;
+
+  if (requestedItemId !== null) {
+    const updated = new URL(responseUrl, base).searchParams.get('updated') === '1';
+    if (!updated) return null;
+  }
+
   return { id: landed.itemId, created: requestedItemId === null };
 }
 
@@ -539,6 +560,18 @@ const LOADING_MESSAGE = 'Loading…';
  */
 const SAVE_UNREACHABLE_MESSAGE =
   'We could not reach the server to save this. Nothing you typed has been lost — try again.';
+
+/**
+ * Shown instead of `SAVE_UNREACHABLE_MESSAGE` when the server WAS reached and refused
+ * the request outright — a 4xx or 5xx with no redirect, which is not the same failure
+ * and should not carry the same claim. `loadInto`'s `!response.ok` check on the GET
+ * already treats this as "show the visitor the real page instead"; a POST cannot do
+ * that (there is nowhere safe to navigate a rejected write to), so it stays in the
+ * dialog with a message that is honest about what happened: the request landed, the
+ * server said no. Nothing typed is touched either way.
+ */
+const SAVE_REJECTED_MESSAGE =
+  'The server refused this save. Nothing you typed has been lost — check the details and try again.';
 
 /**
  * Marks the notice THIS module builds, so a retry replaces its own previous notice
@@ -648,6 +681,11 @@ export function initGearItemOverlay(
   const showLoading = () => {
     const line = doc.createElement('p');
     line.className = 'hint';
+    // `role="status"` because focus lands on the footer's Cancel button while this is
+    // the only thing in the body (`focusableWithin` finds nothing else) — with no live
+    // region a screen reader announces "Cancel button" and nothing about why the dialog
+    // opened onto one line of text with no form in it yet.
+    line.setAttribute('role', 'status');
     line.textContent = LOADING_MESSAGE;
     body.replaceChildren(line);
     actions.replaceChildren();
@@ -692,7 +730,7 @@ export function initGearItemOverlay(
     view.location.assign(href);
   };
 
-  const showUnreachableNotice = () => {
+  const showUnreachableNotice = (message: string = SAVE_UNREACHABLE_MESSAGE) => {
     body.querySelector(`[${UNREACHABLE_NOTICE_ATTRIBUTE}]`)?.remove();
     // The same markup both pages use for their own banners — `.note.note-danger` with
     // `role="alert"` — rather than a shape invented here, so it reads as part of the
@@ -702,7 +740,7 @@ export function initGearItemOverlay(
     notice.setAttribute('role', 'alert');
     notice.setAttribute(UNREACHABLE_NOTICE_ATTRIBUTE, '');
     const line = doc.createElement('p');
-    line.textContent = SAVE_UNREACHABLE_MESSAGE;
+    line.textContent = message;
     notice.append(line);
     body.prepend(notice);
     focusNotice(notice);
@@ -859,6 +897,28 @@ export function initGearItemOverlay(
     if (response.redirected) {
       const detail = savedDetailFrom(response.url, view.location.href, requestedItemId);
 
+      /*
+       * `mine !== generation` HERE MEANS THE VISITOR HAS MOVED ON while this POST was in
+       * flight — dismissed the dialog, or opened a different item — and this branch used
+       * to act as if nothing had changed: `controller.close()` closed whatever session
+       * happened to be open, which could by now belong to a completely different item,
+       * and `fallbackToNavigation` could navigate a visitor away from wherever they had
+       * gone next to report a write that FAILED for a save they may not even remember
+       * starting. Both are worse than doing nothing, so both are skipped. What is not
+       * skipped is the event on a genuine write (`detail !== null`): the write reached
+       * the database regardless of what the dialog is doing now, and a listener like the
+       * closet's own list still needs to know about it — see `GEAR_ITEM_SAVED_EVENT`'s
+       * own header on why closing and dispatching are two separate steps, not one.
+       */
+      if (mine !== generation) {
+        if (detail !== null) {
+          doc.dispatchEvent(
+            new CustomEvent<GearItemSavedDetail>(GEAR_ITEM_SAVED_EVENT, { detail }),
+          );
+        }
+        return;
+      }
+
       if (detail === null) {
         /*
          * Not a receipt — in practice a session that expired while the dialog was open.
@@ -894,7 +954,20 @@ export function initGearItemOverlay(
       return;
     }
 
-    // Not redirected: the server re-rendered the page with its own error banners in it.
+    if (!response.ok) {
+      // Reached and REFUSED, not unreachable — a 403 from `checkOrigin`, a 500, a route
+      // that started rejecting the method. `loadInto`'s GET has somewhere safe to send
+      // the visitor when this happens (the real page, via `fallbackToNavigation`); a
+      // POST does not, because there is no page that represents "try writing this
+      // again" — so it stays in the dialog, with a message that says the request landed
+      // rather than implying it never left.
+      if (mine !== generation) return;
+      showUnreachableNotice(SAVE_REJECTED_MESSAGE);
+      return;
+    }
+
+    // Not redirected, and ok: the server re-rendered the page with its own error
+    // banners in it — a validation failure or a write failure, both 200.
     let html: string;
     try {
       html = await response.text();
@@ -940,6 +1013,17 @@ export function initGearItemOverlay(
 
     const mine = generation;
     void save(form, mine).finally(() => {
+      // `mine !== generation` HERE MEANS THE DIALOG HAS MOVED ON since this POST was
+      // sent — closed, or reopened onto a different item — and `submitting` /
+      // `injectedSubmit` by now describe THAT session, not this finished request's. An
+      // unconditional reset used to clear them anyway: save item A, dismiss mid-POST,
+      // open and start saving item B, and A's `finally` would land in the middle of B's
+      // POST, re-enabling B's submit button and setting `submitting = false` while B's
+      // own request was still outstanding — Enter in a field then fired a second POST
+      // for B, which for a create means two rows inserted from one submit. `onClose`
+      // already resets both when a session genuinely ends; this `finally` must only
+      // touch them when it is still that same session's own cleanup.
+      if (mine !== generation) return;
       submitting = false;
       injectedSubmit?.removeAttribute('disabled');
     });
