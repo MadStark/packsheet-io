@@ -1,0 +1,190 @@
+---
+/**
+ * A pack's details, as a popup — the same four fields whether the pack is being created
+ * or edited (PK-72).
+ *
+ * ---------------------------------------------------------------------------
+ * WHY ONE COMPONENT RATHER THAN TWO
+ * ---------------------------------------------------------------------------
+ *
+ * The design feedback asked for a create-pack popup, and then asked that the pack page's
+ * *Edit details* button open "the same popup". Those are the same four fields, the same
+ * validation, the same error rendering and the same two buttons; the only differences are
+ * the title, the label on the submit button, where Cancel goes, and whether an `intent`
+ * accompanies the post. All four are props.
+ *
+ * The alternative — a create form on the list page and an edit form on the pack page —
+ * is what this file replaces, and it had already drifted: the list page's inline form
+ * offered `name` alone while the pack page offered three fields, so a description typed
+ * at creation time was impossible and the same form validated two different shapes
+ * depending on where you stood.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS COMPONENT OWNS ITS <Modal>, WHICH IS THE ONLY WAY "THE SAME POPUP" IS TRUE
+ * ---------------------------------------------------------------------------
+ *
+ * It renders the shell, the title, the form and the footer buttons together rather than
+ * being a fields-only partial the two pages each wrap themselves. That is deliberate: the
+ * shell's Save button lives in its `actions` slot and the form lives in its default slot,
+ * so the button reaches the form through `form={FORM_ID}` — a wiring detail that must be
+ * identical in both places for the popup to behave identically in both places. Handing
+ * each page a bag of fields and asking it to rebuild that wiring is how the two entry
+ * points start to differ again, which is the thing this ticket exists to stop.
+ *
+ * ---------------------------------------------------------------------------
+ * NO DECISION-MAKING LIVES HERE
+ * ---------------------------------------------------------------------------
+ *
+ * Same rule as `GearItemForm.astro`. `values` and `errors` arrive already decided by
+ * `parsePackForm` / `packToFormValues`; this file renders them. It does not trim, does
+ * not validate, and does not know which of its fields can fail — it renders whatever
+ * error it is handed against whichever field the key names.
+ *
+ * The one thing it does decide is `packTripTypeOptions(values.trip_type)`, and that is a
+ * pure function of the value it was given rather than a judgement about it. See the
+ * comment at the <select>.
+ */
+import Modal from './Modal.astro';
+import { PACK_FORM_FIELD, type PackFormValues } from '../lib/packs/form';
+import { packTripTypeOptions } from '../lib/packs/fields';
+
+interface Props {
+  /** The dialog's id, and the value a trigger names in `data-modal-open`. */
+  id: string;
+  /**
+   * Render already-open. The no-JS path and the after-a-failed-submit path both depend
+   * on this: with JavaScript off the trigger is an ordinary link, and the page it lands
+   * on must show the dialog; after a rejected save the page re-renders from scratch and
+   * must show the dialog again, with the errors in it.
+   */
+  open: boolean;
+  /** Shown as the dialog's heading. */
+  title: string;
+  values: PackFormValues;
+  errors: Readonly<Record<string, string>>;
+  /** The submit button's label — "Create pack" or "Save details". */
+  submitLabel: string;
+  /** Where Cancel goes: the page the dialog was opened from, without the opening param. */
+  cancelHref: string;
+  /**
+   * The hidden `intent` that tells a multi-form page which branch should answer this
+   * post. The packs list has exactly one form and needs none, so this is optional —
+   * omitted rather than defaulted, because a page that grew a second form and forgot to
+   * start passing one should break rather than silently post an empty intent.
+   */
+  intentField?: { readonly name: string; readonly value: string };
+}
+
+const { id, open, title, values, errors, submitLabel, cancelHref, intentField } = Astro.props;
+
+/**
+ * The form's id, referenced by the Save button in the shell's `actions` slot. A slot
+ * cannot span two slots, so the button is outside the <form> in the DOM and reaches it
+ * by id — the arrangement `Modal.astro`'s own worked example specifies.
+ */
+const FORM_ID = 'pack-details-form';
+
+const tripTypeOptions = packTripTypeOptions(values.trip_type);
+
+const LABEL_CLASS = 'field-label';
+const INPUT_CLASS = 'field mt-1 w-full';
+const TEXTAREA_CLASS = 'field mt-1 w-full min-h-24';
+const ERROR_CLASS = 'field-error';
+
+/**
+ * The "(public)" / "(private)" markers. `.field-label` is uppercase with wide tracking —
+ * correct for a label, wrong for a parenthetical — so the marker opts back out of both.
+ */
+const MARKER_CLASS = 'text-ink-2 normal-case tracking-normal';
+---
+
+<Modal id={id} open={open}>
+  <Fragment slot="title">{title}</Fragment>
+
+  <form method="POST" id={FORM_ID} class="space-y-4">
+    {intentField && <input type="hidden" name={intentField.name} value={intentField.value} />}
+
+    <div>
+      <label for="pack-name" class={LABEL_CLASS}>
+        Name <span aria-hidden="true" class="field-required">*</span>
+      </label>
+      {
+        /* No HTML `required`. Native validation would refuse the submit before
+           `parsePackForm` ever ran, which would hide the server's rule behind the
+           browser's and leave the two free to disagree. `aria-required` and the asterisk
+           say the same thing without taking the decision away from the server. */
+      }
+      <input
+        id="pack-name"
+        name={PACK_FORM_FIELD.name}
+        type="text"
+        value={values.name}
+        aria-required="true"
+        aria-describedby={errors.name ? 'pack-name-error' : undefined}
+        aria-invalid={errors.name ? 'true' : undefined}
+        class={INPUT_CLASS}
+      />
+      {
+        errors.name && (
+          <p id="pack-name-error" class={ERROR_CLASS}>
+            {errors.name}
+          </p>
+        )
+      }
+    </div>
+
+    <div>
+      <label for="pack-description" class={LABEL_CLASS}>
+        Description <span class={MARKER_CLASS}>(public)</span>
+      </label>
+      <textarea id="pack-description" name={PACK_FORM_FIELD.description} class={TEXTAREA_CLASS}
+        >{values.description}</textarea
+      >
+      <p class="field-hint">Shown to anyone you share this pack with.</p>
+    </div>
+
+    <div>
+      <label for="pack-trip-type" class={LABEL_CLASS}>Trip type</label>
+      {
+        /* A <select> whose FIRST option is blank and whose second is the stored value when
+           this product does not recognise it. That middle option is the whole reason
+           packTripTypeOptions exists: `packs.trip_type` has no CHECK constraint, imports
+           (PK-33, PK-65) bring their own vocabularies, and a <select> missing its own bound
+           value silently displays and submits its first option — so the next unrelated save
+           would write null over a value the visitor never touched. */
+      }
+      <select id="pack-trip-type" name={PACK_FORM_FIELD.tripType} class={INPUT_CLASS}>
+        {
+          tripTypeOptions.map((option) => (
+            <option value={option.value} selected={option.value === values.trip_type}>
+              {option.label}
+            </option>
+          ))
+        }
+      </select>
+    </div>
+
+    <div>
+      <label for="pack-notes" class={LABEL_CLASS}>
+        Note <span class={MARKER_CLASS}>(private)</span>
+      </label>
+      {
+        /* PRIVATE IS A FACT ABOUT THE SCHEMA, NOT A PROMISE MADE BY THIS LABEL. The note
+           is stored in `public.pack_notes`, a separate owner-only table that `anon` holds
+           no privilege on whatsoever — see 20260819000000_pack_notes.sql for why a column
+           on `packs` could not have been private (RLS filters rows, not columns, so
+           publishing a pack would publish the note with it). The word below is only
+           telling the visitor something the database already enforces. */
+      }
+      <textarea id="pack-notes" name={PACK_FORM_FIELD.notes} class={TEXTAREA_CLASS}
+        >{values.notes}</textarea
+      >
+      <p class="field-hint">Only you can read this, even if you share the pack.</p>
+    </div>
+  </form>
+
+  <Fragment slot="actions">
+    <a href={cancelHref} class="btn btn-quiet">Cancel</a>
+    <button type="submit" form={FORM_ID} class="btn btn-primary">{submitLabel}</button>
+  </Fragment>
+</Modal>

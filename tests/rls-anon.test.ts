@@ -312,3 +312,107 @@ describe('a public pack carries its prices and extras to an anonymous reader', (
     }
   });
 });
+
+/**
+ * ---------------------------------------------------------------------------
+ * A PACK'S OWN NOTE IS PRIVATE, AND IS THE FIRST THING IN THIS SCHEMA THAT IS (PK-72)
+ * ---------------------------------------------------------------------------
+ *
+ * Read this against the describe directly above it, because the two look contradictory and
+ * are not. `gear_items.notes` IS readable by a stranger on a public pack, deliberately and
+ * with a test asserting it — that is the "KNOWN GAP" core_schema.sql records above its
+ * grants, deferred to the share page. `pack_notes.notes` is the opposite promise, and the
+ * difference is not a policy: it is that `anon` holds no privilege on `public.pack_notes`
+ * at all.
+ *
+ * WHY IT COULD NOT BE A COLUMN ON `packs`. `packs_select_public` is `using (visibility =
+ * 'public')` and RLS filters ROWS, not columns; `grant select on public.packs to anon` then
+ * hands over whichever columns are asked for. A `notes` column on `packs` would therefore
+ * be published by the act of publishing the pack. Column-level grants cannot rescue it —
+ * PostgREST needs table-level SELECT on every table in an embed — so the note lives in its
+ * own owner-only table instead. `20260819000000_pack_notes.sql` argues this at length.
+ *
+ * THE ASSERTIONS ARE 42501, NOT AN EMPTY ARRAY, and that distinction is the whole value of
+ * the test. An empty result would mean "a policy filtered your rows away", which is a
+ * promise one careless `using (true)` can undo. A privilege error means the role was never
+ * given the table at all, so there is no policy anyone could write that would expose it.
+ *
+ * HOW TO CHECK THIS STILL BITES, in the idiom this file's header sets out — grant the
+ * privilege the migration withholds and re-run; the first three assertions must go red:
+ *
+ *     grant select on public.pack_notes to anon;
+ */
+describe('a pack’s private note is unreachable with the anon key', () => {
+  const NOTE = 'Ask Sam about the hut key before leaving.';
+
+  let notedPack: PackFixture;
+
+  beforeAll(async () => {
+    // PUBLIC on purpose. A private pack's note being unreachable proves nothing beyond what
+    // `packs_select_public` already gives us; the interesting case is the pack its owner has
+    // deliberately shared with the world, where every other column IS readable.
+    notedPack = await createPack(owner, { visibility: 'public', itemCount: 1 });
+
+    const { error } = await owner.client
+      .from('pack_notes')
+      .insert({ pack_id: notedPack.packId, notes: NOTE });
+    expect(error).toBeNull();
+  });
+
+  it('refuses a stranger the table outright, rather than returning no rows', async () => {
+    const { data, error } = await anonClient().from('pack_notes').select('notes');
+
+    expect(data).toBeNull();
+    expect(error?.code).toBe('42501');
+  });
+
+  it('refuses it when asked for by pack id, so guessing the id does not help', async () => {
+    const { data, error } = await anonClient()
+      .from('pack_notes')
+      .select('notes')
+      .eq('pack_id', notedPack.packId);
+
+    expect(data).toBeNull();
+    expect(error?.code).toBe('42501');
+  });
+
+  // The route a reader would actually take: ask for the pack and try to bring the note along
+  // with it. PostgREST refuses the WHOLE request rather than quietly dropping the embed,
+  // which is why `PACK_TREE_SELECT` — the one select the share page shares with the owner's
+  // own pages — must never name this table. See `PACK_EDIT_SELECT` in
+  // `src/lib/packs/query.ts` for the other half of that argument.
+  it('refuses the whole request when the note is embedded in a pack read', async () => {
+    const { data, error } = await anonClient()
+      .from('packs')
+      .select('id, name, pack_notes(notes)')
+      .eq('id', notedPack.packId);
+
+    expect(data).toBeNull();
+    expect(error?.code).toBe('42501');
+  });
+
+  // The other half of the bound, and it is not padding: all three assertions above would
+  // also pass if the pack itself had become unreadable, which would mean this ticket had
+  // broken the share page rather than secured the note.
+  it('still lets a stranger read the pack the note belongs to', async () => {
+    const { data, error } = await anonClient()
+      .from('packs')
+      .select('id, name, description')
+      .eq('id', notedPack.packId);
+
+    expect(error).toBeNull();
+    expect(data).toHaveLength(1);
+  });
+
+  // And the note is genuinely there to be leaked — otherwise the negatives above are
+  // guarding an empty table, and would stay green if the write path silently stopped saving.
+  it('is readable by its owner, so the negatives are not passing over nothing', async () => {
+    const { data, error } = await owner.client
+      .from('pack_notes')
+      .select('notes')
+      .eq('pack_id', notedPack.packId);
+
+    expect(error).toBeNull();
+    expect(data).toEqual([{ notes: NOTE }]);
+  });
+});

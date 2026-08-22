@@ -90,7 +90,7 @@ const GBP = 'GBP' as CurrencyCode;
  * them.
  */
 function packInput(name: string, over: Partial<PackInput> = {}): PackInput {
-  return { name, description: null, trip_type: null, ...over };
+  return { name, description: null, trip_type: null, notes: null, ...over };
 }
 
 function customInput(over: Partial<CustomPackItemInput> = {}): CustomPackItemInput {
@@ -112,7 +112,7 @@ function customInput(over: Partial<CustomPackItemInput> = {}): CustomPackItemInp
 
 /** A pack with one category, built through the functions under test. */
 async function makePack(user: TestUser, name = 'Test pack') {
-  const pack = await createPack(user.client, user.id, packInput(name));
+  const pack = await createPack(user.client, packInput(name));
   expect(pack.error).toBeNull();
   expect(pack.id).not.toBeNull();
 
@@ -197,7 +197,6 @@ describe('createPack', () => {
 
     const result = await createPack(
       user.client,
-      user.id,
       packInput('Cairngorms winter', { description: 'March', trip_type: 'winter' }),
     );
 
@@ -242,7 +241,7 @@ describe('createPack', () => {
 
     const results = [];
     for (let index = 0; index < 25; index += 1) {
-      results.push(await createPack(user.client, user.id, packInput(`Pack ${index}`)));
+      results.push(await createPack(user.client, packInput(`Pack ${index}`)));
     }
 
     for (const result of results) {
@@ -257,22 +256,84 @@ describe('createPack', () => {
     expect(Number(count)).toBe(25);
   });
 
-  it('refuses to create a pack owned by somebody other than the caller', async () => {
-    const owner = await createUser('packs-create-owner');
-    const stranger = await createUser('packs-create-stranger');
+  /**
+   * WHAT THIS TEST USED TO PROVE, AND WHY IT NO LONGER CAN. Before PK-72, `createPack` took
+   * a `userId` argument that disagreed with the caller's client, and the assertion was that
+   * `packs_insert_own`'s WITH CHECK refused the mismatch. `create_pack_with_defaults` takes
+   * no `p_user_id` parameter for a caller to lie in — `user_id` on every row it writes comes
+   * from `auth.uid()` inside the transaction, full stop — so there is no argument left to
+   * disagree with the client. That is not a weaker guarantee than the one this test used to
+   * make; it is the same guarantee turned structural: the property this test now proves is
+   * that a pack is created as the CALLING identity, which is true by construction rather
+   * than by a policy catching an attempt to say otherwise.
+   */
+  it('creates a pack as the caller’s own identity, with no argument left to say otherwise', async () => {
+    const owner = await createUser('packs-create-identity');
 
-    // The `userId` argument and the client's own identity disagree. The insert writes
-    // `user_id` explicitly, so `packs_insert_own`'s WITH CHECK refuses it rather than the
-    // column's auth.uid() default quietly producing a row owned by the caller.
-    const result = await createPack(owner.client, stranger.id, packInput('Not mine'));
+    const result = await createPack(owner.client, packInput('Mine'));
 
-    expect(result.error).not.toBeNull();
-    expect(result.error?.code).toBe('42501');
-    expect(result.id).toBeNull();
-    expect(result.count).toBe(0);
+    expect(result.error).toBeNull();
+    expect(result.id).not.toBeNull();
 
-    const rows = await adminSql(`select id from public.packs where name = 'Not mine'`);
-    expect(rows).toEqual([]);
+    const [row] = await adminSql<{ user_id: string }>(
+      `select user_id from public.packs where id = $1`,
+      [result.id],
+    );
+    expect(row.user_id).toBe(owner.id);
+  });
+
+  /**
+   * ACCEPTANCE CRITERION FOR PK-72's `create_pack_with_defaults`: a pack never exists
+   * without its four categories, because both are written inside the one RPC transaction.
+   * Named and positioned, not just counted, because a set of the right four names in the
+   * wrong order is exactly the kind of regression a bare `toHaveLength(4)` would miss.
+   */
+  it('seeds the four default categories, named and in order', async () => {
+    const user = await createUser('packs-create-categories');
+
+    const result = await createPack(user.client, packInput('New pack'));
+
+    const rows = await adminSql<{ name: string; position: number }>(
+      `select name, position from public.pack_categories where pack_id = $1 order by position`,
+      [result.id],
+    );
+    expect(rows).toEqual([
+      { name: 'Packing', position: 0 },
+      { name: 'Sleep', position: 1 },
+      { name: 'Clothing', position: 2 },
+      { name: 'Cooking', position: 3 },
+    ]);
+  });
+
+  /**
+   * `pack_notes` HOLDS A ROW ONLY WHEN THERE IS SOMETHING TO STORE — "no row means no
+   * note" is the table's own invariant (`20260819000000_pack_notes.sql`), and the RPC's
+   * `if p_notes is not null` branch is what keeps a pack with nothing written in its notes
+   * box from acquiring an empty row nobody asked for.
+   */
+  it('stores a note in pack_notes when one is given, and no row at all when it is not', async () => {
+    const user = await createUser('packs-create-notes');
+
+    const withNote = await createPack(
+      user.client,
+      packInput('Noted', { notes: 'Bring extra socks' }),
+    );
+    const withoutNote = await createPack(user.client, packInput('Unnoted'));
+
+    expect(withNote.error).toBeNull();
+    expect(withoutNote.error).toBeNull();
+
+    const [noteRow] = await adminSql<{ notes: string }>(
+      `select notes from public.pack_notes where pack_id = $1`,
+      [withNote.id],
+    );
+    expect(noteRow.notes).toBe('Bring extra socks');
+
+    expect(
+      await adminSql(`select pack_id from public.pack_notes where pack_id = $1`, [
+        withoutNote.id,
+      ]),
+    ).toEqual([]);
   });
 });
 
@@ -283,9 +344,8 @@ describe('editing a pack', () => {
 
     const result = await updatePack(
       user.client,
-      user.id,
       packId,
-      packInput('Renamed', { description: 'New notes', trip_type: 'alpine' }),
+      packInput('Renamed', { description: 'New description', trip_type: 'alpine' }),
     );
 
     expect(result.error).toBeNull();
@@ -295,14 +355,80 @@ describe('editing a pack', () => {
       `select name, description, trip_type from public.packs where id = $1`,
       [packId],
     );
-    expect(row).toEqual({ name: 'Renamed', description: 'New notes', trip_type: 'alpine' });
+    expect(row).toEqual({ name: 'Renamed', description: 'New description', trip_type: 'alpine' });
+  });
+
+  /**
+   * `update_pack_details` writes `pack_notes` in the same transaction as `packs`, and its
+   * three note branches — insert, delete, re-insert — are each exercised in sequence here
+   * so that "a row means a note, no row means none" holds across repeated saves, not just
+   * on the first one.
+   */
+  it('saves a note, clears it to remove the row, and re-creates it on a later save', async () => {
+    const user = await createUser('packs-update-notes');
+    const pack = await createPack(user.client, packInput('A'));
+
+    const saved = await updatePack(
+      user.client,
+      pack.id!,
+      packInput('A', { notes: 'Pack the stove' }),
+    );
+    expect(saved.error).toBeNull();
+    expect(saved.count).toBe(1);
+    const [firstNote] = await adminSql<{ notes: string }>(
+      `select notes from public.pack_notes where pack_id = $1`,
+      [pack.id],
+    );
+    expect(firstNote.notes).toBe('Pack the stove');
+
+    const cleared = await updatePack(user.client, pack.id!, packInput('A', { notes: null }));
+    expect(cleared.error).toBeNull();
+    expect(cleared.count).toBe(1);
+    expect(
+      await adminSql(`select pack_id from public.pack_notes where pack_id = $1`, [pack.id]),
+    ).toEqual([]);
+
+    const recreated = await updatePack(
+      user.client,
+      pack.id!,
+      packInput('A', { notes: 'Second note' }),
+    );
+    expect(recreated.error).toBeNull();
+    const [secondNote] = await adminSql<{ notes: string }>(
+      `select notes from public.pack_notes where pack_id = $1`,
+      [pack.id],
+    );
+    expect(secondNote.notes).toBe('Second note');
+  });
+
+  /**
+   * `update_pack_details` returns early, before touching `pack_notes`, when its update of
+   * `packs` affects zero rows — see the migration's own comment on why writing a note for a
+   * pack this caller was not allowed to rename would be the one cross-tenant write this
+   * function could otherwise perform.
+   */
+  it('writes no note when the pack is not the caller’s', async () => {
+    const owner = await createUser('packs-update-notes-owner');
+    const stranger = await createUser('packs-update-notes-stranger');
+    const pack = await createPack(owner.client, packInput('Owner pack'));
+
+    const result = await updatePack(
+      stranger.client,
+      pack.id!,
+      packInput('Owner pack', { notes: 'Not mine to write' }),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.count).toBe(0);
+    expect(
+      await adminSql(`select pack_id from public.pack_notes where pack_id = $1`, [pack.id]),
+    ).toEqual([]);
   });
 
   it('renames a pack without touching its other fields', async () => {
     const user = await createUser('packs-rename');
     const pack = await createPack(
       user.client,
-      user.id,
       packInput('Before', { description: 'Keep me', trip_type: 'weekend' }),
     );
 
@@ -322,7 +448,7 @@ describe('editing a pack', () => {
 
   it('clears a description with null rather than an empty string', async () => {
     const user = await createUser('packs-description');
-    const pack = await createPack(user.client, user.id, packInput('A', { description: 'gone' }));
+    const pack = await createPack(user.client, packInput('A', { description: 'gone' }));
 
     const result = await setPackDescription(user.client, user.id, pack.id!, null);
 
@@ -365,7 +491,7 @@ describe('editing a pack', () => {
 
   it('clears a trip type to null rather than storing "no trip type" as one', async () => {
     const user = await createUser('packs-trip-type-null');
-    const pack = await createPack(user.client, user.id, packInput('A', { trip_type: 'winter' }));
+    const pack = await createPack(user.client, packInput('A', { trip_type: 'winter' }));
 
     await setPackTripType(user.client, user.id, pack.id!, null);
 
@@ -429,7 +555,7 @@ describe('deletePack', () => {
 describe('categories', () => {
   it('creates, renames and reports one row each time', async () => {
     const user = await createUser('packs-categories');
-    const pack = await createPack(user.client, user.id, packInput('A'));
+    const pack = await createPack(user.client, packInput('A'));
 
     const created = await createPackCategory(user.client, user.id, pack.id!, { name: 'Sleep' }, 3);
     expect(created.error).toBeNull();
@@ -448,7 +574,7 @@ describe('categories', () => {
 
   it('allows two categories in one pack to share a name', async () => {
     const user = await createUser('packs-categories-dupes');
-    const pack = await createPack(user.client, user.id, packInput('A'));
+    const pack = await createPack(user.client, packInput('A'));
 
     const first = await createPackCategory(user.client, user.id, pack.id!, { name: 'Extras' }, 0);
     const second = await createPackCategory(user.client, user.id, pack.id!, { name: 'Extras' }, 1);
@@ -528,7 +654,12 @@ describe('addGearItemsToCategory', () => {
     // pack holds a reference rather than a copy taken at add time.
     await user.client.from('gear_items').update({ name: 'Renamed in the closet' }).eq('id', gearId);
     const { data: pack } = await loadPackForEdit(user.client, user.id, packId);
-    expect(pack?.pack_categories[0].pack_items[0].gear_items?.name).toBe('Renamed in the closet');
+    // Found by id, not by array index: `createPack` (PK-72) seeds four default categories
+    // at positions 0-3, one of which shares position 0 with `makePack`'s own "Shelter"
+    // category, so which one `pack_categories[0]` is after the tie-break on id is no
+    // longer predictable — only which one has `categoryId` is.
+    const category = pack?.pack_categories.find((c) => c.id === categoryId);
+    expect(category?.pack_items[0].gear_items?.name).toBe('Renamed in the closet');
   });
 
   it('adds the same gear item twice when asked twice', async () => {
@@ -1062,7 +1193,7 @@ describe('per-item settings', () => {
 describe('the RPC wrappers', () => {
   async function treeFixture(label: string) {
     const user = await createUser(label);
-    const pack = await createPack(user.client, user.id, packInput('Reorder me'));
+    const pack = await createPack(user.client, packInput('Reorder me'));
     const first = await createPackCategory(user.client, user.id, pack.id!, { name: 'A' }, 0);
     const second = await createPackCategory(user.client, user.id, pack.id!, { name: 'B' }, 1);
     const gearIds = await makeGear(user, 4);
@@ -1110,9 +1241,13 @@ describe('the RPC wrappers', () => {
 
   it('applies a category reorder', async () => {
     const { user, packId, categoryIds } = await treeFixture('packs-rpc-move-category');
+    // Restricted to the fixture's own two categories, `A` and `B` — `createPack` (PK-72)
+    // seeds four more (`Packing`, `Sleep`, `Clothing`, `Cooking`) on the same pack, and this
+    // test is about reordering the two the fixture built, not about the other four sitting
+    // beside them.
     const rows = await adminSql<{ id: string; position: number }>(
-      `select id, position from public.pack_categories where pack_id = $1`,
-      [packId],
+      `select id, position from public.pack_categories where pack_id = $1 and id = any($2::uuid[])`,
+      [packId, categoryIds],
     );
 
     const plan = planCategoryMove({ parentId: packId, rows }, categoryIds[1], 0);
@@ -1120,8 +1255,10 @@ describe('the RPC wrappers', () => {
 
     expect(result.error).toBeNull();
     const after = await adminSql<{ id: string }>(
-      `select id from public.pack_categories where pack_id = $1 order by position, id`,
-      [packId],
+      `select id from public.pack_categories
+        where pack_id = $1 and id = any($2::uuid[])
+        order by position, id`,
+      [packId, categoryIds],
     );
     expect(after.map((c) => c.id)).toEqual([categoryIds[1], categoryIds[0]]);
   });
@@ -1235,7 +1372,11 @@ describe('the RPC wrappers', () => {
                 where c.pack_id = $1)::text as items`,
       [result.id],
     );
-    expect(Number(counts.categories)).toBe(2);
+    // 6, not 2: `createPack` (PK-72) seeds four default categories on top of the fixture's
+    // own `A` and `B`, and `duplicate_pack` copies every category the pack has, defaults
+    // included. Items stay at 4 — the four gear references the fixture put in `A` and `B` —
+    // because the four default categories are never given any.
+    expect(Number(counts.categories)).toBe(6);
     expect(Number(counts.items)).toBe(4);
   });
 

@@ -217,10 +217,41 @@ export type PackTreeRow = NonNullable<Awaited<ReturnType<typeof _packTreeQuery>>
  * comes back sorted from the index
  * rather than through a sort node.
  */
+/**
+ * The editor's select: the shared tree, plus the owner's private note (PK-72).
+ *
+ * ---------------------------------------------------------------------------
+ * WHY `pack_notes` IS NOT IN `PACK_TREE_SELECT` ITSELF
+ * ---------------------------------------------------------------------------
+ *
+ * Because adding it there would break every anonymous read, loudly and completely, rather
+ * than leaking anything. `public.pack_notes` grants `anon` NOTHING — that is the whole
+ * design of `20260819000000_pack_notes.sql` — and PostgREST requires table-level SELECT on
+ * every table participating in an embed. So an `anon` request carrying this embed does not
+ * come back with the note omitted; it comes back
+ *
+ *     42501 permission denied for table pack_notes
+ *
+ * with no pack at all. `PACK_TREE_SELECT` is the ONE select the share page, the owner's
+ * list and the owner's editor share, so a private table cannot join it. That is the exact
+ * inverse of the widening argument on `PACK_TREE_SELECT` above: widening it is safe for
+ * columns every reader may already read, and `notes` is the first column in this schema
+ * that no anonymous reader may read at all.
+ *
+ * COMPOSED FROM THE CONSTANT RATHER THAN RETYPED, so the base string still exists exactly
+ * once. The only caller is `loadPackForEdit`, which is owner-scoped by `.eq('user_id',
+ * userId)` and is never reached with an anonymous client.
+ *
+ * STILL ONE ROUND TRIP. The alternative — leave the select alone and fetch the note in a
+ * second request — would make the editor's load two round trips to avoid a boundary that
+ * an embed on an owner-only query does not cross.
+ */
+export const PACK_EDIT_SELECT = `${PACK_TREE_SELECT}, pack_notes(notes)`;
+
 export async function loadPackForEdit(client: PacksheetClient, userId: string, packId: string) {
   return client
     .from('packs')
-    .select(PACK_TREE_SELECT)
+    .select(PACK_EDIT_SELECT)
     .eq('id', packId)
     .eq('user_id', userId)
     .order('position', { referencedTable: 'pack_categories', ascending: true })
