@@ -684,14 +684,17 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
    * cannot also match the confirmation step's "Delete category and its items", which is a
    * different control with a longer sentence.
    *
-   * PK-73 CHANGED THE SPELLING, and the change is worth knowing about because it fixed a real
-   * defect. The button used to be `Delete category<span class="sr-only"> {name}</span>` — a
-   * visible word followed by a hidden tail — and the single leading space inside that hidden
-   * span does not survive Vue's `whitespace: 'condense'`, so the accessible name came out as
-   * "Delete categoryShelter" with the two run together. It is now two spans: the visible word
-   * marked `aria-hidden`, and the whole sentence hidden, so the accessible name is a literal
-   * string in the template. WCAG 2.5.3 still holds — the visible label is the first words of
-   * the accessible one.
+   * PK-73 CHANGED THE SPELLING, as a precaution rather than a fix for an observed defect —
+   * the button's PRE-PR markup put the separating space in the plain text before the hidden
+   * span (`Delete category <span class="sr-only">{name}</span>`) and rendered a correct
+   * accessible name. The tail spelling — `Delete category<span class="sr-only">
+   * {name}</span>`, with the space moved inside the hidden element — is the fragile one: Vue's
+   * `whitespace: 'condense'` can drop that leading space depending on how the surrounding
+   * markup is broken across lines, silently producing "Delete categoryShelter" with no visual
+   * change. The button is now two spans instead — the visible word marked `aria-hidden`, and
+   * the whole sentence hidden — so the accessible name is a literal string in the template
+   * with no whitespace rule to depend on. WCAG 2.5.3 still holds — the visible label is the
+   * first words of the accessible one.
    */
   const DELETE_CATEGORY_BUTTON = '>Delete category</span>';
 
@@ -1023,7 +1026,7 @@ describe('PackContents renders the whole editor, and no drag affordance, on the 
    * submission now — and Rename moved into the category's `…` menu. The naming rule did not
    * change and neither did the reason for it; what changed is the spelling, from a visible
    * word with an `sr-only` tail to a hidden full sentence beside an `aria-hidden` visible one.
-   * See `DELETE_CATEGORY_BUTTON` for the whitespace defect that forced the rewrite.
+   * See `DELETE_CATEGORY_BUTTON` for why the spelling changed as a precaution.
    */
   it('distinguishes the repeated per-row controls by the row they belong to', async () => {
     const html = await render();

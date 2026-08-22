@@ -59,9 +59,20 @@
  * would be a promise this component cannot keep. Every EDITING control on those rows — every
  * rename, quantity step, carriage change, packed toggle, remove and delete — is a real form,
  * in the tab order, operable by keyboard alone, and unchanged by whether this component ever
- * hydrates. PK-73 moved several of them behind a `…` menu and that sentence still holds: a
- * `<summary>` is focusable and toggles on Enter and on Space by itself, so what the menu costs
- * a keyboard is one extra press, not reachability.
+ * hydrates. PK-73 moved several of them behind a `…` menu and that sentence still holds in the
+ * narrow sense: a `<summary>` is focusable and toggles on Enter and on Space by itself, so
+ * REACHING any control is one extra press, never blocked.
+ *
+ * IT IS NOT THE WHOLE COST, and the rest is worth being honest about rather than folding into
+ * "one extra press". Every write on this page still 303s back to this same URL — see
+ * `[id].astro`'s `Astro.redirect(selfPath, 303)`, which this component does not own and this
+ * ticket does not touch — so PK-73 turned what used to be one submission per row-edit into as
+ * many as four for a single quantity change, and every one of those is a full-page navigation
+ * that lands a keyboard or screen-reader visitor back at the top of the document, not on the
+ * row they were just working. That was already true of Remove and of a category rename before
+ * this ticket; PK-73 makes it happen more often, by turning one save into up to four separate
+ * ones. Landing the redirect on the row's own id (`#item-${id}`) would fix it and is a change
+ * to `[id].astro`'s redirect target, which is out of this component's reach.
  *
  * ---------------------------------------------------------------------------
  * WHAT THIS COMPONENT IS ALLOWED TO DECIDE, WHICH IS ALMOST NOTHING
@@ -163,7 +174,6 @@ import {
   PACK_CATEGORY_FORM_FIELD,
   PACK_ITEM_FORM_FIELD,
   packItemToFormValues,
-  type PackItemFormValues,
 } from '../lib/packs/form';
 import {
   PACK_ITEM_CARRIAGES,
@@ -213,13 +223,22 @@ interface RenameError {
   readonly message: string;
 }
 
-/** One item's per-list settings that failed validation: which row, what to say, and exactly
- *  what the visitor typed — `rawPackItemFormValues` explains why the raw strings are what a
- *  re-render shows rather than the stored row. */
+/**
+ * One item's per-list settings that failed validation: which row, and what to say about it.
+ *
+ * NO LONGER CARRIES `values`. Before PK-73 this also held the visitor's own rejected input
+ * (`rawPackItemFormValues`), for redisplay in the field it came from — right when the row had
+ * a free quantity field and a radio group to redisplay it in. There is no field left to
+ * redisplay: quantity is two buttons carrying computed numbers, carriage is three buttons
+ * carrying three constants, and packed is one button carrying the opposite of what is stored.
+ * A rejected submission now leaves nothing to correct in place, only a message — which is
+ * `errors` below, and is still shown, still per failed field, still pointed at by the control
+ * it explains. `props.itemError` (the page's prop) still carries its own `values`; this
+ * component simply has no use for it any more, so it is not declared here.
+ */
 interface ItemError {
   readonly itemId: string;
   readonly errors: Readonly<Record<string, string>>;
-  readonly values: PackItemFormValues;
 }
 
 /**
@@ -1161,11 +1180,11 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
             </p>
 
             <details class="row-menu">
-              <summary
-                class="row-menu-trigger"
-                :aria-label="`Actions for ${category.name}`"
-                :title="`Actions for ${category.name}`"
-              >
+              <!-- No `title`: it would repeat `aria-label` verbatim as the accessible
+                   DESCRIPTION, so a screen reader would announce "Actions for Shelter, Actions
+                   for Shelter". The carriage commands' `:title` is different text (the
+                   meaning, not the label) and is kept for that reason. -->
+              <summary class="row-menu-trigger" :aria-label="`Actions for ${category.name}`">
                 <Ellipsis :size="16" aria-hidden="true" />
               </summary>
               <div class="row-menu-panel">
@@ -1179,16 +1198,20 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                 accessible name to CONTAIN the visible one, which it does: the visible half is
                 the first word of the hidden one.
 
-                TWO SPANS, NOT ONE WITH AN `sr-only` TAIL, and that is a correction rather than
-                a preference. The tail spelling — `Rename<span class="sr-only"> {name}</span>` —
-                depends on a single leading space inside an `sr-only` element surviving Vue's
-                template compilation, and it does not: `whitespace: 'condense'` drops it, so
-                the accessible name came out as "RenameShelter" with the two words run
-                together. It renders identically and reads as one word to a screen reader,
-                which is exactly the kind of defect that survives a visual review. Writing the
-                full sentence once, hidden, and the visible word once, `aria-hidden`, makes the
-                accessible name a literal string in the template with no whitespace rule
-                between it and what is announced.
+                TWO SPANS, NOT ONE WITH AN `sr-only` TAIL — `Rename<span class="sr-only">
+                {name}</span>` — WHICH IS A PRECAUTION, NOT A CORRECTION. That spelling puts
+                the separating space as the FIRST character inside the `sr-only` element
+                rather than in the plain text before it; whether Vue's `whitespace: 'condense'`
+                keeps that leading space depends on exactly how the surrounding markup is
+                broken across lines, and it is easy to lose without the compiled output
+                changing in any way a visual review would catch — the two words would still
+                read correctly on screen and run together only for a screen reader. This
+                component's own header comment already argues that a control's accessible name
+                is not optional here, so the two-span form is used everywhere a control's
+                visible label is a prefix of a longer accessible name: the full sentence is
+                written once, hidden, and the visible word once, `aria-hidden`, so the
+                announced string is a literal in the template with no whitespace rule between
+                it and what a screen reader reads.
               -->
                 <button
                   type="submit"
@@ -1440,6 +1463,14 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                 what the visible control was called before it became a pair of icons, so
                 "click Qty" still has something to match (WCAG 2.5.3). The group carries the
                 item's name so forty steppers on one page are forty distinguishable groups.
+
+                THE CURRENT NUMBER IS DESCRIBED, NOT JUST SHOWN. `<input type="number">`
+                announces its own value on focus; two buttons around a plain span do not, and
+                the group's `aria-label` names the ROW, not the count. Without more, a visitor
+                tabbing to either button would hear "Decrease Qty for Socks" and nothing about
+                what it is currently 3 of — a regression from the field this replaced. Each
+                button's `aria-describedby` therefore includes the value span's own `id`, so
+                the count is read as part of the button's description.
               -->
                 <div
                   class="stepper"
@@ -1470,12 +1501,19 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                       :value="item.quantity - 1"
                       :disabled="item.quantity <= 1"
                       :aria-label="`Decrease Qty for ${item.spokenName}`"
+                      :aria-describedby="
+                        item.quantityInvalid
+                          ? `item-${item.id}-qty-value item-${item.id}-error-quantity`
+                          : `item-${item.id}-qty-value`
+                      "
                     >
                       <Minus :size="14" aria-hidden="true" />
                     </button>
                   </form>
 
-                  <span class="written numeric stepper-value">{{ item.quantity }}</span>
+                  <span :id="`item-${item.id}-qty-value`" class="written numeric stepper-value">
+                    {{ item.quantity }}
+                  </span>
 
                   <form method="post" class="stepper-form">
                     <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
@@ -1497,17 +1535,23 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                       :name="PACK_ITEM_FORM_FIELD.quantity"
                       :value="item.quantity + 1"
                       :aria-label="`Increase Qty for ${item.spokenName}`"
+                      :aria-describedby="
+                        item.quantityInvalid
+                          ? `item-${item.id}-qty-value item-${item.id}-error-quantity`
+                          : `item-${item.id}-qty-value`
+                      "
                     >
                       <Plus :size="14" aria-hidden="true" />
                     </button>
                   </form>
                 </div>
 
+                <!-- No `title`: see the category menu's identical note above — it would
+                     repeat `aria-label` as the accessible description. -->
                 <details class="row-menu">
                   <summary
                     class="row-menu-trigger"
                     :aria-label="`Actions for ${item.spokenName}`"
-                    :title="`Actions for ${item.spokenName}`"
                     :aria-describedby="
                       item.carriageInvalid ? `item-${item.id}-error-carriage` : undefined
                     "
@@ -1528,9 +1572,17 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 
                     `aria-current` and the tick say which one is in force, in the two channels
                     a menu of commands has: a radio group announced its own selected state,
-                    and buttons do not.
+                    and buttons do not. `aria-current="true"` is included for the screen
+                    readers that announce it, but is not relied on alone — VoiceOver in
+                    particular does not reliably announce `aria-current` on a `<button>`, so
+                    the sr-only text below states the selection in words as well.
 
-                    The label is the word, not the icon. See `CARRIAGE_ICONS`.
+                    The label is the word, not the icon (see `CARRIAGE_ICONS`), and it names
+                    the ROW as well as the option: three buttons per item, worded only
+                    "Worn"/"Consumable"/"In the pack", is the repeated-name problem this
+                    component's other named controls exist to avoid — a pack of forty items
+                    would offer forty identically-worded "Worn" buttons with nothing in a
+                    rotor or elements list to tell them apart.
                   -->
                     <p :id="`item-${item.id}-carriage-label`" class="system row-menu-heading">
                       How {{ item.spokenName }} is carried
@@ -1559,7 +1611,11 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                           :title="PACK_ITEM_CARRIAGE_MEANINGS[carriage]"
                         >
                           <component :is="CARRIAGE_ICONS[carriage]" :size="15" aria-hidden="true" />
-                          <span>{{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}</span>
+                          <span aria-hidden="true">{{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}</span>
+                          <span class="sr-only">
+                            {{ PACK_ITEM_CARRIAGE_LABELS[carriage] }} — {{ item.spokenName
+                            }}{{ carriage === item.storedCarriage ? ', current' : '' }}
+                          </span>
                           <Check
                             v-if="carriage === item.storedCarriage"
                             :size="14"

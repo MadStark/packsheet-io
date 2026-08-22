@@ -186,7 +186,13 @@ function formData(formHtml: string, buttonIndex = 0): FormData {
   if (button === undefined) throw new Error(`No button ${buttonIndex} in: ${formHtml}`);
   // A disabled control is not "successful" and submits nothing at all — which is exactly
   // what the `−` at quantity 1 must do, so modelling it is not pedantry.
-  if (/\bdisabled\b/.test(button)) return data;
+  //
+  // MATCHES THE ATTRIBUTE, NOT THE SUBSTRING. Vue's SSR never writes `disabled="false"` or
+  // `aria-disabled` here — a boolean prop bound false is omitted entirely — but `\bdisabled\b`
+  // would treat one as a disabled control if it ever did, which is a live button silently
+  // failing to submit rather than the test failing loudly. `[\s>]` requires the word to end
+  // the attribute, not continue into `="false"` or into `aria-disabled`.
+  if (/(?:^|\s)disabled[\s>]/.test(button)) return data;
   const name = /\bname="([^"]*)"/.exec(button)?.[1];
   const value = /\bvalue="([^"]*)"/.exec(button)?.[1];
   if (name !== undefined && value !== undefined) data.append(name, value);

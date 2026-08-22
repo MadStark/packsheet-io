@@ -4,8 +4,9 @@
  * separately-testable file, away from the "how does that turn into a PostgREST query"
  * question. Pure data and pure functions — no import that reaches an SDK, because this
  * module ships to the browser: `src/components/PackContents.vue` imports its carriage
- * exports (`PACK_ITEM_CARRIAGES` and the two label maps) for the per-item radio group, and
- * that component is a hydrated island. The TRIP-TYPE half is not the reason — that picker is
+ * exports (`PACK_ITEM_CARRIAGES` and the label/meaning maps) for the per-item `…` menu's
+ * carriage commands (PK-73 moved them off an inline radio group), and that component is a
+ * hydrated island. The TRIP-TYPE half is not the reason — that picker is
  * server-rendered in `src/pages/packs/[id].astro`'s own markup and the island never touches
  * it — but a module ships or does not ship as a whole, so the rule covers everything in this
  * file. See `src/lib/packs/routes.ts`'s header for the full argument.

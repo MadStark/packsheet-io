@@ -115,7 +115,7 @@ The height is capped so a very tall sheet does not grow a huge shadow. The shado
 
 ### 2.5 Notes, overlap, and the two surfaces that may
 
-**Nothing in the page's own layout overlaps.** No sheet lies on top of another, and nothing hangs off a sheet's edge. Emphasis is never a second surface stacked on a first.
+**Nothing in the page's own layout overlaps, with the two exceptions this section records below.** No sheet lies on top of another, and nothing hangs off a sheet's edge outside those two cases. Emphasis is never a second surface stacked on a first.
 
 **A modal is the first exception, and it is an exception because it is not part of the page.** It covers the page rather than sitting in it: it lives in the browser's top layer, the page behind it is dimmed and inert, and it leaves nothing behind when it closes. That is a different act from stacking a card on a sheet for emphasis, which is still refused. Design feedback asked for one in five places — add item, edit item, create pack, edit pack details, add-to-pack — and a language with no way to say "answer this without losing your place" was refusing the wrong thing. The shell is `src/components/Modal.astro`; it is for forms, not for confirming a destructive step, which stays a two-step server flow.
 
@@ -215,6 +215,8 @@ The border is the second distinction, and it is newer. A field drawn in `--ink` 
 **A checkbox** is a 15px square in the same field box at 3px radius. Checked, it **fills with ink** and shows a paper-coloured tick — the same "pressed fills with ink" move a segmented control uses, rather than a new idea.
 
 **A choice of three or fewer is one segmented control, not a stack of radios.** It is the button's box split by 1px ink dividers; the selected segment fills with ink and its label and icon go paper-coloured. This says _exactly one of these is true_, which a radio stack only implies. Reserve real radios for longer lists.
+
+**PK-73 is the one recorded exception**, and only because the choice itself moved. `PackContents.vue`'s three-way carriage choice was this segmented control until the design feedback asked for it to become an icon inside a per-row `…` menu — at which point it is no longer a single choice presented at once, it is three separate commands in a disclosure, and a segmented control has nowhere to sit inside one. The rule still governs every choice of three or fewer presented as itself; it does not extend to a choice folded into a command menu for an unrelated reason.
 
 **Focus is always visible**: a 2px blue outline offset by 2px, on `:focus-visible` only.
 
@@ -451,10 +453,13 @@ carriage option, the packed toggle and Remove are each one submission of their o
 the trade the rhythm actually asks for, and it is worth knowing before the next surface adopts
 it — a form that batches several edits into one save wants a sheet, not a row.
 
-**A hidden label is a literal string or it is a bug.** `Rename<span class="sr-only"> {name}</span>`
-loses its leading space to Vue's `whitespace: 'condense'`, and the accessible name comes out
-as "RenameShelter". It renders identically, so nothing visual catches it. Where a control's
-accessible name is a visible word plus hidden context, write the visible word `aria-hidden` and
-the whole sentence in the `sr-only` element, so the announced string is one literal in the
-template with no whitespace rule between it and what is read out. WCAG 2.5.3 is satisfied the
-same way either spelling — the visible label is still the first words of the accessible one.
+**A hidden label should be a literal string, because the alternative is fragile in a way nothing
+visual catches.** `Rename<span class="sr-only"> {name}</span>` puts the separating space as the
+first character inside the `sr-only` element; whether Vue's `whitespace: 'condense'` keeps that
+leading space depends on how the surrounding markup happens to be broken across lines, and losing
+it produces an accessible name of "RenameShelter" with no change to what renders on screen. Where
+a control's accessible name is a visible word plus hidden context, write the visible word
+`aria-hidden` and the whole sentence in the `sr-only` element instead, so the announced string is
+one literal in the template with no whitespace rule between it and what is read out. WCAG 2.5.3 is
+satisfied the same way either spelling — the visible label is still the first words of the
+accessible one.
