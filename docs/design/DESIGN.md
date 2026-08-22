@@ -196,11 +196,13 @@ Controls are drawn on the sheet with the same pen as everything else, and they a
 
 **A button** is a 28px box with a 1px ink border, 6px radius, white fill, and a hard 1px offset shadow (`1px 1px 0 rgba(60,45,20,.18)`) that reads as a stamp. On hover it lifts a pixel and the shadow grows to 2px; on press it drops flat. The **primary** button swaps ink for deep blue and takes the blue tint. A **destructive** button swaps ink for rust on the same box — the same move, so it needs no new shape.
 
-**A field is not a button.** Inputs, textareas and selects take the same box — 1px ink, 6px radius, white fill — but **never the stamp shadow**. The stamp is what says _press me_; borrowing it for a field makes every field look pressable. That single distinction is what lets one box shape serve both without ambiguity. Field values are set in the written face (§4).
+**A field is not a button.** Inputs, textareas and selects take the same box — 6px radius, white fill — but **never the stamp shadow**, and their resting border is `--field-line`, not ink. The stamp is what says _press me_; borrowing it for a field makes every field look pressable. That distinction is what lets one box shape serve both without ambiguity. Field values are set in the written face (§4).
 
-**A search field** is the exception: a bare underline in ink with an icon, no box.
+The border is the second distinction, and it is newer. A field drawn in `--ink` is outlined in the same near-black as the value typed inside it, so the box competes with its own contents; `--field-line` is a warm grey between `--ink` and `--rule` that still reads as a boundary at 3:1 on every ground (§14). **Only fields move.** A button keeps ink, and so does the segmented control below — it is the button's box, and it fills with ink when selected. Focus and error borders are unchanged.
 
-**A checkbox** is a 15px square in the same ink box at 3px radius. Checked, it **fills with ink** and shows a paper-coloured tick — the same "pressed fills with ink" move a segmented control uses, rather than a new idea.
+**A search field** is the exception: a bare underline with an icon, no box. The underline is the field line, not ink — here the rule is the entire control, so an ink one drowns the query sitting on it.
+
+**A checkbox** is a 15px square in the same field box at 3px radius. Checked, it **fills with ink** and shows a paper-coloured tick — the same "pressed fills with ink" move a segmented control uses, rather than a new idea.
 
 **A choice of three or fewer is one segmented control, not a stack of radios.** It is the button's box split by 1px ink dividers; the selected segment fills with ink and its label and icon go paper-coloured. This says _exactly one of these is true_, which a radio stack only implies. Reserve real radios for longer lists.
 
@@ -297,6 +299,7 @@ It refuses **text written directly on the paper** — the ground is a ground, an
   --ink: #1c1917;
   --ink-2: #6b6259;
   --ink-3: #7a7468; /* NOT #8c8578 — that fails AA. See §5. */
+  --field-line: #8a8074; /* resting border of a field, §6. 3:1+ on every ground. */
   --hairline: #e3dcd0;
   --rule: #d2c8b8;
 

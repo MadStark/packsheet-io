@@ -462,10 +462,14 @@
   }
 
   /*
-   * A FIELD IS NOT A BUTTON. Same box — 1px ink, 6px radius, white fill — but
-   * NEVER the stamp shadow. The stamp is what says "press me"; borrowing it for a
-   * field makes every field look pressable, and that single distinction is what
-   * lets one box shape serve both without ambiguity.
+   * A FIELD IS NOT A BUTTON. Same box — 6px radius, white fill — but NEVER the
+   * stamp shadow, and no longer the same border. The stamp is what says "press me";
+   * borrowing it for a field makes every field look pressable, and that distinction
+   * is what lets one box shape serve both without ambiguity.
+   *
+   * The border is --field-line rather than --ink (PK-68): drawing the outline in the
+   * same near-black as the value typed inside it made the two compete. The button
+   * above keeps --ink. See the token's own note for why #8a8074 and not lighter.
    *
    * The value is WRITTEN, because you are the one typing it. Width is deliberately
    * not set: a stacked form field wants w-full and a bulk-bar input does not, and
@@ -474,7 +478,7 @@
   .field {
     height: 32px;
     padding: 0 10px;
-    border: 1px solid var(--ink);
+    border: 1px solid var(--field-line);
     border-radius: var(--radius);
     background-color: var(--note);
     color: var(--ink);
@@ -612,7 +616,10 @@
   }
 
   /*
-   * §6 — search alone is a bare underline in ink with an icon, no box. And it is
+   * §6 — search alone is a bare underline with an icon, no box. It takes the field
+   * line rather than ink for the same reason a field box does (PK-68) — here the
+   * rule IS the whole control, so an ink one drowned the query sitting on it. And it
+   * is
    * the SYSTEM voice: the test is "did the visitor write this onto their list" — a
    * category they typed is on the list, a search query is a question asked of the
    * app and gone a moment later.
@@ -622,7 +629,7 @@
     align-items: center;
     gap: 8px;
     padding-bottom: 5px;
-    border-bottom: 1px solid var(--ink);
+    border-bottom: 1px solid var(--field-line);
   }
 
   .search svg {
@@ -650,9 +657,11 @@
   }
 
   /*
-   * A 15px square in the same ink box at 3px radius. Checked, it FILLS WITH INK
+   * A 15px square in the same field box at 3px radius, so its resting border is
+   * --field-line like every other field (PK-68). Checked, it still FILLS WITH INK
    * and shows a paper-coloured tick — the same "pressed fills with ink" move the
-   * segmented control uses, rather than a new idea.
+   * segmented control uses, rather than a new idea. Softening the outline does not
+   * soften the fill: an unchecked box is a field, a checked one is an answer.
    *
    * Applied to the <input> itself, so a label around it is plain markup. The tick
    * is a background image rather than a pseudo-element, because pseudo-elements on
@@ -667,7 +676,7 @@
     width: 15px;
     height: 15px;
     margin: 0;
-    border: 1px solid var(--ink);
+    border: 1px solid var(--field-line);
     border-radius: 3px;
     background-color: var(--note);
     appearance: none;

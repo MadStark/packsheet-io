@@ -103,6 +103,37 @@
   --ink-2: #6b6259;
   --ink-3: #7a7468;
 
+  /*
+   * THE RESTING BORDER OF A FIELD, and the one place the field box stops agreeing
+   * with the button box. Everything else about the two is still identical — 6px
+   * radius, white fill, and the stamp shadow that only the button gets (§6).
+   *
+   * PK-68: a field used to be drawn in --ink, the same near-black as the value
+   * typed inside it, so the outline competed with its own contents. It is now a
+   * warm grey that sits between --ink and --rule: still unmistakably a box, but the
+   * value is what the eye lands on.
+   *
+   * A BUTTON KEEPS --ink, and so does the segmented control, which DESIGN.md §6
+   * defines as "the button's box split by 1px ink dividers" and which fills with
+   * ink when selected. The feedback this answers was about fields. Table rules
+   * (--rule, --hairline) are a different job again and are untouched.
+   *
+   * #8a8074 is not a taste call. A field border is a UI component boundary, so
+   * WCAG 1.4.11 wants 3:1 against what sits either side of it, and this clears that
+   * on every ground in the palette rather than only on the white sheet:
+   *
+   *     --note #ffffff      3.87:1
+   *     --paper #fdfcf6     3.77:1
+   *     --paper-deep #f5f1e4  3.43:1
+   *
+   * The last row is the one doing work. The obvious lighter pick, #9d9284, passes
+   * on the sheet at 3.05:1 and drops to 2.70:1 on a sunk area — a field would lose
+   * its boundary exactly where the ground is already darker. It also stays clear of
+   * #8c8578, which is --c-misc; the note above --ink-3 records what that collision
+   * costs.
+   */
+  --field-line: #8a8074;
+
   /* Blue — interactive and base weight only. Unchanged from the old palette. */
   --blue: #0070d4;
   --blue-deep: #005aab;

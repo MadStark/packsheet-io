@@ -147,6 +147,102 @@ describe('the token graph resolves', () => {
   });
 });
 
+/** The 6-digit hex a token is declared with, from the `:root` block in tokens.css. */
+function tokenValue(css: string, name: string): string {
+  let found: string | undefined;
+  postcss.parse(css).walkDecls(name, (decl) => {
+    found = decl.value.trim();
+  });
+  if (found === undefined) throw new Error(`${name} is not declared in tokens.css`);
+  return found;
+}
+
+/** WCAG 2.x relative luminance of a #rrggbb colour. */
+function luminance(hex: string): number {
+  const channel = (pair: string): number => {
+    const c = parseInt(pair, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const [r, g, b] = [1, 3, 5].map((i) => channel(hex.slice(i, i + 2))) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio between two #rrggbb colours, ordered either way. */
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** Every border-ish declaration on the rule with exactly this selector. */
+function borderDecls(css: string, selector: string): string[] {
+  const values: string[] = [];
+  postcss.parse(css).walkRules((rule) => {
+    if (rule.selector !== selector) return;
+    rule.walkDecls(/^border/, (decl) => {
+      values.push(decl.value);
+    });
+  });
+  if (values.length === 0) throw new Error(`no border declaration found on \`${selector}\``);
+  return values;
+}
+
+/**
+ * PK-68 — a field's outline must not be the same ink as the value inside it.
+ *
+ * THE FAILURE THIS CATCHES IS A REVERT, not a typo. `border: 1px solid var(--ink)` is
+ * what every control in this file said for four months, and it is what anyone adding a
+ * new field will copy from the button rule twelve lines above it. Nothing else in the
+ * suite can tell the two apart — both resolve, both render, and the only symptom is that
+ * the box competes with its own contents again, which is precisely the complaint that
+ * produced this token.
+ *
+ * It pins the value as well as the reference, because "soften the fields" has an obvious
+ * wrong answer in the other direction: keep going until the outline is nearly --rule and
+ * the field stops reading as a boxed control at all. The 3:1 floor below is WCAG 1.4.11
+ * for a UI component boundary, and it is asserted against the SUNK ground as well as the
+ * white sheet — #9d9284 passes on --note at 3.05:1 and fails on --paper-deep at 2.70:1,
+ * so checking only the sheet would wave through the one mistake worth catching.
+ */
+describe('a field outline is softer than the value inside it', () => {
+  const tokens = read('tokens.css');
+  const paper = read('paper.css');
+  const fieldLine = tokenValue(tokens, '--field-line');
+
+  it('declares --field-line as its own colour, distinct from --ink and --rule', () => {
+    expect(fieldLine).toMatch(/^#[0-9a-f]{6}$/);
+    expect(fieldLine).not.toBe(tokenValue(tokens, '--ink'));
+    expect(fieldLine).not.toBe(tokenValue(tokens, '--rule'));
+  });
+
+  it('sits between --ink and --rule rather than beside either', () => {
+    const onNote = (hex: string): number => contrast(hex, tokenValue(tokens, '--note'));
+
+    // Lighter than the value it must stop competing with...
+    expect(onNote(fieldLine)).toBeLessThan(onNote(tokenValue(tokens, '--ink')));
+    // ...and darker than a table rule, which is a different job (§7).
+    expect(onNote(fieldLine)).toBeGreaterThan(onNote(tokenValue(tokens, '--rule')));
+  });
+
+  it('clears the 3:1 boundary floor on every ground in the palette', () => {
+    for (const ground of ['--note', '--paper', '--paper-deep']) {
+      expect(contrast(fieldLine, tokenValue(tokens, ground))).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it.each(['.field', '.search', '.checkbox'])('draws %s in --field-line, never --ink', (sel) => {
+    const borders = borderDecls(paper, sel);
+    expect(borders.some((value) => value.includes('var(--field-line)'))).toBe(true);
+    expect(borders.filter((value) => value.includes('var(--ink)'))).toEqual([]);
+  });
+
+  it.each(['.btn', '.segmented'])('leaves %s in --ink — a button is not a field', (sel) => {
+    // The other direction of the same revert: softening the fields must not creep into
+    // the button box. DESIGN.md §6 calls the segmented control "the button's box split
+    // by 1px ink dividers", and its selected segment fills with ink.
+    expect(borderDecls(paper, sel).some((value) => value.includes('var(--ink)'))).toBe(true);
+  });
+});
+
 describe('the language is light only', () => {
   it('declares no dark cut and no theme selector in any stylesheet', () => {
     for (const name of ['tokens.css', 'global.css', 'paper.css', 'fonts.css']) {
