@@ -28,8 +28,9 @@ import {
  * `vitest.config.ts` keeps Astro's `.vue` transform — and the last describe block does
  * exactly that, because the island's degradation claim is a claim about its server-rendered
  * markup. What cannot be reached is any INTERACTION: `environment: 'node'` means there is no
- * `DragEvent`, no `dataTransfer`, no `getBoundingClientRect`, and neither `@vue/test-utils`
- * nor `jsdom` is a dependency to supply them. So a decision written inside a drag handler is
+ * `DragEvent`, no `dataTransfer`, no `getBoundingClientRect`, and `@vue/test-utils` is not a
+ * dependency to supply them. `jsdom` is one as of PK-69, but only `tests/modal.test.ts` opts
+ * into it. So a decision written inside a drag handler is
  * a decision nothing can execute, and `dropTargetIndex`/`applyReorderPlan`/`unknownPlanRows`
  * are the decisions that were taken out of those handlers.
  *
