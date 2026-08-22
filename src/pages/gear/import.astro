@@ -304,7 +304,7 @@ const isClean = report !== null && gearImportIsClean(report);
                   </thead>
                   <tbody>
                     {previewRows.map((row) => (
-                      <tr class={row.ok ? 'align-top' : 'row-retired align-top'}>
+                      <tr class={row.ok ? 'align-top' : 'row-invalid align-top'}>
                         <td class="numeric text-ink-3">{row.position}</td>
                         <td class="text-ink">{row.label}</td>
                         {row.ok ? (

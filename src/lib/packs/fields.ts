@@ -186,7 +186,7 @@ export interface PackTripTypeOption {
  * folding it would be the same unrequested rewrite in a smaller disguise.
  *
  * WHY A FUNCTION IN `src/lib/` RATHER THAN A TERNARY IN THE PAGE. The same argument
- * `checkedGearStatuses` makes for itself: `vitest.config.ts` excludes `src/pages/**`, so
+ * `effectiveGearStatuses` makes for itself: `vitest.config.ts` excludes `src/pages/**`, so
  * the condition that decides whether an imported trip type survives its next save cannot
  * be asserted on if it is written in frontmatter. Inverting it here fails
  * `tests/packs-fields.test.ts`; inverting it in the page was a green suite and a field

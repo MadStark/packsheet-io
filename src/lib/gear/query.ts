@@ -49,9 +49,12 @@
 import type { PacksheetClient } from '../supabase';
 import { toGrams, fromGrams, isWeightUnit, WEIGHT_DECIMALS, type WeightUnit } from '../units';
 import {
+  GEAR_DEFAULT_DIRECTION,
+  GEAR_DEFAULT_SORT,
   GEAR_PAGE_SIZE,
   GEAR_SORT_COLUMNS,
   MAX_SEARCH_LENGTH,
+  effectiveGearStatuses,
   isGearSortKey,
   isGearStatus,
   type GearSortKey,
@@ -78,7 +81,9 @@ export interface GearQuery {
   search: string;
   /** Distinct, first-seen order, whatever `category` values were repeated in the URL. */
   categories: readonly string[];
-  /** Distinct, first-seen order, and only values `isGearStatus` accepts. */
+  /** Distinct, first-seen order, and only values `isGearStatus` accepts — but unlike
+   *  `categories`/`brands` below, empty here does NOT mean "no filter"; it resolves to
+   *  `GEAR_DEFAULT_STATUSES` (see `effectiveGearStatuses` in fields.ts). */
   statuses: readonly GearStatus[];
   /** Distinct, first-seen order, whatever `brand` values were repeated in the URL. */
   brands: readonly string[];
@@ -232,10 +237,11 @@ export function parseGearQuery(params: URLSearchParams): GearQuery {
   const weightUnit = isWeightUnit(params.get('wunit')) ? (params.get('wunit') as WeightUnit) : 'g';
 
   const sortRaw = params.get('sort');
-  const sort = isGearSortKey(sortRaw) ? sortRaw : 'name';
+  const sort = isGearSortKey(sortRaw) ? sortRaw : GEAR_DEFAULT_SORT;
 
   const dirRaw = params.get('dir');
-  const direction: 'asc' | 'desc' = dirRaw === 'asc' || dirRaw === 'desc' ? dirRaw : 'asc';
+  const direction: 'asc' | 'desc' =
+    dirRaw === 'asc' || dirRaw === 'desc' ? dirRaw : GEAR_DEFAULT_DIRECTION;
 
   return {
     search: parseSearch(params),
@@ -626,11 +632,23 @@ const WEIGHT_COMPARISON_TOLERANCE_GRAMS = 0.5 * 10 ** -WEIGHT_DECIMALS;
 
 /**
  * The search/category/status/brand/weight filters every closet-list query needs.
- * Every row this visitor owns is a closet row — the closet has no hidden tier of items
- * a query has to filter back out, and `status` (including `'retired'`) is an ordinary
- * filterable value like any other rather than a floor applied before the visitor's own
- * filters are. Deliberately does NOT add ordering, `.range()`, or the owner scope — see
- * `applyGearQuery` for the first two and `loadGearCloset` for the third.
+ * Every row this visitor owns is a closet row — this function adds no SEPARATE hidden
+ * tier of its own on top of the visitor's own filters, the way a soft delete's
+ * `deleted_at is null` would. `status` is filtered through the same `.in()` mechanism as
+ * every other field here, but — unlike them — unconditionally, on whatever list
+ * `effectiveGearStatuses` resolves `query.statuses` to; see the call site below for why.
+ * Deliberately does NOT add ordering, `.range()`, or the owner
+ * scope — see `applyGearQuery` for the first two and `loadGearCloset` for the third.
+ *
+ * A NOTE FOR THE NEXT READER WHO DIFFS THIS AGAINST PK-4 OR PK-62. This paragraph used to
+ * say `status` (including `'retired'`) was "an ordinary filterable value like any other
+ * rather than a floor applied before the visitor's own filters are" — true when it was
+ * written, because an empty status list meant no status filter at all. PK-70 makes that
+ * reading false: `effectiveGearStatuses([])` is `GEAR_DEFAULT_STATUSES`, not "everything",
+ * so an unfiltered visitor DOES get a floor now — owned and wishlist only — just one
+ * applied through the exact same `.in()` an explicit selection goes through, not a second
+ * condition bolted on beside it. `?status=retired` still reaches exactly the retired rows,
+ * unchanged from before; what changed is only what "no `status` param at all" resolves to.
  *
  * SPLIT OUT FROM `applyGearQuery` FOR C2 (PK-4 review): `loadGearCloset` needs to run
  * this same filter set TWICE for one page render — once as an unranged, `head: true`
@@ -648,9 +666,16 @@ function applyGearFilters(builder: GearItemsQueryBuilder, query: GearQuery): Gea
   if (query.categories.length > 0) {
     next = next.in('category', query.categories as string[]);
   }
-  if (query.statuses.length > 0) {
-    next = next.in('status', query.statuses as string[]);
-  }
+  // UNCONDITIONAL, since PK-70 — not `if (query.statuses.length > 0)`. An empty status
+  // list used to mean "apply no status filter at all", which is exactly what let a
+  // fresh, unfiltered closet show retired gear. It now means `GEAR_DEFAULT_STATUSES`
+  // (owned, wishlist), via `effectiveGearStatuses` — the SAME function the filter bar
+  // (fields.ts) calls to decide which boxes render ticked, so the ticks and this result
+  // set cannot drift apart. `query.statuses` ITSELF is left exactly as `parseGearQuery`
+  // produced it: the default is applied only here, at the point of USE, never written
+  // back into the `GearQuery`, so `gearQueryToSearchParams` still round-trips an absent
+  // `?status=` as an absent `?status=`, not as three params nobody typed.
+  next = next.in('status', effectiveGearStatuses(query.statuses) as string[]);
   if (query.brands.length > 0) {
     next = next.in('brand', query.brands as string[]);
   }
