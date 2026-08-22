@@ -1,0 +1,290 @@
+---
+// The popup shell (PK-69) — one `<dialog>`, built once so that the five surfaces design
+// feedback asks for a popup on (add item, edit item, create pack, edit pack details,
+// add-to-pack) can land in any order without five components drifting apart on focus,
+// dismissal, mobile layout or what happens when the script never arrives.
+//
+// THIS TICKET SHIPS NO PAGE CHANGES. Nothing renders this component yet; PK-71/72/74 do.
+// What exists here is the shell and the decisions behind it, and the decisions are in
+// `src/lib/modal.ts` rather than in the `<script>` block at the foot of this file — see that
+// module's header for why a `<script>` block is code nothing in this repository can execute.
+//
+// ---------------------------------------------------------------------------
+// IT DEPARTS FROM THE WRITTEN DESIGN LANGUAGE, AND SAYS SO
+// ---------------------------------------------------------------------------
+//
+// `docs/design/DESIGN.md` §13 refuses "two overlapping papers": "nothing lies on a sheet and
+// nothing hangs off one." A modal is exactly that — a sheet lying on top of the page, with
+// the page dimmed behind it. This component knowingly departs from the language on the
+// strength of the design feedback that asks for popups in five places, and it is written
+// down here rather than quietly done, because §13's other refusals (tilt, tape, boxed cards
+// inside cards, borders as separators) are still in force and this is not a licence to
+// revisit them.
+//
+// DESIGN.md IS NOT UPDATED BY THIS TICKET. A sibling ticket owns that file, and a second
+// edit to it here is a merge conflict that breaks whichever of the two lands second. When
+// the language is amended, this paragraph is what the amendment should be arguing with.
+//
+// What the shell does keep is everything §13 is actually protecting. The sheet is `--note`
+// on a `--shadow-ink` scrim, never black (tokens.css: "a black shadow on warm paper reads as
+// a hole"). It is square, because sheets are square (§6 puts the 6px radius on controls, not
+// on surfaces). It does not animate, because paper does not (§11) — which is also why there
+// is no `prefers-reduced-motion` block below: `global.css` already collapses CSS transitions
+// globally, and there is no JS-driven motion here to escape it.
+//
+// ---------------------------------------------------------------------------
+// FOR FORMS. NOT FOR CONFIRMING A DELETE.
+// ---------------------------------------------------------------------------
+//
+// This codebase has a deliberate, repeatedly-recorded rule against client-side confirmation
+// dialogs in front of destructive writes — `src/lib/account-deletion.ts:22`,
+// `src/pages/gear/index.astro:154` and `src/pages/account/index.astro:54` each state it, and
+// each replaces one with a two-step server flow where the first submission writes nothing.
+// A popup shell is the obvious thing to reach for the next time someone wants "are you
+// sure?", and reaching for it would undo all three. The rule is not about `window.confirm()`
+// specifically; it is that a destructive step must be something a person performed on
+// purpose against a page the server rendered, not something a script drew over the one they
+// were already on.
+//
+// ---------------------------------------------------------------------------
+// HOW A CONSUMER WIRES ONE UP
+// ---------------------------------------------------------------------------
+//
+//   <a href="/gear/new" data-modal-open="add-item" class="btn btn-primary">Add item</a>
+//
+//   <Modal id="add-item" open={Astro.url.pathname === '/gear/new'}>
+//     <Fragment slot="title">Add an item</Fragment>
+//     <form method="POST" id="add-item-form"> ... </form>
+//     <Fragment slot="actions">
+//       <a href="/gear" class="btn btn-quiet">Cancel</a>
+//       <button type="submit" form="add-item-form" class="btn btn-primary">Save</button>
+//     </Fragment>
+//   </Modal>
+//
+// THE TRIGGER IS A REAL LINK TO A REAL PAGE and stays one if nothing below ever runs — a
+// 404'd bundle, a CSP refusal, an extension, an exception thrown earlier in the same bundle.
+// `upgradeTrigger` cancels the navigation only once the dialog is genuinely up. This is the
+// inversion `src/pages/gear/index.astro:711` sets out: render the working thing
+// unconditionally, upgrade it on the success path, and never use `<noscript>`, which guards
+// scripting being ENABLED rather than this script having RUN.
+//
+// THE FORM LIVES IN THE DEFAULT SLOT AND THE SUBMIT BUTTON IN `actions` REFERS TO IT BY
+// `form="…"`. A slot cannot span two slots, and putting the `<form>` around the whole shell
+// would put the shell's own markup inside every consumer's form. HTML's `form` attribute is
+// the join, and it submits with scripting off exactly as a nested button would.
+//
+// `open` RENDERS `<dialog open>`, which the browser shows IN FLOW — no top layer, no
+// backdrop. That is the point: a direct visit to `/gear/new` shows a working form on a
+// working page with no JavaScript at all, and the script promotes it into the top layer if
+// and only if it can. `open()` in `src/lib/modal.ts` puts the attribute back if the
+// promotion throws.
+
+interface Props {
+  /** The dialog's `id`. A trigger names it in `data-modal-open`, so it has to be stable and
+   *  unique in the document. */
+  id: string;
+  /** An accessible name, for the case where the `title` slot's text is not a good one (an
+   *  icon, or a title carrying markup a screen reader would read badly). When omitted the
+   *  dialog is labelled by the rendered heading, which is the case to prefer: a visible
+   *  label and an announced one that cannot drift apart. */
+  label?: string;
+  /** Render the dialog already open, so a direct URL visit lands on the same surface a
+   *  click would have produced. See the header — this is a real `<dialog open>` in the page
+   *  flow, not a promise the script has to keep. */
+  open?: boolean;
+  /** Extra classes on the dialog, for a consumer that needs a wider or narrower sheet. */
+  class?: string;
+}
+
+const { id, label, open = false, class: className } = Astro.props;
+
+const titleId = `${id}-title`;
+const hasTitle = Astro.slots.has('title');
+const hasActions = Astro.slots.has('actions');
+
+// One or the other, never both: `aria-label` wins over `aria-labelledby` in the accessible
+// name computation, so emitting both would leave the visible heading looking like the label
+// while something else was announced. A dialog with neither has no accessible name at all,
+// which fails WCAG 4.1.2 — hence `label` being the escape hatch rather than the default.
+const labelledBy = label === undefined && hasTitle ? titleId : undefined;
+---
+
+<dialog
+  id={id}
+  data-modal
+  data-modal-open-on-load={open ? '' : undefined}
+  open={open}
+  tabindex="-1"
+  aria-label={label}
+  aria-labelledby={labelledBy}
+  class:list={['modal', className]}
+>
+  {
+    hasTitle && (
+      <header class="border-hairline border-b p-5">
+        {/* The app is speaking, so this is Inter — the default, deliberately not overridden
+            (DESIGN.md §4). `.section-title` rather than `.page-title`: the page behind the
+            dialog still owns the h1, and a modal that shouted at 34px would read as a second
+            page rather than as something opened on top of one. */}
+        <h2 id={titleId} class="section-title">
+          <slot name="title" />
+        </h2>
+      </header>
+    )
+  }
+
+  {
+    /* THE ONLY SCROLLING BOX. `min-h-0` is what makes it work: a flex child's default
+      `min-height: auto` refuses to shrink below its content, so without it the body grows to
+      fit the form and pushes the actions off the bottom of a 375px screen — which is
+      precisely the failure the mobile requirement names. `overscroll-contain` stops a scroll
+      that reaches the end of this box from chaining to the page behind it. */
+  }
+  <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5">
+    <slot />
+  </div>
+
+  {
+    hasActions && (
+      <footer class="modal-actions border-hairline flex flex-wrap items-center justify-end gap-3 border-t px-5 pt-5">
+        <slot name="actions" />
+      </footer>
+    )
+  }
+</dialog>
+
+{
+  /* THE ONLY <style> BLOCK IN ANY .astro FILE IN THIS REPOSITORY, and the exception is
+    argued rather than assumed. Styling here is Tailwind utilities plus paper.css's
+    `@layer components` vocabulary, and everything above that a utility can express is
+    written as one — the flex column, the scrolling body, the hairline dividers, the
+    padding. What is left is the part utilities genuinely cannot reach:
+
+      1. `::backdrop` is a pseudo-element of an element in the TOP LAYER. Tailwind 4 has a
+         `backdrop:` variant, but it emits into the utilities layer, where the declaration
+         has to out-argue the UA's own `dialog::backdrop` rule for an element that is not in
+         the normal flow at all. Writing it as a plain rule on the component is one line
+         that says what it means.
+      2. The `<dialog>` element's UA box — its `position`, `inset`, `margin: auto` centring
+         and `max-width` — differs by state (`[open]`, `:modal`, and `[open]:not(:modal)`
+         for the no-JS fallback), and a class list cannot vary with a pseudo-class the
+         server has no way to know.
+      3. `env(safe-area-inset-bottom)` inside a `max()`. Expressible as an arbitrary value,
+         at the cost of a class string no reviewer can read.
+
+    paper.css is NOT touched, and not because the vocabulary would not fit: `.sheet` is
+    almost exactly this surface. It sets `position: relative` and carries the two corner-curl
+    pseudo-elements of §2.4, and neither survives the top layer — `position` is overridden by
+    the UA's `position: fixed`, and a curl drawn against a dimmed scrim is a shadow on a
+    shadow. Sibling tickets own that file besides. */
+}
+<style>
+  /* The sheet itself. Only ever `[open]`: the UA's `dialog:not([open]) { display: none }` is
+     a UA rule, and an author `display: flex` beats it regardless of specificity — an
+     unqualified selector here would leave every modal on the page permanently visible. */
+  .modal[open] {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    padding: 0;
+    border: 1px solid rgba(var(--shadow-ink), 0.08);
+    background-color: var(--note);
+    color: var(--ink);
+    /* Square, like every other surface in this language: §6 puts the 6px radius on controls,
+       and sheets do not have one. */
+    border-radius: 0;
+    /* Clipped so the head and the footer cannot be scrolled away — only the body scrolls. */
+    overflow: hidden;
+  }
+
+  /* THE NO-JS FALLBACK, and the reason `:modal` is used rather than a class the script sets:
+     `:modal` is the platform's own answer to "is this actually in the top layer", so this
+     rule cannot disagree with reality. A server-rendered `<dialog open>` is an ordinary
+     block in the page, and it is styled as an ordinary sheet — the UA's `position: absolute`
+     would otherwise pull it out of the flow and hang it off whatever happened to be
+     positioned above it. The shadow is `.sheet`'s ambient pair rather than the lift below,
+     because nothing has been lifted: this sheet is lying on the page, not over it. */
+  .modal[open]:not(:modal) {
+    position: static;
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+    box-shadow:
+      0 1px 2px rgba(var(--shadow-ink), 0.08),
+      0 6px 18px -6px rgba(var(--shadow-ink), 0.1);
+  }
+
+  /* Presented. `--shadow-drag` is the site's one LIFT shadow (tokens.css: "the only shadow
+     that says something has been picked up off the page"), which is the honest description
+     of a modal and the closest precedent the token sheet has. `100%` rather than `100vw`:
+     for a fixed box with `inset: 0` the percentage resolves against the viewport minus any
+     classic scrollbar, where `100vw` includes it and pushes the sheet sideways. */
+  .modal:modal {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(560px, calc(100% - 2 * var(--cell)));
+    max-width: calc(100% - 2 * var(--cell));
+    max-height: calc(100dvh - 2 * var(--cell));
+    box-shadow: var(--shadow-drag);
+  }
+
+  /* The scrim. Composed from `--shadow-ink` rather than from black, for the reason
+     tokens.css gives in capitals — "a black shadow on warm paper reads as a hole" — and
+     composed rather than tokenised because there is no scrim token and one value used once is
+     not a scale. .45 sinks the page far enough that the sheet reads as the only live surface
+     while leaving the page recognisable behind it.
+
+     THE `var()` HERE DEPENDS ON `::backdrop` INHERITING FROM ITS ORIGINATING ELEMENT, which
+     is worth writing down because it was not always true: `::backdrop` used to have no
+     parent at all, and in a browser predating the change `--shadow-ink` resolves to nothing,
+     the declaration is invalid at computed-value time, and the scrim is simply absent. The
+     alternative is a hard `rgba(60, 45, 20, …)` at this call site, which CONTRIBUTING.md and
+     tokens.css both refuse outright — a colour that is not in the token sheet belongs in
+     DESIGN.md, and a second copy of one that is there is how two values drift apart. So the
+     token wins and the browser floor moves; the dialog is still fully usable without the
+     scrim, which is what makes that the cheaper of the two failures. Verify it paints. */
+  .modal::backdrop {
+    background-color: rgba(var(--shadow-ink), 0.45);
+  }
+
+  /* MOBILE IS THE FIRST-CLASS CASE, not a narrowed desktop one. At 375px the sheet is the
+     whole viewport: full height, no gutters, no border, with the body scrolling inside it
+     and the actions pinned below it by the flex column above. Nothing is centred, because a
+     centred card at this width is a card with 20px of dimmed page on either side and less
+     room for the form than the keyboard is about to take away. */
+  @media (max-width: 640px) {
+    .modal:modal {
+      width: 100%;
+      max-width: 100%;
+      height: 100dvh;
+      max-height: 100dvh;
+      margin: 0;
+      border-width: 0;
+    }
+  }
+
+  /* The actions row is the one thing that can end up under a home indicator or a rounded
+     corner, because it is the only thing flush with the bottom edge on a full-height sheet.
+     `max()` keeps the 20px cell where there is no inset to respect, which is every desktop
+     and most phones. */
+  .modal-actions {
+    padding-bottom: max(var(--cell), env(safe-area-inset-bottom));
+  }
+</style>
+
+{
+  /* A bundled module rather than `is:inline`, which is the opposite of the choice
+    `src/pages/gear/index.astro:1041` makes and for a reason that inverts cleanly. That
+    script had to run during parsing and had to be immune to a bundle that never arrives,
+    because its job was to REMOVE a working control. This one only ever ADDS behaviour: if
+    the module never loads, every trigger is still a link and every open-on-load dialog is
+    still a rendered form. Nothing is taken away, so nothing is lost by waiting for the
+    bundle — and being a module is what lets the decisions live in src/lib/modal.ts under
+    test instead of being retyped here where nothing can reach them. */
+}
+<script>
+  import { initModals } from '../lib/modal';
+
+  initModals(document);
+</script>
