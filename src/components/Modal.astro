@@ -63,8 +63,9 @@
 //
 // THE TRIGGER IS A REAL LINK TO A REAL PAGE and stays one if nothing below ever runs — a
 // 404'd bundle, a CSP refusal, an extension, an exception thrown earlier in the same bundle.
-// `upgradeTrigger` cancels the navigation only once the dialog is genuinely up. This is the
-// inversion `src/pages/gear/index.astro:711` sets out: render the working thing
+// `upgradeTrigger` cancels the navigation only once the dialog is genuinely up, and refuses
+// to upgrade anything that is not an `<a href>` for exactly that reason. This is the
+// inversion `src/pages/gear/index.astro:710-720` sets out: render the working thing
 // unconditionally, upgrade it on the success path, and never use `<noscript>`, which guards
 // scripting being ENABLED rather than this script having RUN.
 //
@@ -76,12 +77,29 @@
 // `open` RENDERS `<dialog open>`, which the browser shows IN FLOW — no top layer, no
 // backdrop. That is the point: a direct visit to `/gear/new` shows a working form on a
 // working page with no JavaScript at all, and the script promotes it into the top layer if
-// and only if it can. `open()` in `src/lib/modal.ts` puts the attribute back if the
+// and only if it can. `openFrom()` in `src/lib/modal.ts` puts the attribute back if the
 // promotion throws.
+//
+// A CONSUMER THAT NEEDS THE CONTROLLER — to close its own dialog after a save, which PK-71,
+// 72 and 74 all do — calls `initModals(document)` again and reads the returned
+// `ReadonlyMap<string, ModalController>` by `id`. A second pass is additive: an already-wired
+// dialog hands back the SAME controller, and any trigger rendered since (by a hydrated
+// island, say) is upgraded on the way through. There is no other supported handle, and
+// `ModalController` deliberately does not expose the `<dialog>` element itself.
+//
+// THE THREE `data-` ATTRIBUTE NAMES BELOW ARE ALSO DECLARED IN `src/lib/modal.ts`, as
+// `MODAL_ATTRIBUTE`, `OPEN_ON_LOAD_ATTRIBUTE` and `TRIGGER_ATTRIBUTE`. They are written as
+// literals here rather than interpolated from the imports, because `{...{ [MODAL_ATTRIBUTE]:
+// '' }}` in markup costs more legibility than the join is worth — and because a consumer
+// types `data-modal-open="…"` by hand in their own page, so the string has to be readable
+// somewhere. `tests/modal-component.test.ts` renders this component and asserts the markup
+// against those exported constants, which is what stops the two sides drifting: rename
+// either and the render test fails instead of the feature silently going dead.
 
 interface Props {
   /** The dialog's `id`. A trigger names it in `data-modal-open`, so it has to be stable and
-   *  unique in the document. */
+   *  unique in the document — `initModals` refuses a second dialog claiming the same one,
+   *  and refuses an empty one outright. */
   id: string;
   /** An accessible name, for the case where the `title` slot's text is not a good one (an
    *  icon, or a title carrying markup a screen reader would read badly). When omitted the
@@ -102,10 +120,26 @@ const titleId = `${id}-title`;
 const hasTitle = Astro.slots.has('title');
 const hasActions = Astro.slots.has('actions');
 
-// One or the other, never both: `aria-label` wins over `aria-labelledby` in the accessible
-// name computation, so emitting both would leave the visible heading looking like the label
-// while something else was announced. A dialog with neither has no accessible name at all,
-// which fails WCAG 4.1.2 — hence `label` being the escape hatch rather than the default.
+// A BUILD ERROR, NOT A RUNTIME ONE, AND NOT A SILENT PASS. A dialog with neither a `label`
+// nor a `title` slot has no accessible name at all: a screen reader announces "dialog" and
+// nothing else, which is a WCAG 4.1.2 (Name, Role, Value, Level A) failure that no visual
+// review can see. This frontmatter runs on the server during `astro build`, so throwing here
+// fails the build of any page that renders one — which is the only feedback loop fast enough
+// to matter for a mistake whose symptom is silence.
+if (label === undefined && !hasTitle) {
+  throw new Error(
+    `<Modal id="${id}"> has neither a \`label\` prop nor a \`title\` slot, so it would ship ` +
+      `with no accessible name (WCAG 4.1.2). Give it a <Fragment slot="title">, or pass ` +
+      `label="…" when the visible title is not a usable name.`,
+  );
+}
+
+// One or the other, never both — and the reason is the opposite of the one this comment used
+// to give. Accname 1.2 §4.3.2 evaluates `aria-labelledby` (step 2B) BEFORE `aria-label`
+// (step 2C), so `aria-labelledby` WINS. Emitting both would therefore not "announce
+// something other than the heading": it would silently DISCARD the `label` prop a consumer
+// passed precisely because the heading was not a usable name, and leave them with no
+// indication their prop did nothing. So `label` suppresses the `labelledby` instead.
 const labelledBy = label === undefined && hasTitle ? titleId : undefined;
 ---
 
@@ -120,18 +154,56 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
   class:list={['modal', className]}
 >
   {
-    hasTitle && (
-      <header class="border-hairline border-b p-5">
-        {/* The app is speaking, so this is Inter — the default, deliberately not overridden
-            (DESIGN.md §4). `.section-title` rather than `.page-title`: the page behind the
-            dialog still owns the h1, and a modal that shouted at 34px would read as a second
-            page rather than as something opened on top of one. */}
+    /* THE HEADER IS UNCONDITIONAL NOW, because the close button is, and the close button is
+      the only dismissal affordance that exists on a phone. Below 640px the sheet is
+      full-bleed (see the media query): there is no dimmed area left to click, a touch
+      keyboard has no ESC key, and `actions` is an optional slot — so a consumer who did not
+      supply a Cancel link shipped a modal a phone visitor could not close at all. The h2
+      is still conditional; a header holding only the close control is the case where `label`
+      was passed instead of a title. */
+  }
+  <header
+    class:list={[
+      'border-hairline flex items-start gap-3 border-b p-5',
+      hasTitle ? 'justify-between' : 'justify-end',
+    ]}
+  >
+    {
+      hasTitle && (
+        /* The app is speaking, so this is Inter — the default, deliberately not overridden
+           (DESIGN.md §4). `.section-title` rather than `.page-title`: the page behind the
+           dialog still owns the h1, and a modal that shouted at 34px would read as a second
+           page rather than as something opened on top of one. */
         <h2 id={titleId} class="section-title">
           <slot name="title" />
         </h2>
-      </header>
-    )
-  }
+      )
+    }
+
+    {
+      /* `<form method="dialog">` RATHER THAN A CLICK HANDLER, which is what makes this a real
+        control rather than a second dead one. The platform closes the dialog on submit with
+        no script involved at all, and it fires `close` — so it lands on exactly the path
+        `endModalSession` describes, beside ESC, the backdrop and a programmatic `close()`.
+        H4's refusal of a `<button data-modal-open>` does not apply here and the difference is
+        worth being exact about: THAT button is a trigger, on a page where the dialog may
+        never open; THIS one only exists inside a dialog that is already up.
+
+        `data-modal-dismiss` is what keeps it out of the initial focus. It is the first
+        tabbable element in the sheet, so without the marker every consumer's modal would
+        open focused on Close rather than on their first field — see `focusFirstWithin`. It
+        stays in the tab order, one Tab away.
+
+        `aria-label` because the glyph is a glyph: a screen reader announcing "✕" is
+        announcing nothing. The span is `aria-hidden` so the name is the label and not the
+        two concatenated. */
+    }
+    <form method="dialog" class="modal-dismiss shrink-0">
+      <button type="submit" class="btn btn-quiet" aria-label="Close" data-modal-dismiss>
+        <span aria-hidden="true">✕</span>
+      </button>
+    </form>
+  </header>
 
   {
     /* THE ONLY SCROLLING BOX. `min-h-0` is what makes it work: a flex child's default
@@ -160,28 +232,58 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
     written as one — the flex column, the scrolling body, the hairline dividers, the
     padding. What is left is the part utilities genuinely cannot reach:
 
-      1. `::backdrop` is a pseudo-element of an element in the TOP LAYER. Tailwind 4 has a
-         `backdrop:` variant, but it emits into the utilities layer, where the declaration
-         has to out-argue the UA's own `dialog::backdrop` rule for an element that is not in
-         the normal flow at all. Writing it as a plain rule on the component is one line
-         that says what it means.
+      1. `::backdrop` is a pseudo-element of an element in the TOP LAYER, and Tailwind 4's
+         `backdrop:` variant cannot state a rule about one that has no element to hang a
+         class on. (What this used to say — that the utility would have to "out-argue the
+         UA's own `dialog::backdrop` rule" — was wrong, and wrong in the direction this file
+         gets right two paragraphs down: an author declaration beats a UA one whatever the
+         specificity. The real objection is plainer: the variant emits into the utilities
+         layer against a class list on the dialog, and one plain rule on the component says
+         what it means in one line.)
       2. The `<dialog>` element's UA box — its `position`, `inset`, `margin: auto` centring
-         and `max-width` — differs by state (`[open]`, `:modal`, and `[open]:not(:modal)`
-         for the no-JS fallback), and a class list cannot vary with a pseudo-class the
-         server has no way to know.
+         and `max-width` — differs by state (`[open]` for the no-JS fallback and `:modal`
+         for the presented one), and a class list cannot vary with a pseudo-class the server
+         has no way to know.
       3. `env(safe-area-inset-bottom)` inside a `max()`. Expressible as an arbitrary value,
          at the cost of a class string no reviewer can read.
 
-    paper.css is NOT touched, and not because the vocabulary would not fit: `.sheet` is
-    almost exactly this surface. It sets `position: relative` and carries the two corner-curl
-    pseudo-elements of §2.4, and neither survives the top layer — `position` is overridden by
-    the UA's `position: fixed`, and a curl drawn against a dimmed scrim is a shadow on a
-    shadow. Sibling tickets own that file besides. */
+    paper.css is NOT touched, and the reason is stronger than it was written as: `.sheet` is
+    almost exactly this surface, and it sets `position: relative` — which, being an AUTHOR
+    declaration, would WIN over the UA's `position: fixed` and drop a presented modal out of
+    the centred box the top layer put it in. (The previous version of this note had the UA
+    winning, which would have made reuse merely lossy rather than broken.) Its two corner-curl
+    pseudo-elements of §2.4 do not survive either: a curl drawn against a dimmed scrim is a
+    shadow on a shadow. Sibling tickets own that file besides. */
 }
 <style>
-  /* The sheet itself. Only ever `[open]`: the UA's `dialog:not([open]) { display: none }` is
-     a UA rule, and an author `display: flex` beats it regardless of specificity — an
-     unqualified selector here would leave every modal on the page permanently visible. */
+  /* THE SHEET, AND THE IN-FLOW LAYOUT THAT IS ALSO THE NO-JS FALLBACK.
+     Only ever `[open]`: the UA's `dialog:not([open]) { display: none }` is a UA rule, and an
+     author `display: flex` beats it regardless of specificity — an unqualified selector here
+     would leave every modal on the page permanently visible.
+
+     A server-rendered `<dialog open>` is an ordinary block in the page, and it is styled as
+     an ordinary sheet: the UA's `position: absolute` would otherwise pull it out of the flow
+     and hang it off whatever happened to be positioned above it. The shadow is `.sheet`'s
+     ambient pair rather than the lift below, because nothing has been lifted — this sheet is
+     lying on the page, not over it.
+
+     THIS USED TO BE WRITTEN AS `.modal[open]:not(:modal)`, WHICH BROKE IN EXACTLY THE
+     BROWSERS THE FALLBACK EXISTS FOR. `:not()` is not forgiving, so a whole rule whose
+     selector mentions `:modal` is DISCARDED by any engine that does not know that
+     pseudo-class — and there is a real population of them that nonetheless supports
+     `<dialog>`: `:modal` landed in Chrome 105, Firefox 103 and Safari 15.6, while
+     `showModal()` had been there since Chrome 37, Firefox 98 and Safari 15.4. Those engines
+     dropped the fallback layout and rendered the no-JS form out of the flow. Stating the
+     fallback UNCONDITIONALLY and letting `.modal:modal` below override it inverts the
+     failure: an engine that does not know `:modal` now drops the PRESENTED rule instead and
+     falls back to a readable in-flow sheet, which is the direction a fallback is supposed to
+     fail in.
+
+     The reviewed remedy was `@supports selector(:modal)` around the `:not()` version. It
+     would work — `@supports selector()` predates `<dialog>` everywhere that matters (Chrome
+     83, Firefox 69, Safari 14.1) — but it costs a second copy of these five declarations in
+     the `@supports not` branch, and two copies of a fallback is how the two stop matching.
+     Overriding needs no copy. */
   .modal[open] {
     display: flex;
     flex-direction: column;
@@ -195,16 +297,6 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
     border-radius: 0;
     /* Clipped so the head and the footer cannot be scrolled away — only the body scrolls. */
     overflow: hidden;
-  }
-
-  /* THE NO-JS FALLBACK, and the reason `:modal` is used rather than a class the script sets:
-     `:modal` is the platform's own answer to "is this actually in the top layer", so this
-     rule cannot disagree with reality. A server-rendered `<dialog open>` is an ordinary
-     block in the page, and it is styled as an ordinary sheet — the UA's `position: absolute`
-     would otherwise pull it out of the flow and hang it off whatever happened to be
-     positioned above it. The shadow is `.sheet`'s ambient pair rather than the lift below,
-     because nothing has been lifted: this sheet is lying on the page, not over it. */
-  .modal[open]:not(:modal) {
     position: static;
     width: 100%;
     max-width: 100%;
@@ -214,11 +306,16 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
       0 6px 18px -6px rgba(var(--shadow-ink), 0.1);
   }
 
-  /* Presented. `--shadow-drag` is the site's one LIFT shadow (tokens.css: "the only shadow
-     that says something has been picked up off the page"), which is the honest description
-     of a modal and the closest precedent the token sheet has. `100%` rather than `100vw`:
-     for a fixed box with `inset: 0` the percentage resolves against the viewport minus any
-     classic scrollbar, where `100vw` includes it and pushes the sheet sideways. */
+  /* PRESENTED. `:modal` rather than a class the script sets, because it is the platform's own
+     answer to "is this actually in the top layer" and so cannot disagree with reality. It
+     comes after the block above and carries the same specificity, so it wins on order —
+     every declaration it needs to overturn is restated here rather than left to chance.
+
+     `--shadow-drag` is the site's one LIFT shadow (tokens.css: "the only shadow that says
+     something has been picked up off the page"), which is the honest description of a modal
+     and the closest precedent the token sheet has. `100%` rather than `100vw`: for a fixed
+     box with `inset: 0` the percentage resolves against the viewport minus any classic
+     scrollbar, where `100vw` includes it and pushes the sheet sideways. */
   .modal:modal {
     position: fixed;
     inset: 0;
@@ -229,6 +326,22 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
     box-shadow: var(--shadow-drag);
   }
 
+  /* THE CLOSE BUTTON IS SHOWN ONLY WHILE THE DIALOG IS ACTUALLY PRESENTED, and hidden by
+     default rather than the other way round. In the no-JS fallback the dialog IS the page a
+     visitor navigated to; a control that removed the `open` attribute would delete the form
+     they asked for and leave them on a blank surface with only the Back button — the exact
+     failure the fallback exists to prevent, added by the affordance meant to help. Hiding by
+     default is also the safe side of the `:not()` problem above: an engine that does not know
+     `:modal` drops this rule and keeps the button hidden, where the inverse would have shown
+     it on the fallback. Such an engine loses the affordance and keeps ESC and the backdrop. */
+  .modal-dismiss {
+    display: none;
+  }
+
+  .modal:modal .modal-dismiss {
+    display: block;
+  }
+
   /* The scrim. Composed from `--shadow-ink` rather than from black, for the reason
      tokens.css gives in capitals — "a black shadow on warm paper reads as a hole" — and
      composed rather than tokenised because there is no scrim token and one value used once is
@@ -236,14 +349,16 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
      while leaving the page recognisable behind it.
 
      THE `var()` HERE DEPENDS ON `::backdrop` INHERITING FROM ITS ORIGINATING ELEMENT, which
-     is worth writing down because it was not always true: `::backdrop` used to have no
-     parent at all, and in a browser predating the change `--shadow-ink` resolves to nothing,
-     the declaration is invalid at computed-value time, and the scrim is simply absent. The
-     alternative is a hard `rgba(60, 45, 20, …)` at this call site, which CONTRIBUTING.md and
-     tokens.css both refuse outright — a colour that is not in the token sheet belongs in
-     DESIGN.md, and a second copy of one that is there is how two values drift apart. So the
-     token wins and the browser floor moves; the dialog is still fully usable without the
-     scrim, which is what makes that the cheaper of the two failures. Verify it paints. */
+     is worth writing down because it was not always true: `::backdrop` used to have no parent
+     at all, and inheritance landed only in Chrome 122, Firefox 120 and Safari 17.4. Below
+     those, `--shadow-ink` resolves to nothing, the declaration is invalid at computed-value
+     time, and the scrim is simply absent. The alternative is a hard `rgba(60, 45, 20, …)` at
+     this call site, which CONTRIBUTING.md and tokens.css both refuse outright — a colour that
+     is not in the token sheet belongs in DESIGN.md, and a second copy of one that is there is
+     how two values drift apart. So the token wins and the browser floor moves; the dialog is
+     still fully usable without the scrim, which is what makes that the cheaper of the two
+     failures. VERIFIED, not assumed: on Chrome 151 the presented dialog's `::backdrop`
+     computes to `rgba(60, 45, 20, 0.45)`, i.e. the inheritance really does reach it. */
   .modal::backdrop {
     background-color: rgba(var(--shadow-ink), 0.45);
   }
@@ -252,7 +367,8 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
      whole viewport: full height, no gutters, no border, with the body scrolling inside it
      and the actions pinned below it by the flex column above. Nothing is centred, because a
      centred card at this width is a card with 20px of dimmed page on either side and less
-     room for the form than the keyboard is about to take away. */
+     room for the form than the keyboard is about to take away. It is also why the header
+     carries a close button: at this width there is no backdrop left to click. */
   @media (max-width: 640px) {
     .modal:modal {
       width: 100%;
@@ -281,7 +397,13 @@ const labelledBy = label === undefined && hasTitle ? titleId : undefined;
     the module never loads, every trigger is still a link and every open-on-load dialog is
     still a rendered form. Nothing is taken away, so nothing is lost by waiting for the
     bundle — and being a module is what lets the decisions live in src/lib/modal.ts under
-    test instead of being retyped here where nothing can reach them. */
+    test instead of being retyped here where nothing can reach them.
+
+    THE RETURN VALUE IS DISCARDED HERE AND THAT IS NOT A LOSS. `initModals` is idempotent and
+    additive, so a consumer that wants the controller for its own dialog calls it again and
+    reads the map — see the header. Holding the map in this block instead would mean putting
+    it somewhere a consumer's own script could find it, i.e. on `window`, which is a global
+    this repository does not have and should not acquire for the sake of saving one call. */
 }
 <script>
   import { initModals } from '../lib/modal';
