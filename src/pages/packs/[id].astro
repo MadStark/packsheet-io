@@ -20,8 +20,8 @@ import { createAuthClient } from '../../lib/auth';
 import { readWeightSystem } from '../../lib/profile';
 import { WEIGHT_ENTRY_UNIT, formatWeight } from '../../lib/units';
 import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
-import { PACKS_PATH, packPath } from '../../lib/packs/routes';
-import { loadPackForEdit } from '../../lib/packs/query';
+import { PACKS_PATH, PACK_EDIT_PARAM, packEditHref, packPath } from '../../lib/packs/routes';
+import { loadPackForEdit, packNoteFromEditRow } from '../../lib/packs/query';
 import {
   addGearItemsToCategory,
   createCustomPackItem,
@@ -39,7 +39,6 @@ import {
   EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES,
   EMPTY_PACK_CATEGORY_FORM_VALUES,
   PACK_CATEGORY_FORM_FIELD,
-  PACK_FORM_FIELD,
   packToFormValues,
   parseCustomPackItemForm,
   parsePackCategoryForm,
@@ -59,7 +58,6 @@ import {
   PACK_ITEM_CARRIAGE_LABELS,
   PACK_ITEM_CARRIAGE_MEANINGS,
   packTripTypeLabel,
-  packTripTypeOptions,
 } from '../../lib/packs/fields';
 import {
   PACK_EDITOR_FIELD,
@@ -72,6 +70,7 @@ import {
   parseGearItemIds,
 } from '../../lib/packs/editor';
 import { computeTotals } from '../../lib/totals';
+import PackDetailsDialog from '../../components/PackDetailsDialog.astro';
 // The closet picker reads the closet through the SAME module the closet page does — one
 // owner-scoped, filtered, paginated read of `gear_items`, not a second one grown here. See
 // loadGearCloset's own comment for why its `.eq('user_id', ...)` is load-bearing rather
@@ -314,7 +313,7 @@ if (Astro.request.method === 'POST') {
       // comment for why the three fields this form edits are not three setters. The trip
       // type is passed through untouched, curated value or not: `packs.trip_type` carries
       // no CHECK constraint on purpose, and nothing here may branch on isPackTripType.
-      const { error, count } = await updatePack(client, user.id, id, result.values);
+      const { error, count } = await updatePack(client, id, result.values);
       // `count === 0` here is NOT a lock — `packs_update_own` has no `locked_at` clause, so
       // an owner may always rename their own pack. It is a pack that stopped existing
       // between the load at the top of this request and this statement.
@@ -594,14 +593,32 @@ if (Astro.request.method === 'POST') {
  */
 const totals = computeTotals(pack);
 
-const packValues: PackFormValues = packValuesOverride ?? packToFormValues(pack);
-// Options derived from the value the FORM is about to show, not from the stored column, so
-// that a re-render after a failed save still offers the value it is displaying. Either way
-// `packTripTypeOptions` is what keeps an unrecognised trip type — `'PCT section hike'` from
-// an import (PK-33, PK-65) — as a real option instead of letting the <select> silently
-// display its first entry and write that over the imported value on the next save.
-const tripTypeOptions = packTripTypeOptions(packValues.trip_type);
+// The array-to-value unwrap lives in src/lib/packs/query.ts now, as packNoteFromEditRow —
+// see that function's own comment for why the embed is a one-element array rather than an
+// object, and why this could not stay page frontmatter (vitest.config.ts excludes
+// src/pages/** from the test run, so nothing here was ever exercised by a test).
+const packNote: string | null = packNoteFromEditRow(pack);
+
+const packValues: PackFormValues =
+  packValuesOverride ?? packToFormValues({ ...pack, notes: packNote });
 const tripTypeLabel = packTripTypeLabel(pack.trip_type);
+
+/**
+ * Whether the pack-details dialog renders already-open (PK-72). Same three ways in as the
+ * create dialog on `/packs` — see that page's own comment.
+ *
+ * `packErrors` AND `writeError` ARE NOT BOTH ABOUT THIS FORM, and that is the one thing to
+ * get right here. This page answers ten intents and `writeError` is shared by all of them,
+ * so re-opening the dialog whenever it is set would pop the details dialog open because a
+ * category failed to rename. `packErrors` is this form's alone; `packValuesOverride` is set
+ * by — and only by — the two `savePack` failure branches, so it is the honest signal that
+ * the failure being re-rendered belongs to this dialog.
+ */
+const showDetailsDialog =
+  Astro.url.searchParams.has(PACK_EDIT_PARAM) || packValuesOverride !== null;
+
+/** Joins the trigger's `data-modal-open` to the dialog's `id`. */
+const DETAILS_DIALOG_ID = 'pack-details';
 
 // The two <select>s below offer these by NAME, so what they need from the tree is the pair
 // (id, name) and not its order — which is why they are read straight off the loaded pack
@@ -639,7 +656,6 @@ const pickerPageHref = (target: number): string => {
 // recipes now, kept as constants only because every form on this page repeats them.
 const LABEL_CLASS = 'field-label';
 const INPUT_CLASS = 'field mt-1 w-full';
-const TEXTAREA_CLASS = 'field mt-1 w-full min-h-24';
 const ERROR_CLASS = 'field-error';
 const PRIMARY_BUTTON_CLASS = 'btn btn-primary';
 const QUIET_BUTTON_CLASS = 'btn';
@@ -654,19 +670,46 @@ const CANCEL_LINK_CLASS = 'btn';
       <div class="sheet-body">
         <div class="flex flex-wrap items-baseline justify-between gap-4">
           <div>
-            <p class="eyebrow">Pack</p>
-            <h1 class="page-title mt-2">{pack.name}</h1>
+            {
+              /* The `Pack` eyebrow is gone at the design feedback's request. The pack's own
+                 name is directly under the nav on a page reached by clicking that name, so
+                 the eyebrow was labelling something already unambiguous. */
+            }
+            <h1 class="page-title">{pack.name}</h1>
             {tripTypeLabel !== '' && <p class="hint mt-2">{tripTypeLabel}</p>}
           </div>
-          <a href={PACKS_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline">
-            All packs
-          </a>
+          <div class="flex shrink-0 items-center gap-4">
+            {
+              /* Everything the old "Pack details" section held is behind this. A link, not
+                 a button — Modal.astro upgrades anchors and refuses anything else, so with
+                 JavaScript off this navigates to `?edit` and the dialog renders open there.
+                 `selfPath` is deliberately NOT used for the href: it carries the closet
+                 picker's query string, and the trigger needs `?edit` specifically. */
+            }
+            <a href={packEditHref(id)} data-modal-open={DETAILS_DIALOG_ID} class="btn">
+              Edit details
+            </a>
+            <a href={PACKS_PATH} class="text-blue-deep hover:text-blue-ink text-sm underline">
+              All packs
+            </a>
+          </div>
         </div>
       </div>
     </div>
 
     {
-      writeError && (
+      /* NOT shown while the details dialog is open. `showDetailsDialog` is true only via the
+         `?edit` param or `packValuesOverride`, and the latter is set by — and only by — the
+         two `savePack` failure branches (see that constant's own comment), so `writeError`
+         co-occurring with `showDetailsDialog` on this page only ever happens on a `savePack`
+         failure. That message now renders inside the dialog itself instead (see
+         PackDetailsDialog's own `writeError` prop) — the dialog would otherwise cover this
+         note with its scrim, same defect PK-72's independent review found on `/packs`. The
+         other nine intents never set `showDetailsDialog`, so this note still renders for all
+         of them exactly as before. */
+    }
+    {
+      writeError && !showDetailsDialog && (
         <div class="note note-danger" role="alert">
           <p>{writeError}</p>
         </div>
@@ -682,71 +725,6 @@ const CANCEL_LINK_CLASS = 'btn';
          computeTotals' and nothing else's, and they still cannot move when a row does —
          reordering carries no weight across. */
     }
-
-    {
-      /* Pack details. One form, three fields, one write — see updatePack's own comment for
-         why name, description and trip type are saved together rather than by three
-         setters. */
-    }
-    <section aria-labelledby="details-heading" class="sheet">
-      <div class="sheet-body">
-        <h2 id="details-heading" class="section-title">Pack details</h2>
-        <form method="POST" class="mt-4 space-y-4">
-          <input type="hidden" name="intent" value={PACK_INTENT.savePack} />
-          <div>
-            <label for="pack-name" class={LABEL_CLASS}>
-              Name <span aria-hidden="true" class="field-required">*</span>
-            </label>
-            <input
-              id="pack-name"
-              name={PACK_FORM_FIELD.name}
-              type="text"
-              value={packValues.name}
-              aria-required="true"
-              aria-describedby={packErrors.name ? 'pack-name-error' : undefined}
-              aria-invalid={packErrors.name ? 'true' : undefined}
-              class={INPUT_CLASS}
-            />
-            {
-              packErrors.name && (
-                <p id="pack-name-error" class={ERROR_CLASS}>
-                  {packErrors.name}
-                </p>
-              )
-            }
-          </div>
-          <div>
-            <label for="pack-description" class={LABEL_CLASS}>Description</label>
-            <textarea
-              id="pack-description"
-              name={PACK_FORM_FIELD.description}
-              class={TEXTAREA_CLASS}>{packValues.description}</textarea
-            >
-          </div>
-          <div>
-            <label for="pack-trip-type" class={LABEL_CLASS}>Trip type</label>
-            {
-              /* A <select> whose FIRST option is blank and whose second is the stored value
-               when this product does not recognise it. That middle option is the whole
-               reason packTripTypeOptions exists: `packs.trip_type` has no CHECK constraint,
-               imports (PK-33, PK-65) bring their own vocabularies, and a <select> missing
-               its own bound value silently displays and submits its first option — so the
-               next unrelated save would write null over a value the visitor never touched. */
-            }
-            <select id="pack-trip-type" name={PACK_FORM_FIELD.tripType} class={INPUT_CLASS}>
-              {
-                tripTypeOptions.map((option) => (
-                  <option value={option.value} selected={option.value === packValues.trip_type}>
-                    {option.label}
-                  </option>
-                ))
-              }
-            </select>
-          </div>
-          <button type="submit" class={PRIMARY_BUTTON_CLASS}>Save details</button>
-        </form>
-      </div>
-    </section>
 
     {
       /* THE ONE HYDRATED COMPONENT ON THIS PAGE, and the only JavaScript this editor has.
@@ -1319,5 +1297,28 @@ const CANCEL_LINK_CLASS = 'btn';
         </div>
       )
     }
+
+    {
+      /* The pack's details, behind the header's *Edit details* button — the same component
+         `/packs` renders to create one, which is the whole point of PK-72. It posts to this
+         page with the `savePack` intent, so the branch at the top of this file that used to
+         answer the inline form answers this instead, unchanged.
+
+         `cancelHref` is `selfPath` rather than a bare `packPath(id)`: that constant carries
+         the closet picker's query string, so cancelling out of the dialog leaves the
+         visitor looking at the same filtered closet they were before they opened it. It
+         also drops `?edit`, which is what closes the dialog on the no-JS path. */
+    }
+    <PackDetailsDialog
+      id={DETAILS_DIALOG_ID}
+      open={showDetailsDialog}
+      title="Pack details"
+      values={packValues}
+      errors={packErrors}
+      writeError={writeError}
+      submitLabel="Save details"
+      cancelHref={selfPath}
+      intentField={{ name: 'intent', value: PACK_INTENT.savePack }}
+    />
   </main>
 </Layout>

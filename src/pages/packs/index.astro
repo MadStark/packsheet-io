@@ -11,20 +11,20 @@ import { createAuthClient } from '../../lib/auth';
 import { readWeightSystem } from '../../lib/profile';
 import { formatWeight } from '../../lib/units';
 import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
-// `packPath` only. This page IS `PACKS_PATH`, and a `<form method="POST">` with no action
-// posts to the URL it was served from, so there is nothing here for the constant to name —
-// the one redirect this page issues goes into the pack it just created.
-import { packPath } from '../../lib/packs/routes';
+// This page IS `PACKS_PATH`, and a `<form method="POST">` with no action posts to the URL
+// it was served from — so the constant is needed only for the dialog's Cancel link, which
+// has to name this page explicitly in order to leave the `?new` parameter behind.
+import { PACKS_PATH, PACK_CREATE_PARAM, packCreateHref, packPath } from '../../lib/packs/routes';
 import { loadPackList } from '../../lib/packs/query';
 import { createPack } from '../../lib/packs/mutations';
 import {
   EMPTY_PACK_FORM_VALUES,
-  PACK_FORM_FIELD,
   parsePackForm,
   rawPackFormValues,
   type PackFormValues,
 } from '../../lib/packs/form';
 import { packTripTypeLabel } from '../../lib/packs/fields';
+import PackDetailsDialog from '../../components/PackDetailsDialog.astro';
 
 // src/middleware.ts has already resolved this with a verified getUser() call; reading it
 // here rather than calling getUser() again is the whole point of doing it once in
@@ -72,7 +72,7 @@ if (Astro.request.method === 'POST') {
     // first: THERE IS NO CAP on how many packs an account may have, and that module's
     // header says so explicitly because a limit is the kind of thing that gets added to a
     // create path by reflex. tests/packs-mutations.test.ts asserts the absence.
-    const { id, error } = await createPack(client, user.id, result.values);
+    const { id, error } = await createPack(client, result.values);
 
     if (error || id === null) {
       writeError = GENERIC_WRITE_ERROR;
@@ -108,6 +108,29 @@ const { system: weightSystem } = await readWeightSystem(client, user.id);
 
 const loadError = listError ? GENERIC_LOAD_ERROR : null;
 
+/**
+ * Whether the create-pack dialog renders already-open (PK-72).
+ *
+ * THREE WAYS IN, AND THE LAST TWO ARE WHY THIS IS NOT JUST THE PARAMETER. `?new` is the
+ * ordinary one: the trigger is a real `<a href>` (Modal.astro upgrades anchors and refuses
+ * anything else, so the control works with JavaScript off), and with no script the click
+ * is a plain navigation that lands here.
+ *
+ * The other two are the failure paths, and forgetting them is how a dialog eats someone's
+ * typing. A POST that fails validation, or that validates and then fails to write, falls
+ * through to a re-render of THIS page — at the URL the form posted to, which carries no
+ * `?new`. Without these two clauses the visitor would get the list back with their text
+ * gone and, in the validation case, no error visible anywhere, because the only thing that
+ * renders `formErrors` is inside the dialog.
+ */
+const showCreateDialog =
+  Astro.url.searchParams.has(PACK_CREATE_PARAM) ||
+  Object.keys(formErrors).length > 0 ||
+  writeError !== null;
+
+/** Joins the trigger's `data-modal-open` to the dialog's `id`. One dialog on this page. */
+const CREATE_DIALOG_ID = 'create-pack';
+
 // "This visitor has no packs" is exactly an empty list from a read that did not fail, and
 // it is an ordinary state rather than an error — a new account has no packs, and the first
 // thing it should see is an invitation to make one, not a blank page.
@@ -121,18 +144,17 @@ const listIsEmpty = !loadError && packs.length === 0;
   <GearNav />
   <main class="paper-col flex flex-col gap-[30px] py-[30px]">
     {
-      /* PK-64 (Notebook Paper). A cover sheet carrying the title, a sheet holding the
-         create form, and a sheet holding the list as a ledger — the "a sheet holding a
+      /* PK-64 (Notebook Paper). A cover sheet carrying the title and the create action,
+         and a sheet holding the list as a ledger — the "a sheet holding a
          list" and "a sheet holding a form" patterns src/pages/gear/index.astro already
-         sets. Both alerts are notes lying directly on the paper (§2.5), never inside a
-         sheet. */
-    }
-    {
-      writeError && (
-        <div class="note note-danger" role="alert">
-          <p>{writeError}</p>
-        </div>
-      )
+         sets. The load error is a note lying directly on the paper (§2.5), never inside a
+         sheet.
+
+         `writeError` used to render as a second note here, but `showCreateDialog` already
+         reopens the dialog on every path that sets it (see that constant's own comment: one
+         of its three conditions IS `writeError !== null`), so a note here was never once
+         visible — the dialog's scrim covers it. It renders inside the dialog now instead;
+         see PackDetailsDialog's own `writeError` prop. */
     }
     {
       loadError && (
@@ -142,64 +164,36 @@ const listIsEmpty = !loadError && packs.length === 0;
       )
     }
 
-    <div class="sheet">
-      <div class="sheet-body">
-        <p class="eyebrow">Packs</p>
-        <h1 class="page-title mt-2">Your packs</h1>
-        <p class="aside mt-2">one for each trip</p>
-      </div>
-    </div>
-
     {
-      /* The create form, rendered whether the list is empty or full — the C1 (PK-4 review)
-         defect in miniature: an action reachable only from an empty state stops being
-         reachable the moment the state is no longer empty.
+      /* The cover sheet, now carrying the create action as well as the title — the shape
+         src/pages/gear/index.astro's header already has, and the reason this is a header
+         row rather than a bare <h1>: the button that makes a pack belongs beside the name
+         of the thing it makes, not in a sheet of its own further down the page.
 
-         NAME ONLY. `packs.description` and `packs.trip_type` are both nullable with no
-         default, so a pack that has neither is a complete pack rather than a half-filled
-         one, and asking for three answers to make an empty list is three answers before
-         the visitor has anything to put in it. Both fields are on the editor's own form,
-         one click away, where the pack they describe actually exists. `parsePackForm`
-         reads all three regardless and turns the two absent ones into SQL null, which is
-         exactly what this form means by leaving them out. */
+         The eyebrow ("Packs") and the aside ("one for each trip") are gone at the design
+         feedback's request. Nothing replaces them — the <h1> already says "Your packs", so
+         the eyebrow was saying it twice. */
     }
     <div class="sheet">
       <div class="sheet-body">
-        <form method="POST">
-          <div class="flex flex-col gap-4 sm:flex-row sm:items-end">
-            <div class="flex-1">
-              <label for="pack-name" class="field-label">
-                New pack name <span aria-hidden="true" class="field-required">*</span>
-              </label>
-              {
-                /* NOT the HTML `required` attribute, for the reason GearItemForm gives at
-                   length: native constraint validation would block the submit in-browser, so
-                   `parsePackForm` — the only place this rule is actually enforced, and the
-                   only one a test can reach — would never run. `aria-required` says the same
-                   thing to assistive technology without touching submission behaviour. */
-              }
-              <input
-                id="pack-name"
-                name={PACK_FORM_FIELD.name}
-                type="text"
-                value={formValues.name}
-                placeholder="Three days on the Cape Wrath Trail"
-                aria-required="true"
-                aria-describedby={formErrors.name ? 'pack-name-error' : undefined}
-                aria-invalid={formErrors.name ? 'true' : undefined}
-                class="field mt-1 w-full"
-              />
-              {
-                formErrors.name && (
-                  <p id="pack-name-error" class="field-error">
-                    {formErrors.name}
-                  </p>
-                )
-              }
-            </div>
-            <button type="submit" class="btn btn-primary shrink-0"> Create pack </button>
-          </div>
-        </form>
+        <header class="flex items-start justify-between gap-6">
+          <h1 class="page-title">Your packs</h1>
+          {
+            /* A LINK, NOT A BUTTON, and that is Modal.astro's rule rather than a
+               preference: it upgrades `<a href>` triggers and refuses anything else, so
+               that the control still does something when the upgrade never happens. With
+               JavaScript off this navigates to `/packs?new`, which renders the same dialog
+               already open. It used to be a submit button for the inline form this
+               replaces. */
+          }
+          <a
+            href={packCreateHref()}
+            data-modal-open={CREATE_DIALOG_ID}
+            class="btn btn-primary shrink-0"
+          >
+            Create pack
+          </a>
+        </header>
       </div>
     </div>
 
@@ -274,5 +268,27 @@ const listIsEmpty = !loadError && packs.length === 0;
         </div>
       )
     }
+
+    {
+      /* LAST IN THE DOCUMENT, AND OUTSIDE EVERY SHEET. A presented <dialog> sits in the
+         top layer, so where it appears in the flow does not affect where it is drawn — but
+         it does affect the no-JS fallback, which renders in place as an ordinary sheet.
+         After the list is the right place for that: the visitor has the page they asked
+         for, with the form beneath it, rather than the form shoving the list off-screen.
+
+         The form inside posts to this page with no `action`, so the POST branch at the top
+         of this file answers it — the same branch, and the same `parsePackForm`, that the
+         inline form used before it became this. */
+    }
+    <PackDetailsDialog
+      id={CREATE_DIALOG_ID}
+      open={showCreateDialog}
+      title="Create a pack"
+      values={formValues}
+      errors={formErrors}
+      writeError={writeError}
+      submitLabel="Create pack"
+      cancelHref={PACKS_PATH}
+    />
   </main>
 </Layout>

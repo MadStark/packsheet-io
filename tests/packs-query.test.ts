@@ -10,6 +10,7 @@ import {
   PACK_TREE_SELECT,
   loadPackForEdit,
   loadPackList,
+  packNoteFromEditRow,
   type PackTreeRow,
 } from '../src/lib/packs/query';
 // The reorder engine and the RPC wrappers, because the read-back assertion below has to
@@ -17,7 +18,15 @@ import {
 // directly: a test that sets `position` by hand proves the ORDER BY works and says nothing
 // about whether a real drag ends up ordered the way it was left.
 import { planCategoryMove, planItemMove } from '../src/lib/packs/reorder';
-import { movePackCategory, movePackItem } from '../src/lib/packs/mutations';
+// Aliased: this file already imports a `createPack` fixture helper from
+// `./support/fixtures` above, and the note round-trip test below needs the real RPC
+// wrapper instead — see that test's own comment for why.
+import {
+  createPack as createPackWithNote,
+  movePackCategory,
+  movePackItem,
+} from '../src/lib/packs/mutations';
+import type { PackInput } from '../src/lib/packs/form';
 import { computeTotals, type PackTotals } from '../src/lib/totals';
 
 /**
@@ -408,6 +417,65 @@ describe('loadPackForEdit: a pack with no categories', () => {
     expect(data).not.toBeNull();
     expect(data?.id).toBe(pack.id);
     expect(data?.pack_categories).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadPackForEdit — the private note round-trips through packNoteFromEditRow (PK-72)
+// ---------------------------------------------------------------------------
+//
+// The unwrap this proves belongs to `src/lib/packs/query.ts` now, not to
+// `src/pages/packs/[id].astro`'s frontmatter (PK-72's independent review) — `vitest.
+// config.ts` excludes `src/pages/**` from the run, so a page-level
+// `pack.pack_notes[0]?.notes` had no test able to catch a schema change turning that embed
+// into something other than a one-element array. Built through `createPack` (aliased
+// `createPackWithNote` above) from `src/lib/packs/mutations.ts` — the real RPC the pack
+// details dialog posts to — rather than by inserting into `pack_notes` directly, for the
+// same "through the policies, not around them" reason `tests/packs-mutations.test.ts`'s
+// own fixture comment gives.
+describe('loadPackForEdit: the private note (PK-72)', () => {
+  it('comes back as the string a note was saved with, and as null when there is none', async () => {
+    const owner = await createUser('packs-query-note-owner');
+    const notedInput: PackInput = {
+      name: 'Noted pack',
+      description: null,
+      trip_type: null,
+      notes: 'Bring extra socks',
+    };
+    const bareInput: PackInput = {
+      name: 'Bare pack',
+      description: null,
+      trip_type: null,
+      notes: null,
+    };
+
+    const noted = await createPackWithNote(owner.client, notedInput);
+    expect(noted.error).toBeNull();
+    expect(noted.id).not.toBeNull();
+
+    const bare = await createPackWithNote(owner.client, bareInput);
+    expect(bare.error).toBeNull();
+    expect(bare.id).not.toBeNull();
+
+    const { data: notedRow, error: notedError } = await loadPackForEdit(
+      owner.client,
+      owner.id,
+      noted.id as string,
+    );
+    expect(notedError).toBeNull();
+    if (notedRow === null) throw new Error('expected the noted pack to load');
+    expect(packNoteFromEditRow(notedRow)).toBe('Bring extra socks');
+
+    const { data: bareRow, error: bareError } = await loadPackForEdit(
+      owner.client,
+      owner.id,
+      bare.id as string,
+    );
+    expect(bareError).toBeNull();
+    if (bareRow === null) throw new Error('expected the bare pack to load');
+    // NOT undefined, and not an empty-array artifact of the embed — exactly `null`, the
+    // one value `packToFormValues`/the dialog's textarea treat as "nothing written".
+    expect(packNoteFromEditRow(bareRow)).toBeNull();
   });
 });
 

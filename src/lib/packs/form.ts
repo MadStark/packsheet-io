@@ -162,6 +162,7 @@ export const PACK_FORM_FIELD = {
   name: 'name',
   description: 'description',
   tripType: 'trip_type',
+  notes: 'notes',
 } as const;
 
 /** The category form is one field wide. It is still a named constant rather than a bare
@@ -222,13 +223,25 @@ const CURRENCY_INVALID_MESSAGE = 'Enter a valid three-letter currency code, like
 // Shapes
 // ---------------------------------------------------------------------------
 
-/** A validated, ready-to-write pack. Every field has already passed the check mirroring its
- *  `packs` column, so a caller hands this straight to `createPack`/`updatePack` in
- *  `src/lib/packs/mutations.ts` without re-validating any of it. */
+/**
+ * A validated, ready-to-write pack. Every field has already passed the check mirroring its
+ * `packs` column, so a caller hands this straight to `createPack`/`updatePack` in
+ * `src/lib/packs/mutations.ts` without re-validating any of it.
+ *
+ * `notes` TRAVELS WITH THE OTHER THREE FIELDS EVEN THOUGH IT LANDS IN A DIFFERENT TABLE.
+ * `20260819000000_pack_notes.sql` keeps a pack's note off `packs` entirely, in an
+ * owner-only `pack_notes` row, because RLS filters ROWS, not COLUMNS: a `notes` column on
+ * `packs` would be handed over whole to `anon` the moment a pack is published, alongside
+ * `name` and `description`, by the same `packs_select_public` grant that makes those two
+ * public on purpose. One form, one validated shape, two destinations — `createPack` and
+ * `updatePack` (`src/lib/packs/mutations.ts`) are RPCs precisely so that writing both
+ * tables from one `PackInput` is one transaction.
+ */
 export interface PackInput {
   name: string;
   description: string | null;
   trip_type: string | null;
+  notes: string | null;
 }
 
 /** A validated pack category. One field, and it is required — see `parsePackCategoryForm`. */
@@ -291,6 +304,7 @@ export interface PackFormValues {
   name: string;
   description: string;
   trip_type: string;
+  notes: string;
 }
 
 export interface PackCategoryFormValues {
@@ -514,6 +528,7 @@ export function rawPackFormValues(form: FormData): PackFormValues {
     name: getFormString(form, PACK_FORM_FIELD.name),
     description: getFormString(form, PACK_FORM_FIELD.description),
     trip_type: getFormString(form, PACK_FORM_FIELD.tripType),
+    notes: getFormString(form, PACK_FORM_FIELD.notes),
   };
 }
 
@@ -593,9 +608,15 @@ export function parsePackForm(form: FormData): PackFormResult {
   // otherwise passed through untouched — not lowercased, not slugified, not checked.
   const tripType = parseOptionalText(values.trip_type);
 
+  // pairs with: pack_notes.notes text — nullable, no default, no CHECK, on a table this
+  // form's caller never queries directly (see PackInput's own comment). This field CANNOT
+  // produce a validation error, for the identical reason `description` cannot: an
+  // unbounded text column with nothing to reject beyond "blank means not provided".
+  const notes = parseOptionalText(values.notes);
+
   if (Object.keys(errors).length > 0) return { ok: false, errors, values };
 
-  return { ok: true, values: { name, description, trip_type: tripType } };
+  return { ok: true, values: { name, description, trip_type: tripType, notes } };
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +943,11 @@ export interface PackFormRow {
   name: string;
   description: string | null;
   trip_type: string | null;
+  /** From `pack_notes.notes`, not `packs`, joined in by whatever loads this row for
+   *  editing — see `PackInput`'s own comment for why the note lives on a different table
+   *  than the other three fields. `null` covers both "no note" and "no `pack_notes` row
+   *  at all", which is the only shape this table can be in: no row means no note. */
+  notes: string | null;
 }
 
 /** Turns a stored pack into the same `PackFormValues` a failed `parsePackForm` returns, so
@@ -933,6 +959,7 @@ export function packToFormValues(row: PackFormRow): PackFormValues {
     name: row.name,
     description: row.description ?? '',
     trip_type: row.trip_type ?? '',
+    notes: row.notes ?? '',
   };
 }
 
@@ -980,6 +1007,7 @@ export const EMPTY_PACK_FORM_VALUES: PackFormValues = {
   name: '',
   description: '',
   trip_type: '',
+  notes: '',
 };
 
 /** The blank state a "new category" form renders. One required field, no default. */

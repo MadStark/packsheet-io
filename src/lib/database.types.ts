@@ -195,6 +195,38 @@ export type Database = {
           },
         ]
       }
+      pack_notes: {
+        Row: {
+          created_at: string
+          notes: string | null
+          pack_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          notes?: string | null
+          pack_id: string
+          updated_at?: string
+          user_id?: string
+        }
+        Update: {
+          created_at?: string
+          notes?: string | null
+          pack_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pack_notes_user_id_pack_id_fkey"
+            columns: ["user_id", "pack_id"]
+            isOneToOne: false
+            referencedRelation: "packs"
+            referencedColumns: ["user_id", "id"]
+          },
+        ]
+      }
       packs: {
         Row: {
           created_at: string
@@ -260,6 +292,15 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_pack_with_defaults: {
+        Args: {
+          p_description: string
+          p_name: string
+          p_notes: string
+          p_trip_type: string
+        }
+        Returns: string
+      }
       delete_own_account: { Args: never; Returns: undefined }
       duplicate_pack: { Args: { p_pack_id: string }; Returns: string }
       move_pack_category: {
@@ -274,6 +315,16 @@ export type Database = {
           p_to_category_id: string
         }
         Returns: undefined
+      }
+      update_pack_details: {
+        Args: {
+          p_description: string
+          p_name: string
+          p_notes: string
+          p_pack_id: string
+          p_trip_type: string
+        }
+        Returns: number
       }
     }
     Enums: {

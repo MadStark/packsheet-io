@@ -1,8 +1,8 @@
 /**
  * Every write pack list composition (PK-37) performs: the pack itself, its categories, the
  * items inside them — closet references and one-off custom items alike — and thin wrappers
- * over the three RPCs `supabase/migrations/20260818000000_pack_composition_functions.sql`
- * adds.
+ * over the RPCs `supabase/migrations/20260818000000_pack_composition_functions.sql` and
+ * `20260819000000_pack_notes.sql` (PK-72) add.
  *
  * This module is `src/lib/gear/mutations.ts` for packs, and it is that deliberately. Read
  * that file first: its two rules are stated there at length and are binding here, and the
@@ -21,11 +21,13 @@
  * EVERY TABLE WRITE TAKES `client` AND `userId` AND SCOPES ITSELF TO THAT OWNER
  * ---------------------------------------------------------------------------
  *
- * TABLE writes — the three RPC wrappers at the bottom of this file take a `client` and no
- * `userId`, because there is no query for an owner filter to attach to and the migration's
- * own `where p.user_id = auth.uid() ... for update` is what authorises the call. That is
- * argued where those wrappers are, not here, so this section can stay about the rule rather
- * than about its one exception.
+ * TABLE writes — the RPC wrappers take a `client` and no `userId`, because there is no
+ * query for an owner filter to attach to and the migration's own `where p.user_id =
+ * auth.uid() ...` (`for update` where a row is locked) is what authorises the call. That
+ * now includes `createPack` and `updatePack` (PK-72) alongside `movePackItem`,
+ * `movePackCategory` and `duplicatePack` at the bottom of this file — five wrappers, all
+ * argued the same way where they are defined, not here, so this section can stay about the
+ * rule rather than about its exceptions.
  *
  * Row level security already confines every statement below to the caller's own rows.
  * `packs_update_own` / `packs_delete_own` (core_schema.sql:747-754),
@@ -111,7 +113,7 @@
  * ---------------------------------------------------------------------------
  *
  * IT COUNTS NOTHING BEFORE CREATING A PACK. There is no cap on how many packs an account
- * may have, and `createPack` issues one INSERT with no preceding SELECT. This is worth
+ * may have, and `createPack` issues one RPC call with no preceding SELECT. This is worth
  * stating because a limit is the kind of thing that gets added by reflex to a create path;
  * `tests/packs-mutations.test.ts` asserts the absence rather than leaving it true by
  * accident, so a cap introduced later fails a test instead of quietly shipping.
@@ -238,71 +240,100 @@ export interface PackDuplicateResult extends PackRpcResult {
 
 /**
  * Creates one pack. `values` is a `PackInput`, already validated by
- * `src/lib/packs/form.ts`, so nothing raw from a form reaches the column list here.
+ * `src/lib/packs/form.ts`, so nothing raw from a form reaches the RPC call here.
  *
- * NOTHING COUNTS THE EXISTING PACKS FIRST. See the module comment: there is no cap, this
- * function issues exactly one statement, and `tests/packs-mutations.test.ts` asserts the
- * absence of a limit rather than leaving it to be true by accident.
+ * AN RPC ON `create_pack_with_defaults`, NOT A PLAIN INSERT, since PK-72. Creating a pack
+ * is now five statements — the pack, its four default categories (`Packing`, `Sleep`,
+ * `Clothing`, `Cooking`), and a fifth for the note when one was typed — and a pack that
+ * exists without its four categories is not a reachable state this product allows. Five
+ * round trips from a browser are five transactions with four windows between them where a
+ * half-built pack could be read back; a PostgREST RPC is one request and therefore one
+ * transaction, which is the only way "one INSERT" used to be true here and is still true
+ * of this call.
  *
- * FIVE COLUMNS ARE DELIBERATELY NOT WRITTEN, and each has a reason that outlives this
- * function (the last two share one):
+ * NO `userId` PARAMETER, unlike the plain-INSERT version this replaces. There is nothing
+ * left for one to authorise: `create_pack_with_defaults` is `security invoker` and reads
+ * `auth.uid()` itself for every row it writes, so the identity a pack is created under is
+ * whichever `client` is authenticated as, not a value this function could be handed and
+ * asked to believe. See the migration's own comment and this module's header on the RPC
+ * wrappers below for the general form of that argument.
  *
- *   slug        Omitted so `packs.slug`'s own default mints a fresh opaque one
- *               (core_schema.sql:175). Deriving one from the name would leak the title of a
- *               pack that is private by default, which that column's comment argues at
- *               length; the same reasoning `duplicate_pack` follows.
- *   visibility  Omitted so the column's `default 'private'` applies. "A pack that becomes
- *               public does so because someone said so" — publishing is its own action, not
- *               a field on the create form.
- *   locked_at   Omitted, and `packs_insert_own` would refuse it anyway: its WITH CHECK
- *               requires `locked_at is null`, so a pack cannot be born frozen and then be
- *               permanently uneditable because every write policy on its children refuses a
- *               locked parent.
- *   created_at
- *   updated_at  Omitted so `set_row_timestamps` stamps them. These are the columns
- *               optimistic concurrency compares against, so a caller that can choose them
- *               can make a stale write look fresh.
+ * NOTHING COUNTS THE EXISTING PACKS FIRST. See the module comment: there is no cap, and
+ * `tests/packs-mutations.test.ts` asserts the absence of a limit rather than leaving it to
+ * be true by accident.
+ *
+ * `slug`, `visibility` AND `locked_at` ARE STILL NOT WRITTEN, for the reasons the migration
+ * gives at length: a fresh opaque slug rather than one derived from a name that is private
+ * by default, `default 'private'` because publishing is its own action, and a pack that
+ * cannot be born already frozen.
  */
 export async function createPack(
   client: PacksheetClient,
-  userId: string,
   values: PackInput,
 ): Promise<PackCreateResult> {
-  const { data, error } = await client
-    .from('packs')
-    .insert({ ...values, user_id: userId })
-    .select('id');
-  return { error, count: data?.length ?? 0, id: data?.[0]?.id ?? null };
+  const { data, error } = await client.rpc('create_pack_with_defaults', {
+    p_name: values.name,
+    // Cast, not a genuine narrowing: the migration declares all three as nullable `text`,
+    // and passes `null` straight through to an `insert`/`if … is not null` that is built to
+    // receive it, but `database.types.ts`'s generated `Args` type names every SQL function
+    // parameter `string` regardless of nullability — a gap in the generator, not a fact
+    // about the function. The migration is the source of truth for what the database
+    // accepts; this tells TypeScript what the generated type got wrong, the same way
+    // `p_runs: runs as unknown as Json` does below for a different generated-type gap.
+    p_description: values.description as string,
+    p_trip_type: values.trip_type as string,
+    p_notes: values.notes as string,
+  });
+  return { error, count: data ? 1 : 0, id: data ?? null };
 }
 
 /**
- * Saves an edit to one pack's own fields — name, description and trip type together, from
- * one validated `PackInput`.
+ * Saves an edit to one pack's own fields — name, description, trip type and note together,
+ * from one validated `PackInput`.
  *
- * ONE FUNCTION FOR THE WHOLE FORM, not three field setters, mirroring `updateGearItem`.
- * The three fields are edited by one form and submitted together, so splitting them would
- * make one save into three round trips with three chances to half-apply. The narrow setters
- * that DO exist below (`setPackTripType`, `setPackItemPacked`) exist because their control
- * is genuinely separate from any form — a picker in a header, a tick on a checklist.
+ * AN RPC ON `update_pack_details`, NOT A PLAIN `.update()`, since PK-72. This form now
+ * saves two tables: `packs` for the first three fields, `pack_notes` for the fourth (see
+ * `PackInput`'s own comment on why the note lives on a different table). Two round trips
+ * from a browser have a window between them where the pack's name changed and its note did
+ * not, leaving the dialog's two halves disagreeing with nothing to tell the visitor which
+ * one landed. A PostgREST RPC is one request and therefore one transaction, which is what
+ * makes "one save" true of a form that now touches two tables.
  *
- * `.eq('user_id', userId)` AND `.eq('id', packId)`, never the id alone: an id is guessable,
- * and `packs_select_public` means a signed-in visitor can legitimately have been shown a
- * stranger's pack id. The owner filter is what ties this statement to the visitor the
- * caller actually authenticated — see the module comment.
+ * ONE FUNCTION FOR THE WHOLE FORM, not four field setters, mirroring `updateGearItem`. The
+ * narrow setters that DO exist below (`setPackTripType`, `setPackItemPacked`) exist because
+ * their control is genuinely separate from any form — a picker in a header, a tick on a
+ * checklist.
+ *
+ * NO `userId` PARAMETER, unlike the plain-`.update()` version this replaces, and for the
+ * same reason `createPack` above has none: `update_pack_details` is `security invoker` and
+ * its own first statement is the owner filter that used to sit here as `.eq('user_id',
+ * userId)`. A `userId` argument that disagreed with the client's own session could no
+ * longer change what gets written — only `auth.uid()` inside the function can — so keeping
+ * one would be exactly the parameter this module's header on the RPC wrappers warns
+ * against: documentation for something that does nothing.
+ *
+ * `count` IS THE INTEGER THE FUNCTION RETURNS, 0 on error, never the length of a `.select()`
+ * result — there is no row set here to measure, only the row count `update public.packs`
+ * reported inside the transaction. 0 means the pack is not the caller's or no longer
+ * exists; it is never a locked pack, since `packs_update_own` carries no `locked_at`
+ * clause.
  */
 export async function updatePack(
   client: PacksheetClient,
-  userId: string,
   packId: string,
   values: PackInput,
 ): Promise<PackMutationResult> {
-  const { data, error } = await client
-    .from('packs')
-    .update(values)
-    .eq('user_id', userId)
-    .eq('id', packId)
-    .select('id');
-  return { error, count: data?.length ?? 0 };
+  const { data, error } = await client.rpc('update_pack_details', {
+    p_pack_id: packId,
+    p_name: values.name,
+    // See createPack's identical cast, immediately above, for why: the generated Args type
+    // says `string`, the migration's signature says nullable `text`, and the migration is
+    // the one that is right.
+    p_description: values.description as string,
+    p_trip_type: values.trip_type as string,
+    p_notes: values.notes as string,
+  });
+  return { error, count: error ? 0 : (data ?? 0) };
 }
 
 /** Renames one pack. A single-field write for the inline rename on the pack header, which
