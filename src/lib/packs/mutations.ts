@@ -609,6 +609,51 @@ export async function addGearItemsToCategory(
   return { error, count: data?.length ?? 0 };
 }
 
+/**
+ * `addGearItemsToCategory`'s single-item sibling, for the one caller that already has
+ * per-list settings in hand and would otherwise lose them.
+ *
+ * WHY THIS EXISTS SEPARATELY RATHER THAN AS AN OPTIONAL PARAMETER ABOVE. That function's
+ * whole contract is N ids in, one append run, every row identical apart from `position` —
+ * that sameness is what makes "did the count come back right" the correct check for a bulk
+ * add, and it is also why it deliberately writes nothing about the gear itself (see its own
+ * comment's "RULE 1"). Per-item settings for exactly one row is a different shape of call,
+ * not an edge case of the bulk one. `quantity`/`worn`/`consumable`/`packed` are NOT "the gear
+ * itself" in the sense that comment means — they are `pack_items`' own per-list columns,
+ * already independent of whether a row is a reference or a snapshot — so writing them here
+ * does not reopen rule 1 at all.
+ *
+ * ITS ONLY CALLER, TODAY, is `src/pages/packs/[id].astro`'s "also add to closet" toggle
+ * (PK-74): the visitor has just filled in quantity, carriage and packed on the very form
+ * `settings` comes from, and routing the link through `addGearItemsToCategory` instead
+ * dropped all four to their column defaults — a value the visitor typed, silently discarded
+ * by the one call meant to honour it. See that page's own comment on the toggle for the fix
+ * this replaced.
+ */
+export async function addGearItemToCategoryWithSettings(
+  client: PacksheetClient,
+  userId: string,
+  categoryId: string,
+  gearItemId: string,
+  settings: PackItemInput,
+  position: number,
+): Promise<PackCreateResult> {
+  const { data, error } = await client
+    .from('pack_items')
+    .insert({
+      user_id: userId,
+      pack_category_id: categoryId,
+      gear_item_id: gearItemId,
+      quantity: settings.quantity,
+      worn: settings.worn,
+      consumable: settings.consumable,
+      packed: settings.packed,
+      position,
+    })
+    .select('id');
+  return { error, count: data?.length ?? 0, id: data?.[0]?.id ?? null };
+}
+
 // ---------------------------------------------------------------------------
 // Items: the one-off custom item
 // ---------------------------------------------------------------------------

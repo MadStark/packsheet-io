@@ -7,6 +7,8 @@ import {
   ADD_TO_PACK_TABS,
   ADD_TO_PACK_TAB_LABELS,
   ALSO_ADD_TO_CLOSET_VALUE,
+  CLOSET_COPY_FAILED_MESSAGE,
+  PACK_LINK_FAILED_MESSAGE,
   addToPackHref,
   alsoAddToClosetKey,
   customItemToGearInput,
@@ -443,5 +445,36 @@ describe('customItemToGearInput', () => {
     expect(gear.description).toBeNull();
     expect(gear.price).toBeNull();
     expect(gear.currency).toBeNull();
+  });
+});
+
+// THE TWO "ALSO ADD TO CLOSET" FAILURE MESSAGES, EACH ASSERTED ON ITS OWN — before this,
+// neither constant was named by any test, even though the two-write composition that reads
+// them (src/pages/packs/[id].astro) lives in page frontmatter this suite cannot reach at
+// all. These assertions are the part of that composition's correctness a test CAN reach:
+// the two sentences it chooses between are complete, distinct, and (for the link failure)
+// actually names the tab it sends the visitor to.
+describe('CLOSET_COPY_FAILED_MESSAGE / PACK_LINK_FAILED_MESSAGE', () => {
+  it('is a complete sentence naming no internal detail', () => {
+    expect(CLOSET_COPY_FAILED_MESSAGE.endsWith('.')).toBe(true);
+    expect(CLOSET_COPY_FAILED_MESSAGE.toLowerCase()).not.toMatch(/postgres|sql|constraint|rls/);
+    expect(PACK_LINK_FAILED_MESSAGE.endsWith('.')).toBe(true);
+    expect(PACK_LINK_FAILED_MESSAGE.toLowerCase()).not.toMatch(/postgres|sql|constraint|rls/);
+  });
+
+  // NOT INTERCHANGEABLE, AND THE MODULE'S OWN HEADER ARGUES WHY AT LENGTH: one means nothing
+  // was written anywhere, the other means the item is sitting in the visitor's closet with
+  // no pack to show for it. Telling the visitor the wrong one of these two facts is worse
+  // than telling them neither, so nothing may collapse them to the same string by accident.
+  it('are two different sentences, because they answer two different questions about where the write got to', () => {
+    expect(CLOSET_COPY_FAILED_MESSAGE).not.toBe(PACK_LINK_FAILED_MESSAGE);
+  });
+
+  // QUOTES THE REAL TAB LABEL, NOT A HAND-TYPED COPY OF IT — so a renamed
+  // ADD_TO_PACK_TAB_LABELS.closet cannot leave this message pointing at a tab that no longer
+  // says what it claims. Asserted by construction rather than by re-typing the label here,
+  // which would only prove the two happened to agree on the day this test was written.
+  it('PACK_LINK_FAILED_MESSAGE names the real tab label the visitor is sent to, not a hand-typed copy of it', () => {
+    expect(PACK_LINK_FAILED_MESSAGE).toContain(ADD_TO_PACK_TAB_LABELS.closet);
   });
 });

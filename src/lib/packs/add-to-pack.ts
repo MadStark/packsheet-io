@@ -356,10 +356,15 @@ const ADD_TO_PACK_CLOSET_STATUS: GearStatus = 'owned';
  * function performs no validation and no conversion of its own; it is a reshaping, not a
  * second parse.
  *
- * `quantity`, `packed`, `worn` and `consumable` on `values` are NOT carried across: they
- * are `pack_items` per-list settings — how this one pack carries the item — and have no
+ * `packed`, `worn` and `consumable` on `values` are NOT carried across: they are
+ * `pack_items` per-list settings — how this one pack carries the item — and have no
  * counterpart on a closet row at all, which describes what is OWNED rather than how any
- * particular list carries it.
+ * particular list carries it. `quantity` IS carried (see the field list above): a closet row
+ * has to say how many are owned, and `GearItemInput.quantity` is a required field for
+ * exactly that reason — there is no default to fall back to that would not silently disagree
+ * with what the visitor typed. The three that are dropped land instead on the linked
+ * `pack_items` row itself, via `addGearItemToCategoryWithSettings`
+ * (`src/lib/packs/mutations.ts`) — see that function's own comment.
  */
 export function customItemToGearInput(values: CustomPackItemInput): GearItemInput {
   return {

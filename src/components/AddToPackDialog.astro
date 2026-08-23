@@ -55,7 +55,7 @@
 // ---------------------------------------------------------------------------
 //
 // With a script there is ONE dialog for every category, so "which category is this?" is a
-// question the markup cannot answer statically. It is answered in three places at once, all
+// question the markup cannot answer statically. It is answered in four places at once, all
 // rewritten together by `applyCategory` before the dialog opens: the heading (which is also
 // the dialog's ACCESSIBLE name, since `Modal.astro` labels it by its own `<h2>`), and the
 // hidden `category_id`/`add` input in each of the three forms.
@@ -141,11 +141,31 @@ interface Props {
   /** What the visitor typed into the new-item form, round-tripped by the server after a
    *  rejected submission. */
   customValues?: CustomPackItemFormValues;
-  /** The server's own field errors for that submission, keyed by field name. */
+  /** The server's own field errors for that submission, keyed by field name. Empty when the
+   *  submission was rejected for a reason other than validation — a write that failed after
+   *  parsing succeeded still rejects the submission, with nothing to say about any one field.
+   *  NOT a signal that this isn't a round trip; see `serverOwnsToggle` below, which used to be
+   *  inferred from this being non-empty and was wrong on exactly that path. */
   customErrors?: Readonly<Record<string, string>>;
-  /** Whether that rejected submission had "also add to closet" ticked. Only meaningful
-   *  alongside a non-empty `customErrors` — see the marker attribute below. */
+  /** Whether that rejected submission had "also add to closet" ticked. */
   alsoAddToCloset?: boolean;
+  /** Whether THIS render is answering a rejected submission at all, so `alsoAddToCloset`
+   *  above is the visitor's own recent choice rather than nothing — see the marker attribute
+   *  below for what reading this wrong costs. The page sets it at exactly the two places it
+   *  sets `alsoAddToCloset` to something meaningful; it does not follow from `customErrors`
+   *  being non-empty; a write failure with `also add to closet` ticked rejects the submission
+   *  with no field errors at all. */
+  serverOwnsToggle?: boolean;
+  /** A write failure that reopened this exact dialog — the "also add to closet" toggle's two
+   *  ways of failing (`CLOSET_COPY_FAILED_MESSAGE`, `PACK_LINK_FAILED_MESSAGE`), or any other
+   *  future failure this dialog's own POST branches want to explain in place. MUST be shown
+   *  INSIDE the dialog, not only in the page's own `writeError` note: once this render also
+   *  sets `open`, `Modal`'s `showModal()` puts the dialog in the top layer over a backdrop,
+   *  and the page-level note sits behind it — genuinely invisible, not merely dimmed, to any
+   *  visitor whose script ran. A message computed correctly and never delivered is the exact
+   *  shape of bug this prop exists to close; see the page's own comment at the call site for
+   *  why the two failure branches were shipped without it and how that was found. */
+  notice?: string | null;
 }
 
 const {
@@ -165,6 +185,8 @@ const {
   customValues = EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES,
   customErrors = {},
   alsoAddToCloset = false,
+  serverOwnsToggle = false,
+  notice = null,
 } = Astro.props;
 
 // The category the dialog opens on. `categoryId` is null whenever the URL named none — a
@@ -178,14 +200,8 @@ const activeCategoryName = activeCategory?.name ?? 'this pack';
 
 const entryUnit = WEIGHT_ENTRY_UNIT[weightSystem];
 
-const closetList = closetListState(closetItems.length, closetSearch);
+const closetList = closetListState(closetItems.length, closetSearch, closetError);
 const pager = pagerState(closetPage, closetTotalPages);
-
-// WHETHER THE SERVER HAS AN OPINION ABOUT THE TOGGLE. Errors present means this render is a
-// round trip of a rejected submission, so the checkbox on screen is the visitor's own choice
-// and the remembered value must not be applied over it. See
-// `ADD_TO_PACK_REMEMBER_ATTRIBUTE` for the bug that stops.
-const serverOwnsToggle = Object.keys(customErrors).length > 0;
 
 const tabId = (one: AddToPackTab): string => `${ADD_TO_PACK_MODAL_ID}-tab-${one}`;
 const panelId = (one: AddToPackTab): string => `${ADD_TO_PACK_MODAL_ID}-panel-${one}`;
@@ -223,6 +239,26 @@ const ERROR_CLASS = 'field-error';
     }}
   >
     {
+      /* ABOVE THE TAB STRIP, NOT INSIDE A PANEL, because a write failure can reopen this
+        dialog on EITHER tab (a closet-write failure reopens on "New item"; a pack-link
+        failure reopens on "From closet" — see the page's own comment on why) and the
+        visitor must see the explanation regardless of which one it lands on. See the
+        `notice` prop's own doc comment for why this exists at all: the page's OWN
+        `writeError` note is not enough once this render also sets `open` — it sits behind
+        the backdrop `showModal()` puts up, genuinely invisible rather than merely dimmed. */
+    }
+    {
+      notice && (
+        <p
+          role="alert"
+          class="field-error mb-4"
+          {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.notice }}
+        >
+          {notice}
+        </p>
+      )
+    }
+    {
       /* THE TAB STRIP IS THE SEGMENTED CONTROL (§6): a choice of two, so one control split by
         an ink divider rather than a stack of anything. The selected state is `aria-selected`
         — the attribute the tab pattern already requires — with the fill hung off it as a
@@ -231,9 +267,18 @@ const ERROR_CLASS = 'field-error';
 
         REAL LINKS, WITH `role="tab"`. With no script, activating one navigates to the same
         dialog on the same category with the other tab open, which is the only way this can
-        work at all without one. The roving `tabindex` and the arrow keys are the script's;
-        without it the two are ordinary sequential links, which is the correct fallback rather
-        than a broken tab strip. */
+        work at all without one. The arrow keys are the script's; without it the two are
+        ordinary sequential links, which is the correct fallback rather than a broken tab
+        strip.
+
+        BOTH TABS ARE `tabindex="0"` HERE — NOT THE ROVING `-1`/`0` PAIR THE ARIA TAB PATTERN
+        USES. Roving tabindex is a script's job: it exists so arrow keys, not Tab, move
+        between tabs, and nothing renders it without a script to maintain it. Shipping the
+        `-1` half of that pattern from the server would remove the inactive tab from the Tab
+        order and leave no other way to reach it — a real, no-script keyboard dead end,
+        caught in review, not a nicety. `initAddToPackDialog` applies the true roving pair
+        the instant it runs (see its own comment), so a scripted visitor sees the canonical
+        pattern immediately and a script-less one gets two ordinary, reachable links. */
     }
     <div role="tablist" aria-label="Where this item comes from" class="segmented">
       {
@@ -244,7 +289,7 @@ const ERROR_CLASS = 'field-error';
             role="tab"
             aria-selected={one === tab ? 'true' : 'false'}
             aria-controls={panelId(one)}
-            tabindex={one === tab ? 0 : -1}
+            tabindex={0}
             class="segment aria-selected:bg-ink aria-selected:text-paper no-underline"
             {...{
               [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.tab,

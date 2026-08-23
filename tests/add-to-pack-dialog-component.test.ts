@@ -242,7 +242,13 @@ describe('the tab strip', () => {
     ]);
   });
 
-  it('gives the selected tab the only tabindex of 0, which is what keeps one Tab press from walking through both tabs', async () => {
+  // BOTH TABS ARE tabindex="0" ON THE SERVER, DELIBERATELY, and this is the fix for a real
+  // bug: an earlier version rendered the roving `-1`/`0` pair here, which without a script
+  // removed the inactive tab from the Tab order entirely — a keyboard visitor with no script
+  // running had no way to reach "New item" (or "From closet") at all. Roving tabindex is a
+  // script's job (see `initAddToPackDialog`'s own comment); the server's job is to make sure
+  // a script-less visitor can reach both tabs, which `tabindex="0"` on both does.
+  it('GIVES BOTH TABS tabindex="0" ON THE SERVER, so a script-less visitor can Tab to either one — an earlier version rendered the roving pair here and made the inactive tab unreachable by keyboard with no script running', async () => {
     const doc = await render({ tab: 'new' });
     const state = parts(doc, ADD_TO_PACK_PART.tab).map((tab) => ({
       tab: tab.getAttribute(ADD_TO_PACK_TAB_ATTRIBUTE),
@@ -251,7 +257,7 @@ describe('the tab strip', () => {
     }));
 
     expect(state).toEqual([
-      { tab: 'closet', selected: 'false', tabindex: '-1' },
+      { tab: 'closet', selected: 'false', tabindex: '0' },
       { tab: 'new', selected: 'true', tabindex: '0' },
     ]);
   });
@@ -534,12 +540,13 @@ describe('the new-item tab', () => {
     expect(toggle?.closest('div')?.parentElement?.textContent).toContain('this browser');
   });
 
-  it('MARKS THE TOGGLE AS THE SERVER’S ONLY WHEN THE SERVER HAS AN OPINION, or a browser that cannot read localStorage would silently un-tick a box the visitor had just ticked', async () => {
+  it('MARKS THE TOGGLE AS THE SERVER’S ONLY WHEN serverOwnsToggle SAYS SO, or a browser that cannot read localStorage would silently un-tick a box the visitor had just ticked', async () => {
     const fresh = await render({ tab: 'new' });
     const roundTrip = await render({
       tab: 'new',
       alsoAddToCloset: true,
       customErrors: { name: 'Enter a name for this item.' },
+      serverOwnsToggle: true,
     });
 
     expect(part(fresh, ADD_TO_PACK_PART.toggle)?.hasAttribute(ADD_TO_PACK_REMEMBER_ATTRIBUTE)).toBe(
@@ -548,5 +555,31 @@ describe('the new-item tab', () => {
     const roundTripped = part(roundTrip, ADD_TO_PACK_PART.toggle);
     expect(roundTripped?.hasAttribute(ADD_TO_PACK_REMEMBER_ATTRIBUTE)).toBe(false);
     expect(roundTripped?.hasAttribute('checked')).toBe(true);
+  });
+
+  // THIS IS THE CASE `customErrors`-DRIVEN INFERENCE GOT WRONG. A write failure — the
+  // gear_items insert itself failing, after the submission had already validated — rejects
+  // the submission with `customErrors` still `{}`. Nothing about the shape of `customErrors`
+  // tells the dialog this was a round trip, so it needs `serverOwnsToggle` set explicitly
+  // by the page, independent of whether there happen to be any field errors.
+  it('MARKS THE TOGGLE AS THE SERVER’S ON A WRITE-FAILURE ROUND TRIP TOO, where customErrors stays empty because nothing about the submission failed to validate', async () => {
+    const writeFailureRoundTrip = await render({
+      tab: 'new',
+      alsoAddToCloset: true,
+      customErrors: {},
+      serverOwnsToggle: true,
+    });
+
+    const toggle = part(writeFailureRoundTrip, ADD_TO_PACK_PART.toggle);
+    expect(toggle?.hasAttribute(ADD_TO_PACK_REMEMBER_ATTRIBUTE)).toBe(false);
+    expect(toggle?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('DOES NOT MARK THE TOGGLE AS THE SERVER’S JUST BECAUSE alsoAddToCloset IS TRUE, absent serverOwnsToggle — an ordinary render must still apply what this browser remembered', async () => {
+    const ordinary = await render({ tab: 'new', alsoAddToCloset: true });
+
+    expect(
+      part(ordinary, ADD_TO_PACK_PART.toggle)?.hasAttribute(ADD_TO_PACK_REMEMBER_ATTRIBUTE),
+    ).toBe(true);
   });
 });

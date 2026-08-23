@@ -31,13 +31,17 @@ import {
   submissionAlsoAddsToCloset,
   type AddToPackTab,
 } from '../../lib/packs/add-to-pack';
-import { closetItemPayload } from '../../lib/packs/closet-response';
+import {
+  closetItemPayload,
+  closetTotalPages as closetTotalPagesFor,
+} from '../../lib/packs/closet-response';
 import { createAuthClient } from '../../lib/auth';
 import { readWeightSystem } from '../../lib/profile';
 import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
 import { PACKS_PATH, PACK_EDIT_PARAM, packEditHref, packPath } from '../../lib/packs/routes';
 import { loadPackForEdit, packNoteFromEditRow } from '../../lib/packs/query';
 import {
+  addGearItemToCategoryWithSettings,
   addGearItemsToCategory,
   createCustomPackItem,
   createPackCategory,
@@ -86,7 +90,6 @@ import PackDetailsDialog from '../../components/PackDetailsDialog.astro';
 // than belt-and-braces, and why the page clamp means an over-range `?page=` lands on the
 // last real page instead of replacing this whole editor with an error.
 import { gearQueryToSearchParams, loadGearCloset, parseGearQuery } from '../../lib/gear/query';
-import { GEAR_PAGE_SIZE } from '../../lib/gear/fields';
 // The delete gate itself, imported rather than re-spelled. PK-60's review (F1) found the
 // same two-step confirmation written inline in each of the two gear pages — two copies of
 // the only guard in front of an irreversible write, in the directory vitest.config.ts
@@ -223,11 +226,21 @@ let customValues: CustomPackItemFormValues = EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES;
  *  on why recovering a rejected submission is a server round trip here and never state a
  *  script put back. */
 let addToPackReopenCategoryId: string | null = null;
-/** And whether that submission had "Also add to closet" ticked. Only ever read alongside a
- *  non-empty `customErrors`: on an ordinary render the dialog's own script applies the value
- *  this browser last remembered instead, which is a `localStorage` fact the server has no
- *  way of knowing and deliberately does not store (see `src/lib/packs/add-to-pack.ts`). */
+/** And whether that submission had "Also add to closet" ticked. */
 let addToPackAlsoAddToCloset = false;
+/** Whether THIS render is answering a rejected submission at all, validation failure or
+ *  write failure alike — set at exactly the two places `addToPackAlsoAddToCloset` above is
+ *  set to something meaningful. `AddToPackDialog` needs this as its own signal rather than
+ *  inferring it from `customErrors` being non-empty, because a write failure (the
+ *  `gear_items` insert itself failing, below) rejects the submission with no field errors at
+ *  all — `customErrors` stays `{}` on that path. Driving the dialog's "the server has an
+ *  opinion" check off `customErrors` alone left that path indistinguishable from an ordinary
+ *  render, so a browser that cannot read `localStorage` (Safari private mode) would silently
+ *  un-tick the box the visitor had just ticked, right under a notice saying the closet write
+ *  failed. On an ordinary render this stays false and the dialog's own script applies
+ *  whatever this browser last remembered, which is a fact the server has no way of knowing
+ *  and deliberately does not store (see `src/lib/packs/add-to-pack.ts`). */
+let addToPackToggleIsServerOwned = false;
 /** Which tab a reopened dialog lands on. Defaults to "new" because that is where every
  *  ordinary rejection (a validation error, a write that failed before anything landed)
  *  belongs — the visitor is still mid-edit on that tab. The one exception is set explicitly
@@ -477,6 +490,7 @@ if (Astro.request.method === 'POST') {
         addToPackReopenCategoryId = categoryId;
       }
       addToPackAlsoAddToCloset = submissionAlsoAddsToCloset(form);
+      addToPackToggleIsServerOwned = true;
     } else if (categoryId === null || position === null) {
       writeError = CATEGORY_MISSING_MESSAGE;
       customValues = rawCustomPackItemFormValues(form);
@@ -511,12 +525,21 @@ if (Astro.request.method === 'POST') {
         customValues = rawCustomPackItemFormValues(form);
         addToPackReopenCategoryId = categoryId;
         addToPackAlsoAddToCloset = true;
+        addToPackToggleIsServerOwned = true;
       } else {
-        const { error: linkError, count: linkCount } = await addGearItemsToCategory(
+        // addGearItemToCategoryWithSettings, NOT addGearItemsToCategory. The visitor just
+        // filled in quantity, carriage and packed on this exact form; the bulk closet-add
+        // function two lines up in this file (the picker's own call) writes none of those,
+        // because that call has never had settings to carry — nobody types quantity for a
+        // multi-select. This one does, and dropping them here would silently disagree with
+        // what was just typed. See that function's own comment for why it is a sibling
+        // rather than an optional parameter on the bulk one.
+        const { error: linkError, count: linkCount } = await addGearItemToCategoryWithSettings(
           client,
           user.id,
           categoryId,
-          [gearItem.id],
+          gearItem.id,
+          result.values,
           position,
         );
         if (linkError || linkCount !== 1) {
@@ -729,7 +752,13 @@ const {
   count: closetCount,
   page: closetPage,
 } = await loadGearCloset(client, user.id, pickerQuery);
-const closetTotalPages = Math.max(1, Math.ceil(closetCount / GEAR_PAGE_SIZE));
+// `closetTotalPages` FROM `closet-response.ts`, NOT HAND-ROLLED HERE. The endpoint's own
+// pager arithmetic is that exact function, called on the exact same `closetCount` this
+// server render just read; calling it again here rather than repeating
+// `Math.ceil(closetCount / GEAR_PAGE_SIZE)` is what makes the server-rendered pager and the
+// fetched one agree by construction instead of by two authors happening to write the same
+// formula the same way.
+const closetTotalPages = closetTotalPagesFor(closetCount);
 
 // The same page of rows, in the wire shape the dialog's own `fetch` answers with — one
 // reshaping of one read, so the server render and every fetched render after it are the same
@@ -767,10 +796,19 @@ const closetPayloadItems = closetItems.map(closetItemPayload);
  * whichever tab actually has something in it, decided fresh here against the closet this
  * request read.
  */
+// A FAILED READ MUST NOT LOOK LIKE AN EMPTY CLOSET TO THE DEFAULT-TAB DECISION EITHER.
+// `closetCount` is 0 on a failed `loadGearCloset` call exactly as it would be for a
+// genuinely empty closet, and `defaultAddToPackTab(0)` cannot tell those apart — so an
+// unlucky read would open a visitor with a full closet on "New item" under a false "Your
+// closet is empty" (see `closetListState`'s own `failed` parameter for the other half of
+// this same fix). Treating a failed read as non-empty here defaults to "From closet"
+// instead, which is the tab whose own status region already explains what went wrong,
+// rather than the tab that would otherwise lie about the account.
+const addToPackDefaultTabCount = closetError ? 1 : closetCount;
 const addToPackRequest = parseAddToPackRequest(
   Astro.url.searchParams,
   categories.map((category) => category.id),
-  closetCount,
+  addToPackDefaultTabCount,
 );
 const addToPackCategoryId = addToPackReopenCategoryId ?? addToPackRequest.categoryId;
 const addToPackTab: AddToPackTab =
@@ -1021,6 +1059,8 @@ const CANCEL_LINK_CLASS = 'btn';
           customValues={customValues}
           customErrors={customErrors}
           alsoAddToCloset={addToPackAlsoAddToCloset}
+          serverOwnsToggle={addToPackToggleIsServerOwned}
+          notice={addToPackReopenCategoryId !== null ? writeError : null}
         />
       )
     }

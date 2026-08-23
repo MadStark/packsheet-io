@@ -3,7 +3,11 @@ import { createAuthClient } from '../../lib/auth';
 import { NEXT_PARAM, SIGN_IN_PATH } from '../../lib/auth-routes';
 import { loadGearCloset } from '../../lib/gear/query';
 import { parseClosetQuery } from '../../lib/packs/closet-request';
-import { CLOSET_LOAD_FAILED_MESSAGE, closetPagePayload } from '../../lib/packs/closet-response';
+import {
+  CLOSET_LOAD_FAILED_MESSAGE,
+  closetFailurePayload,
+  closetPagePayload,
+} from '../../lib/packs/closet-response';
 
 // On-demand: this endpoint requires a session and reads gear_items under the caller's own
 // client — neither of which a prerendered file can do. Like src/pages/packs/reorder.ts, it
@@ -98,7 +102,7 @@ export const GET: APIRoute = async ({ locals, cookies, request, url, redirect })
   const headers = { 'content-type': 'application/json', 'cache-control': 'private, no-store' };
 
   if (error) {
-    return new Response(JSON.stringify({ ok: false, message: CLOSET_LOAD_FAILED_MESSAGE }), {
+    return new Response(JSON.stringify(closetFailurePayload(CLOSET_LOAD_FAILED_MESSAGE)), {
       status: 500,
       headers,
     });

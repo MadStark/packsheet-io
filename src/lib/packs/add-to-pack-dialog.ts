@@ -64,6 +64,7 @@ import { PACK_EDITOR_FIELD } from './editor';
 import { PACK_CLOSET_PATH } from './routes';
 import {
   CLOSET_LOAD_FAILED_MESSAGE,
+  CLOSET_SIGNED_OUT_MESSAGE,
   type ClosetItemPayload,
   type ClosetPagePayload,
 } from './closet-response';
@@ -84,7 +85,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * ONE ATTRIBUTE NAME, NOT FIFTEEN. Every element this module needs to find is marked
+ * ONE ATTRIBUTE NAME, NOT ONE PER PART. Every element this module needs to find is marked
  * `data-add-to-pack="<part>"`, so the component's markup and this module's selectors join on
  * a single name plus the `ADD_TO_PACK_PART` table below. The alternative — one bespoke
  * `data-` attribute per part — is fifteen strings that can each drift on their own, and
@@ -100,8 +101,8 @@ import {
 export const ADD_TO_PACK_PART_ATTRIBUTE = 'data-add-to-pack';
 
 export const ADD_TO_PACK_PART = {
-  /** The one element wrapping the dialog's body, carrying the three configuration
-   *  attributes below. */
+  /** The one element wrapping the dialog's body, carrying the configuration attributes
+   *  below (path, user, weight system, page, total pages). */
   root: 'root',
   /** Every place the acting category's NAME is displayed. With JavaScript one dialog serves
    *  every category, so this text is rewritten before the dialog opens — which is also what
@@ -140,6 +141,11 @@ export const ADD_TO_PACK_PART = {
   status: 'status',
   /** The "also add to closet" checkbox. */
   toggle: 'toggle',
+  /** The server's own explanation for why this exact dialog reopened with a failure — see
+   *  `AddToPackDialog`'s `notice` prop. Purely server-rendered; this module reads nothing
+   *  from it and writes nothing to it, unlike every other part in this table. It is marked
+   *  anyway so a test can find it the same way it finds everything else here. */
+  notice: 'notice',
 } as const;
 
 export type AddToPackPart = (typeof ADD_TO_PACK_PART)[keyof typeof ADD_TO_PACK_PART];
@@ -279,8 +285,10 @@ export const CLOSET_ROW_NO_BRAND = '—';
 /**
  * The URL one page of the closet is fetched from. Defaults are OMITTED rather than written
  * out — no `q=` for an empty search, no `page=1` — which mirrors `gearQueryToSearchParams`'s
- * own behaviour and keeps the fetched URL identical to the one the no-script GET form
- * navigates to, so the two paths cannot answer differently.
+ * own behaviour and keeps this URL's QUERY STRING identical to the one the no-script GET
+ * form navigates to (the two differ only in which path they target — this one goes straight
+ * to `PACK_CLOSET_PATH`, the form's own `action` is the pack page itself), so the two paths
+ * cannot answer a search differently.
  */
 export function closetRequestUrl(search: string, page: number): string {
   const params = new URLSearchParams();
@@ -313,15 +321,29 @@ export function closetPageHref(
   return `${packUrlPath}?${params.toString()}`;
 }
 
-/** What the list area says, and whether there is a list at all. Two empty states, never one
- *  — see `CLOSET_EMPTY_MESSAGE`. */
+/**
+ * What the list area says, and whether there is a list at all. Two empty states, never one —
+ * see `CLOSET_EMPTY_MESSAGE` — and now a third that is not an empty state at all.
+ *
+ * `failed`, DEFAULTED `false` FOR THE ORDINARY CALLER, BUT LOAD-BEARING WHEN TRUE. A closet
+ * READ can fail with no `fetch` involved at all — the server's own `loadGearCloset` call, on
+ * the very first render — and until this parameter existed, that failure produced `itemCount
+ * = 0` with nothing to say it was a failure rather than a fact. The caller ALSO renders its
+ * own "something went wrong" status alongside this (`AddToPackDialog.astro`'s `closetError`
+ * prop), so this function's job on that path is narrower than "explain the failure" — it is
+ * "say nothing false while something else explains it". A confident, specific, WRONG
+ * sentence ("Your closet is empty") is worse than an absent one: it invites retyping gear
+ * the visitor already owns as a one-off item, which is a real write, not merely a bad
+ * screen.
+ */
 export function closetListState(
   itemCount: number,
   search: string,
+  failed = false,
 ): { readonly hasItems: boolean; readonly emptyMessage: string } {
   return {
     hasItems: itemCount > 0,
-    emptyMessage: search === '' ? CLOSET_EMPTY_MESSAGE : CLOSET_NO_MATCHES_MESSAGE,
+    emptyMessage: failed ? '' : search === '' ? CLOSET_EMPTY_MESSAGE : CLOSET_NO_MATCHES_MESSAGE,
   };
 }
 
@@ -438,24 +460,38 @@ export function readClosetResponse(
   redirected: boolean,
   body: unknown,
 ): ClosetFetchOutcome {
+  // CHECKED FIRST, AHEAD OF EVERYTHING ELSE BELOW — a followed redirect is a 200 carrying a
+  // sign-in page's HTML, which every other branch here would otherwise have to fail to reach
+  // by accident rather than by design. See `CLOSET_SIGNED_OUT_MESSAGE`'s own comment for why
+  // this must be its own sentence rather than falling through to the generic one: "try
+  // again" is wrong advice for an expired session.
+  if (redirected) return { kind: 'failed', message: CLOSET_SIGNED_OUT_MESSAGE };
   if (typeof body === 'object' && body !== null) {
     const payload = body as { ok?: unknown; message?: unknown; items?: unknown };
     if (payload.ok === false && typeof payload.message === 'string' && payload.message !== '') {
       return { kind: 'failed', message: payload.message };
     }
     if (
-      !redirected &&
       status === 200 &&
       payload.ok === true &&
       Array.isArray(payload.items) &&
       payload.items.every(isClosetItem)
     ) {
       const page = body as unknown as ClosetPagePayload;
-      if (
-        Number.isFinite(page.page) &&
-        Number.isFinite(page.totalPages) &&
-        Number.isFinite(page.totalCount)
-      ) {
+      // `Number.isSafeInteger`, NOT `Number.isFinite` — `reorder-response.ts` makes this
+      // argument at length for the identical shape of value: `isFinite` admits `0.5`, `-3`
+      // and `2 ** 60`, none of which any correct server sends. A `page: 1.5` that slipped
+      // past a looser guard renders "Page 1.5 of 3", advances to `2.5` on Next, and the
+      // pager's own click handler (`!Number.isInteger(page)`) then silently refuses every
+      // further click — a dead pager with a nonsense label and nothing reported, rather
+      // than the clean fall-through to `CLOSET_LOAD_FAILED_MESSAGE` this guard produces
+      // instead. `totalCount` and `position`-like `page`/`totalPages` all share the same
+      // "whole number, non-negative" shape a real server can only ever send.
+      const isCount = (value: unknown): value is number =>
+        Number.isSafeInteger(value) && (value as number) >= 0;
+      const isPageNumber = (value: unknown): value is number =>
+        Number.isSafeInteger(value) && (value as number) >= 1;
+      if (isPageNumber(page.page) && isPageNumber(page.totalPages) && isCount(page.totalCount)) {
         return { kind: 'page', payload: page };
       }
     }
@@ -666,6 +702,19 @@ export function initAddToPackDialog(
        that is true for a screen reader as well as for a sighted visitor. */
     for (const element of panels) element.hidden = tabValue(element) !== tab;
   };
+
+  // ESTABLISHES THE ROVING TABINDEX THE INSTANT THIS SCRIPT RUNS. The server deliberately
+  // does NOT render it — see `AddToPackDialog.astro`'s own comment on why both tabs must be
+  // real, reachable Tab stops with no script — so without this call a scripted visitor would
+  // keep the no-script "every tab reachable" state forever, and arrow-key navigation between
+  // tabs would still work (it does not depend on tabindex) while Tab itself stopped at both.
+  // Reading the currently-selected tab off the server's own `aria-selected` rather than
+  // assuming one, because the server can open this dialog on either tab (a direct `?tab=`
+  // visit, or a reopened "From closet" recovery after a pack-link failure — see the page's
+  // own comment on that branch).
+  const initialTab = tabs.find((element) => element.getAttribute('aria-selected') === 'true');
+  const initialTabValue = initialTab === undefined ? null : tabValue(initialTab);
+  if (initialTabValue !== null) activateTab(initialTabValue, false);
 
   for (const element of tabs) {
     element.addEventListener(
@@ -879,7 +928,13 @@ export function initAddToPackDialog(
   // 5. The remembered toggle
   // -------------------------------------------------------------------------
 
-  if (toggle !== null) {
+  // `userId !== ''` GUARDS BOTH CALLS BELOW, not just a defensive check. `alsoAddToClosetKey`
+  // keys the stored value by this string, and a MISSING `ADD_TO_PACK_USER_ATTRIBUTE` (a
+  // markup bug, not a browser limitation) would otherwise collapse every visitor on this
+  // browser onto the same key — the exact cross-account bleed that per-user key exists to
+  // prevent (see `src/lib/packs/add-to-pack.ts`'s own comment on it). An empty id means
+  // "remember nothing" rather than "remember it under a shared name".
+  if (toggle !== null && userId !== '') {
     // Only when the server has no opinion — see `ADD_TO_PACK_REMEMBER_ATTRIBUTE`. Neither
     // call can throw, whatever the browser's storage is doing.
     if (toggle.hasAttribute(ADD_TO_PACK_REMEMBER_ATTRIBUTE)) {

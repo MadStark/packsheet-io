@@ -5,7 +5,10 @@ import { MODAL_ATTRIBUTE, TRIGGER_ATTRIBUTE } from '../src/lib/modal';
 import { parseGearQuery } from '../src/lib/gear/query';
 import { PACK_EDITOR_FIELD } from '../src/lib/packs/editor';
 import { PACK_CLOSET_PATH } from '../src/lib/packs/routes';
-import { CLOSET_LOAD_FAILED_MESSAGE } from '../src/lib/packs/closet-response';
+import {
+  CLOSET_LOAD_FAILED_MESSAGE,
+  CLOSET_SIGNED_OUT_MESSAGE,
+} from '../src/lib/packs/closet-response';
 import {
   ADD_CATEGORY_PARAM,
   ADD_TAB_PARAM,
@@ -154,7 +157,7 @@ function markup(options: MarkupOptions = {}): string {
              role="tab" aria-selected="true" aria-controls="panel-closet" tabindex="0"
              ${part(ADD_TO_PACK_PART.tab)} ${ADD_TO_PACK_TAB_ATTRIBUTE}="closet">From closet</a>
           <a id="tab-new" href="${addToPackHref(PACK_PATH, FIRST_CATEGORY.id, 'new')}"
-             role="tab" aria-selected="false" aria-controls="panel-new" tabindex="-1"
+             role="tab" aria-selected="false" aria-controls="panel-new" tabindex="0"
              ${part(ADD_TO_PACK_PART.tab)} ${ADD_TO_PACK_TAB_ATTRIBUTE}="new">New item</a>
         </div>
 
@@ -463,6 +466,20 @@ describe('closetListState', () => {
     expect(closetListState(2, '').hasItems).toBe(true);
     expect(closetListState(0, '').hasItems).toBe(false);
   });
+
+  // A FAILED READ IS A THIRD STATE, NOT A THIRD SPELLING OF "EMPTY". `loadGearCloset`
+  // reports its own failure as `{ items: [], count: 0 }` — indistinguishable, by the numbers
+  // alone, from a genuinely empty closet — so without `failed`, this function had no way to
+  // avoid confidently telling a visitor with two hundred closet items that their closet was
+  // empty. Empty string, not a third message: `AddToPackDialog`'s own `closetError` status
+  // region already carries the real explanation, and a SECOND sentence here would either
+  // repeat it or contradict it the day one of the two is reworded.
+  it('SAYS NOTHING WHEN THE READ ITSELF FAILED, rather than borrowing the vocabulary of an empty closet for a fact that is not one', () => {
+    expect(closetListState(0, '', true).emptyMessage).toBe('');
+    expect(closetListState(0, 'tent', true).emptyMessage).toBe('');
+    // Not failed: the ordinary two messages are untouched by the new parameter's default.
+    expect(closetListState(0, '', false).emptyMessage).toBe(CLOSET_EMPTY_MESSAGE);
+  });
 });
 
 describe('closetCountLabel', () => {
@@ -553,10 +570,34 @@ describe('readClosetResponse', () => {
     expect(outcome).toEqual({ kind: 'failed', message: CLOSET_LOAD_FAILED_MESSAGE });
   });
 
-  it('TREATS A FOLLOWED REDIRECT AS A FAILURE, because a signed-out fetch lands on the sign-in page with a 200 and reporting that as an empty closet is the silent-empty-list bug', () => {
+  // THE MESSAGE IS `CLOSET_SIGNED_OUT_MESSAGE`, NOT THE GENERIC ONE — an earlier version of
+  // this function fell through to `CLOSET_LOAD_FAILED_MESSAGE` here, telling a visitor whose
+  // session had expired to "try again" at something that would fail identically forever.
+  // `closet.ts`'s own comment argues at length for the 303-over-401 choice specifically so a
+  // caller COULD tell "signed out" apart from "the read failed"; this is the test that
+  // proves the distinction survives to the sentence the visitor actually reads.
+  it('TREATS A FOLLOWED REDIRECT AS SIGNED OUT, with its own sentence — "try again" is wrong advice for a session that has expired', () => {
     const outcome = readClosetResponse(200, true, closetPage([], 1, 1, 0));
 
-    expect(outcome).toEqual({ kind: 'failed', message: CLOSET_LOAD_FAILED_MESSAGE });
+    expect(outcome).toEqual({ kind: 'failed', message: CLOSET_SIGNED_OUT_MESSAGE });
+  });
+
+  // `Number.isSafeInteger`, NOT `Number.isFinite` — an earlier version used the looser check
+  // and admitted a `page: 1.5` (or a negative one, or `2 ** 60`) through as a real page. A
+  // server that sends one of these is a bug on its own, but the guard's job is to make this
+  // function total over what it is HANDED, not just over what the server is supposed to
+  // send — the same argument `reorder-response.ts` makes for the identical shape of value.
+  it('REJECTS A NON-INTEGER OR NEGATIVE page/totalPages/totalCount, rather than rendering "Page 1.5 of 3" and a pager whose Next button then refuses every click', () => {
+    expect(readClosetResponse(200, false, closetPage(ROWS, 1.5, 3, 2)).kind).toBe('failed');
+    expect(readClosetResponse(200, false, closetPage(ROWS, -3, 3, 2)).kind).toBe('failed');
+    expect(readClosetResponse(200, false, closetPage(ROWS, 1, 2 ** 60, 2)).kind).toBe('failed');
+    expect(readClosetResponse(200, false, closetPage(ROWS, 1, 3, -1)).kind).toBe('failed');
+    expect(readClosetResponse(200, false, closetPage(ROWS, 0, 3, 2)).kind).toBe('failed');
+    // A real page still passes — the guard rejects the illegal shapes, not numbers in general.
+    expect(readClosetResponse(200, false, closetPage(ROWS, 1, 3, 2)).kind).toBe('page');
+    // `totalCount` may legitimately be 0 (an empty closet); `page`/`totalPages` may not, since
+    // `closetTotalPages` floors at 1 even for an empty result.
+    expect(readClosetResponse(200, false, closetPage([], 1, 1, 0)).kind).toBe('page');
   });
 
   it('never throws on a body it did not write — a proxy’s error page, a parse failure, a truncated payload — because an exception in an event handler is a dialog that silently stops responding', () => {
@@ -692,6 +733,27 @@ describe('the category the dialog is acting on', () => {
 });
 
 describe('the tabs', () => {
+  // THE SERVER RENDERS BOTH TABS AT tabindex="0" (see `markup()` above, which matches
+  // production) — an earlier version of this dialog rendered the roving `-1`/`0` pair
+  // server-side, which made the inactive tab unreachable by Tab for any visitor whose script
+  // never ran. `initAddToPackDialog` is what turns "both reachable" into the canonical
+  // roving pattern, and it has to do that BEFORE any interaction — a scripted visitor who
+  // never touches the tab strip should still see the ARIA-correct state, not the no-script
+  // fallback with a script attached.
+  it('ESTABLISHES THE ROVING TABINDEX ON MOUNT, before any click or key — the server deliberately does not render it, so nothing else would', () => {
+    render(markup());
+    // Confirm the fixture actually starts from the no-script state this test means to
+    // exercise, not from a value some other part of `start()` already happens to produce.
+    expect(tabFor('new').getAttribute('tabindex')).toBe('0');
+
+    start();
+
+    expect(tabFor('closet').getAttribute('tabindex')).toBe('0');
+    expect(tabFor('new').getAttribute('tabindex')).toBe('-1');
+    // Establishing the pattern must not steal focus — nothing has been interacted with yet.
+    expect(document.activeElement).not.toBe(tabFor('closet'));
+  });
+
   it('switches panels without navigating, keeping aria-selected, tabindex and hidden in step', () => {
     render(markup());
     start();
@@ -991,7 +1053,7 @@ describe('degrading when the fetch fails', () => {
     expect(find(ADD_TO_PACK_PART.status).textContent).toBe(CLOSET_LOAD_FAILED_MESSAGE);
   });
 
-  it('treats a session that expired mid-search as a failure with a way forward, not as a closet that has become empty', async () => {
+  it('treats a session that expired mid-search as signed out, not as a closet that has become empty — and tells the visitor to sign in rather than to retry', async () => {
     render(markup());
     const { fetchImpl, settle } = deferredFetch();
     start({ fetchImpl });
@@ -1003,7 +1065,7 @@ describe('degrading when the fetch fails', () => {
     settle[0]?.(closetPage([], 1, 1, 0), { redirected: true });
     await flush();
 
-    expect(find(ADD_TO_PACK_PART.status).textContent).toBe(CLOSET_LOAD_FAILED_MESSAGE);
+    expect(find(ADD_TO_PACK_PART.status).textContent).toBe(CLOSET_SIGNED_OUT_MESSAGE);
     expect(find(ADD_TO_PACK_PART.list).querySelectorAll('li')).toHaveLength(2);
   });
 });

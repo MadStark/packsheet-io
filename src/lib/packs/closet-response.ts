@@ -107,6 +107,16 @@ export interface ClosetSourceItem {
   readonly weight_grams: number;
 }
 
+/** Builds the failure payload from a message this module (or a caller passing one of its
+ *  constants) already produced. The one-line builder a caller could skip, and the reason it
+ *  does not: without it, the endpoint spelled `{ ok: false, message }` as an inline object
+ *  literal, which typechecks against `ClosetFailurePayload` structurally without ever
+ *  naming it — the interface existed but nothing in this module's own build path actually
+ *  went through it. This is that path. */
+export function closetFailurePayload(message: string): ClosetFailurePayload {
+  return { ok: false, message };
+}
+
 /** One closet row, reshaped into the wire field names the dialog reads. A pure
  *  reshaping, not a second parse — `weightGrams` is `weight_grams` carried straight
  *  across, unconverted, for the reason this module's header gives. */
@@ -152,8 +162,27 @@ export function closetPagePayload(
 // ---------------------------------------------------------------------------
 
 /** What `loadGearCloset`'s own read failure becomes for a visitor — never the
- *  `PostgrestError` itself, per this module's header. Covers the one query this
- *  endpoint issues, so there is only one failure to name: unlike `reorder.ts`, there is
- *  no write here to fail separately and no plan to distinguish an unreadable answer
- *  from. */
+ *  `PostgrestError` itself, per this module's header. Covers the one query this endpoint
+ *  issues, so there is only one DATABASE failure to name: unlike `reorder.ts`, there is no
+ *  write here to fail separately. There IS a second, non-database failure worth its own
+ *  sentence — see `CLOSET_SIGNED_OUT_MESSAGE` below — because "try again" is actively wrong
+ *  advice for it. */
 export const CLOSET_LOAD_FAILED_MESSAGE = 'Something went wrong loading your closet. Try again.';
+
+/**
+ * What a signed-out caller's answer becomes. `src/pages/packs/closet.ts` redirects a
+ * signed-out caller to sign-in rather than answering `{ ok: false }` — see that endpoint's
+ * own comment for why a 303 is the right shape for a `fetch` caller. A `fetch` follows the
+ * redirect and lands on a 200 carrying the sign-in page's HTML, which is neither `{ ok:
+ * true }` nor `{ ok: false }`, so `readClosetResponse` cannot reach this string on its own;
+ * it is reachable only via the `redirected` flag `fetch` sets, checked FIRST and ahead of
+ * every other branch.
+ *
+ * A SEPARATE SENTENCE FROM `CLOSET_LOAD_FAILED_MESSAGE`, DELIBERATELY, and not a stylistic
+ * choice: "try again" is true advice for a transient database error and actively wrong
+ * advice for an expired session — retrying will fail identically until the visitor signs in
+ * again, and the dialog's own search box would otherwise keep inviting a retry that can
+ * never succeed.
+ */
+export const CLOSET_SIGNED_OUT_MESSAGE =
+  'Your session has expired, so your closet could not be loaded. Sign in again.';
