@@ -876,13 +876,11 @@ const CANCEL_LINK_CLASS = 'btn';
          set either signal, so this note still renders for all of them exactly as before. */
     }
     {
-      writeError &&
-        !showDetailsDialog &&
-        addToPackCategoryId === null && (
-          <div class="note note-danger" role="alert">
-            <p>{writeError}</p>
-          </div>
-        )
+      writeError && !showDetailsDialog && addToPackCategoryId === null && (
+        <div class="note note-danger" role="alert">
+          <p>{writeError}</p>
+        </div>
+      )
     }
 
     {
