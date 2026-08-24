@@ -128,3 +128,21 @@ export function packCreateHref(): string {
 export function packEditHref(id: string): string {
   return `${packPath(id)}?${PACK_EDIT_PARAM}`;
 }
+
+/**
+ * Where the add-to-pack dialog (PK-74) fetches one page of the signed-in visitor's
+ * closet from. An ACTION, not a page, on the same footing as `PACK_REORDER_PATH` above
+ * and for the same reason: it answers a GET and returns JSON, nobody navigates to it.
+ *
+ * UNDER `/packs`, DELIBERATELY, for the identical reason `PACK_REORDER_PATH` gives: the
+ * single prefix `src/middleware.ts` already treats as session-shaped covers this
+ * endpoint too, so it needs no entry of its own in `AUTH_ROUTE_PATHS`.
+ *
+ * IT SHADOWS `packPath('closet')`, AND THAT IS SAFE FOR THE SAME REASON
+ * `PACK_REORDER_PATH` IS. Astro resolves a static segment ahead of a dynamic one, so
+ * `/packs/closet` reaches the endpoint and never `/packs/[id]`, and the pack it would
+ * otherwise hide cannot exist: `packs.id` is a UUID, and the literal string `closet` is
+ * not one. See `PACK_REORDER_PATH`'s own comment for the full argument and where it is
+ * pinned in tests.
+ */
+export const PACK_CLOSET_PATH = '/packs/closet';
