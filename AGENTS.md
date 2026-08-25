@@ -8,6 +8,16 @@ astro dev --background
 
 Manage the background server with `astro dev stop`, `astro dev status`, and `astro dev logs`.
 
+### Local Supabase cleanup
+
+When you're done testing against a local Supabase stack (including one started in a worktree), tear it down with:
+
+```
+supabase stop --no-backup
+```
+
+`--no-backup` removes the containers, network, and data volumes together. Plain `docker rm`/`docker compose down`, or just deleting the worktree, leaves orphaned `supabase_db_*`, `supabase_storage_*`, and `supabase_edge_runtime_*` volumes and images behind — these accumulate across agent runs and are the main source of Docker disk bloat on this machine.
+
 ## Documentation
 
 Full documentation: https://docs.astro.build
