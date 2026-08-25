@@ -1,0 +1,773 @@
+---
+// The "add an item to this category" popup (PK-74) — the surface that replaces the pack
+// page's inline "Add to this pack" section, and the fourth of the five popups design
+// feedback asked for (`docs/design/DESIGN.md` §2.5).
+//
+// IT IS A MOVE, NOT A REWRITE. The copy, the field set, the two empty states and most of
+// the comments below come from `src/pages/packs/[id].astro`'s own section, which had them
+// right; what changes is where they live and that one dialog now serves every category
+// instead of two `<select>`s asking the visitor to name the category they had just clicked
+// beside.
+//
+// ---------------------------------------------------------------------------
+// EVERYTHING HERE WORKS WITH NO SCRIPT, AND THE SCRIPT ONLY EVER TAKES OVER
+// ---------------------------------------------------------------------------
+//
+// `src/lib/packs/add-to-pack-dialog.ts`'s header sets this out in full; the markup's share
+// of it is:
+//
+//   - THE TRIGGER (rendered by the page, not by this component) is
+//     `<a href={addToPackHref(packUrlPath, categoryId)} data-modal-open="add-to-pack" …>`.
+//     With no script it navigates and the page server-renders this dialog already open on
+//     that category, via `parseAddToPackRequest`. With one, `upgradeTrigger` cancels the
+//     navigation and opens it in place.
+//   - THE TABS are two real links carrying `?tab=`, so a visitor with no script switches
+//     tabs by navigating. They still carry the full ARIA tab pattern, because with a script
+//     they stop navigating and start behaving as tabs — and the pattern is what makes that
+//     honest to a screen reader either way.
+//   - THE CLOSET SEARCH is a real `<form method="GET">` and the pager is real `<a href>`
+//     links, both aimed at the pack page with `?add=`/`?tab=` preserved.
+//   - BOTH SUBMITS are real `<form method="POST">` to the pack page, each carrying its own
+//     `intent` and its own hidden category id. NOTHING IS SUBMITTED BY SCRIPT: a rejected
+//     POST is recovered by a server round trip that re-renders this dialog with `open` true,
+//     the visitor's values back in it and the server's errors beside the fields — never by
+//     form state cached in a variable a reload would disagree with.
+//
+// ---------------------------------------------------------------------------
+// TWO FORMS, ONE PER PANEL, AND THE SUBMIT BUTTON INSIDE ITS OWN PANEL
+// ---------------------------------------------------------------------------
+//
+// `Modal.astro`'s header shows the ordinary arrangement: one form in the default slot, the
+// submit button in `actions`, joined by `form="…"`. This dialog cannot use it, and for a
+// reason worth stating rather than working around: there are TWO forms with two different
+// intents, so a shared footer would need two buttons in it, both live, both looking like the
+// dialog's primary action while only one of them belongs to the panel showing. And the
+// ticket requires the "Also add to closet" toggle to sit BESIDE the Save button, which is a
+// statement about that one form and not about the dialog.
+//
+// So each panel owns its form and its own submit, the shell's `actions` slot is left unused,
+// and the inactive panel is `hidden` — the platform's "this subtree is not rendered", which
+// is what keeps its fields out of the tab order and its submit button unreachable. A
+// visually-hidden class would leave both.
+//
+// ---------------------------------------------------------------------------
+// THE CATEGORY IS VISIBLE, ANNOUNCED, AND CARRIED IN EVERY FORM
+// ---------------------------------------------------------------------------
+//
+// With a script there is ONE dialog for every category, so "which category is this?" is a
+// question the markup cannot answer statically. It is answered in four places at once, all
+// rewritten together by `applyCategory` before the dialog opens: the heading (which is also
+// the dialog's ACCESSIBLE name, since `Modal.astro` labels it by its own `<h2>`), and the
+// hidden `category_id`/`add` input in each of the three forms.
+
+import Modal from './Modal.astro';
+import {
+  ADD_CATEGORY_PARAM,
+  ADD_TAB_PARAM,
+  ADD_TO_PACK_FIELD,
+  ADD_TO_PACK_MODAL_ID,
+  ADD_TO_PACK_TABS,
+  ADD_TO_PACK_TAB_LABELS,
+  ALSO_ADD_TO_CLOSET_VALUE,
+  addToPackHref,
+  type AddToPackTab,
+} from '../lib/packs/add-to-pack';
+import {
+  ADD_TO_PACK_PAGE_ATTRIBUTE,
+  ADD_TO_PACK_PART,
+  ADD_TO_PACK_PART_ATTRIBUTE,
+  ADD_TO_PACK_PATH_ATTRIBUTE,
+  ADD_TO_PACK_REMEMBER_ATTRIBUTE,
+  ADD_TO_PACK_TAB_ATTRIBUTE,
+  ADD_TO_PACK_TOTAL_PAGES_ATTRIBUTE,
+  ADD_TO_PACK_USER_ATTRIBUTE,
+  ADD_TO_PACK_WEIGHT_SYSTEM_ATTRIBUTE,
+  CLOSET_ROW_CLASS,
+  CLOSET_ROW_NO_BRAND,
+  CLOSET_SEARCH_PARAM,
+  closetCountLabel,
+  closetListState,
+  closetPageHref,
+  pagerState,
+} from '../lib/packs/add-to-pack-dialog';
+import { CLOSET_LOAD_FAILED_MESSAGE, type ClosetItemPayload } from '../lib/packs/closet-response';
+import { PACK_EDITOR_FIELD, PACK_INTENT } from '../lib/packs/editor';
+import {
+  CUSTOM_PACK_ITEM_FORM_FIELD,
+  EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES,
+  type CustomPackItemFormValues,
+} from '../lib/packs/form';
+import {
+  PACK_ITEM_CARRIAGES,
+  PACK_ITEM_CARRIAGE_LABELS,
+  PACK_ITEM_CARRIAGE_MEANINGS,
+} from '../lib/packs/fields';
+import { WEIGHT_ENTRY_UNIT, formatWeight, type WeightSystem } from '../lib/units';
+
+interface Props {
+  /** `packPath(id)` — where every form posts, every link points and every fetch is measured
+   *  from. A path rather than a pack id, so this component never has to know how a pack's
+   *  URL is built. */
+  packUrlPath: string;
+  /** The pack's categories, `(id, name)` only. Used for the fallback when the URL names no
+   *  category, and for nothing else: the dialog is opened FOR a category rather than asking
+   *  the visitor to pick one from a list, which is the whole change this ticket makes. */
+  categories: readonly { readonly id: string; readonly name: string }[];
+  /** Which category the dialog is acting on, or `null` when the URL named none — the exact
+   *  shape `parseAddToPackRequest` returns, so the page passes its answer straight through. */
+  categoryId: string | null;
+  /** Which tab renders active. `parseAddToPackRequest`'s other half. */
+  tab: AddToPackTab;
+  /** Render the dialog already open, for a direct visit to `?add=…` and for the server round
+   *  trip after a rejected submission. See `Modal.astro` — this is a real `<dialog open>`. */
+  open?: boolean;
+  /** The signed-in visitor's id, for the per-user `localStorage` key the toggle remembers
+   *  itself under. Never used for authorisation of any kind. */
+  userId: string;
+  /** The visitor's weight system, because the closet endpoint answers in raw grams on
+   *  purpose and the browser is what formats them. */
+  weightSystem: WeightSystem;
+  /** The first page of the closet, already reshaped into the same wire type the endpoint
+   *  answers with — so the server render and the fetched render are the same shape. */
+  closetItems: readonly ClosetItemPayload[];
+  closetPage: number;
+  closetTotalPages: number;
+  closetTotalCount: number;
+  /** What the closet search box holds — the pack page's own `?q=`. */
+  closetSearch: string;
+  /** Whether the page's own closet read failed. A failure degrades to an empty picker with a
+   *  notice rather than to no dialog: the pack loaded, and the "New item" tab still works. */
+  closetError?: boolean;
+  /** What the visitor typed into the new-item form, round-tripped by the server after a
+   *  rejected submission. */
+  customValues?: CustomPackItemFormValues;
+  /** The server's own field errors for that submission, keyed by field name. Empty when the
+   *  submission was rejected for a reason other than validation — a write that failed after
+   *  parsing succeeded still rejects the submission, with nothing to say about any one field.
+   *  NOT a signal that this isn't a round trip; see `serverOwnsToggle` below, which used to be
+   *  inferred from this being non-empty and was wrong on exactly that path. */
+  customErrors?: Readonly<Record<string, string>>;
+  /** Whether that rejected submission had "also add to closet" ticked. */
+  alsoAddToCloset?: boolean;
+  /** Whether THIS render is answering a rejected submission at all, so `alsoAddToCloset`
+   *  above is the visitor's own recent choice rather than nothing — see the marker attribute
+   *  below for what reading this wrong costs. The page sets it at exactly the two places it
+   *  sets `alsoAddToCloset` to something meaningful; it does not follow from `customErrors`
+   *  being non-empty; a write failure with `also add to closet` ticked rejects the submission
+   *  with no field errors at all. */
+  serverOwnsToggle?: boolean;
+  /** A write failure that reopened this exact dialog — the "also add to closet" toggle's two
+   *  ways of failing (`CLOSET_COPY_FAILED_MESSAGE`, `PACK_LINK_FAILED_MESSAGE`), or any other
+   *  future failure this dialog's own POST branches want to explain in place. MUST be shown
+   *  INSIDE the dialog, not only in the page's own `writeError` note: once this render also
+   *  sets `open`, `Modal`'s `showModal()` puts the dialog in the top layer over a backdrop,
+   *  and the page-level note sits behind it — genuinely invisible, not merely dimmed, to any
+   *  visitor whose script ran. A message computed correctly and never delivered is the exact
+   *  shape of bug this prop exists to close; see the page's own comment at the call site for
+   *  why the two failure branches were shipped without it and how that was found. */
+  notice?: string | null;
+}
+
+const {
+  packUrlPath,
+  categories,
+  categoryId,
+  tab,
+  open = false,
+  userId,
+  weightSystem,
+  closetItems,
+  closetPage,
+  closetTotalPages,
+  closetTotalCount,
+  closetSearch,
+  closetError = false,
+  customValues = EMPTY_CUSTOM_PACK_ITEM_FORM_VALUES,
+  customErrors = {},
+  alsoAddToCloset = false,
+  serverOwnsToggle = false,
+  notice = null,
+} = Astro.props;
+
+// The category the dialog opens on. `categoryId` is null whenever the URL named none — a
+// closed dialog, or an `?add=` that `parseAddToPackRequest` refused because it belongs to no
+// category of this pack. Falling back to the first category keeps the heading a real
+// sentence and the hidden inputs a real id in that case; with a script, both are rewritten
+// before the dialog is ever shown.
+const activeCategory = categories.find((one) => one.id === categoryId) ?? categories[0] ?? null;
+const activeCategoryId = activeCategory?.id ?? '';
+const activeCategoryName = activeCategory?.name ?? 'this pack';
+
+const entryUnit = WEIGHT_ENTRY_UNIT[weightSystem];
+
+const closetList = closetListState(closetItems.length, closetSearch, closetError);
+const pager = pagerState(closetPage, closetTotalPages);
+
+const tabId = (one: AddToPackTab): string => `${ADD_TO_PACK_MODAL_ID}-tab-${one}`;
+const panelId = (one: AddToPackTab): string => `${ADD_TO_PACK_MODAL_ID}-panel-${one}`;
+const fieldId = (name: string): string => `${ADD_TO_PACK_MODAL_ID}-${name}`;
+const errorId = (name: string): string => `${fieldId(name)}-error`;
+
+const LABEL_CLASS = 'field-label';
+const INPUT_CLASS = 'field mt-1 w-full';
+const TEXTAREA_CLASS = 'field mt-1 w-full min-h-24';
+const ERROR_CLASS = 'field-error';
+---
+
+<Modal id={ADD_TO_PACK_MODAL_ID} open={open}>
+  {
+    /* THE HEADING IS THE DIALOG'S ACCESSIBLE NAME. `Modal.astro` sets `aria-labelledby` to
+      its own `<h2>` when no `label` prop is given, which is the case to prefer — a visible
+      name and an announced one that cannot drift apart. It is also why the category name is
+      a `<span>` the script rewrites rather than a second, hidden copy: rewriting the visible
+      text updates what a screen reader announces, with no second string to keep in step. */
+  }
+  <Fragment slot="title">
+    Add to <span {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.categoryName }}
+      >{activeCategoryName}</span
+    >
+  </Fragment>
+
+  <div
+    {...{
+      [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.root,
+      [ADD_TO_PACK_PATH_ATTRIBUTE]: packUrlPath,
+      [ADD_TO_PACK_USER_ATTRIBUTE]: userId,
+      [ADD_TO_PACK_WEIGHT_SYSTEM_ATTRIBUTE]: weightSystem,
+      [ADD_TO_PACK_PAGE_ATTRIBUTE]: String(closetPage),
+      [ADD_TO_PACK_TOTAL_PAGES_ATTRIBUTE]: String(closetTotalPages),
+    }}
+  >
+    {
+      /* ABOVE THE TAB STRIP, NOT INSIDE A PANEL, because a write failure can reopen this
+        dialog on EITHER tab (a closet-write failure reopens on "New item"; a pack-link
+        failure reopens on "From closet" — see the page's own comment on why) and the
+        visitor must see the explanation regardless of which one it lands on. See the
+        `notice` prop's own doc comment for why this exists at all: the page's OWN
+        `writeError` note is not enough once this render also sets `open` — it sits behind
+        the backdrop `showModal()` puts up, genuinely invisible rather than merely dimmed. */
+    }
+    {
+      notice && (
+        <p
+          role="alert"
+          class="field-error mb-4"
+          {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.notice }}
+        >
+          {notice}
+        </p>
+      )
+    }
+    {
+      /* THE TAB STRIP IS THE SEGMENTED CONTROL (§6): a choice of two, so one control split by
+        an ink divider rather than a stack of anything. The selected state is `aria-selected`
+        — the attribute the tab pattern already requires — with the fill hung off it as a
+        variant, so the script has exactly one thing to set and the paint follows it. There is
+        no second class for "active" that could disagree with what is announced.
+
+        REAL LINKS, WITH `role="tab"`. With no script, activating one navigates to the same
+        dialog on the same category with the other tab open, which is the only way this can
+        work at all without one. The arrow keys are the script's; without it the two are
+        ordinary sequential links, which is the correct fallback rather than a broken tab
+        strip.
+
+        BOTH TABS ARE `tabindex="0"` HERE — NOT THE ROVING `-1`/`0` PAIR THE ARIA TAB PATTERN
+        USES. Roving tabindex is a script's job: it exists so arrow keys, not Tab, move
+        between tabs, and nothing renders it without a script to maintain it. Shipping the
+        `-1` half of that pattern from the server would remove the inactive tab from the Tab
+        order and leave no other way to reach it — a real, no-script keyboard dead end,
+        caught in review, not a nicety. `initAddToPackDialog` applies the true roving pair
+        the instant it runs (see its own comment), so a scripted visitor sees the canonical
+        pattern immediately and a script-less one gets two ordinary, reachable links. */
+    }
+    <div role="tablist" aria-label="Where this item comes from" class="segmented">
+      {
+        ADD_TO_PACK_TABS.map((one) => (
+          <a
+            id={tabId(one)}
+            href={addToPackHref(packUrlPath, activeCategoryId, one)}
+            role="tab"
+            aria-selected={one === tab ? 'true' : 'false'}
+            aria-controls={panelId(one)}
+            tabindex={0}
+            class="segment aria-selected:bg-ink aria-selected:text-paper no-underline"
+            {...{
+              [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.tab,
+              [ADD_TO_PACK_TAB_ATTRIBUTE]: one,
+            }}
+          >
+            {ADD_TO_PACK_TAB_LABELS[one]}
+          </a>
+        ))
+      }
+    </div>
+
+    {
+      /* ---------------------------------------------------------------------
+        FROM CLOSET
+        --------------------------------------------------------------------- */
+    }
+    <div
+      id={panelId('closet')}
+      role="tabpanel"
+      aria-labelledby={tabId('closet')}
+      hidden={tab !== 'closet'}
+      {...{
+        [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.panel,
+        [ADD_TO_PACK_TAB_ATTRIBUTE]: 'closet',
+      }}
+    >
+      {
+        /* ONE REGION FOR BOTH WAYS THE CLOSET READ CAN FAIL — the page's own read, which is
+          what `closetError` reports, and a later `fetch` from the search box. `role="status"`
+          rather than `alert`: this is a report about a list, not an interruption, and it is
+          announced when it appears either way. The sentence is the endpoint's own, so a
+          visitor never reads two different descriptions of one failure — and never a raw
+          PostgREST string, per `src/lib/packs/form.ts`'s house rule. */
+      }
+      <p
+        role="status"
+        class={`${ERROR_CLASS} mt-4`}
+        hidden={!closetError}
+        {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.status }}
+      >
+        {closetError ? CLOSET_LOAD_FAILED_MESSAGE : ''}
+      </p>
+
+      {
+        /* A PLAIN GET FORM, so a search is a bookmarkable navigation and needs no script —
+          the same shape the closet's own filter bar takes. It posts back to this pack's URL
+          carrying `?add=`/`?tab=` as well as `?q=`, so the dialog is still open on the same
+          category when the page comes back. With a script, `submit` and `input` are
+          intercepted and the same query is fetched instead. */
+      }
+      <form
+        method="GET"
+        action={packUrlPath}
+        class="mt-4 flex flex-wrap items-end gap-3"
+        {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.searchForm }}
+      >
+        <input
+          type="hidden"
+          name={ADD_CATEGORY_PARAM}
+          value={activeCategoryId}
+          {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.categoryInput }}
+        />
+        <input type="hidden" name={ADD_TAB_PARAM} value="closet" />
+        <div class="min-w-48 flex-1">
+          <label for={fieldId('search')} class={LABEL_CLASS}>Search your closet</label>
+          {
+            /* DESIGN.md §6: a search field is the one exception to the boxed field — a bare
+              underline in ink with an icon — the same treatment `src/pages/gear/index.astro`
+              uses for its own search. */
+          }
+          <div class="search mt-1">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <circle cx="11" cy="11" r="8"></circle>
+              <path d="m21 21-4.3-4.3"></path>
+            </svg>
+            <input
+              id={fieldId('search')}
+              name={CLOSET_SEARCH_PARAM}
+              type="search"
+              value={closetSearch}
+              placeholder="Search name or brand"
+              {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.searchInput }}
+            />
+          </div>
+        </div>
+        <button type="submit" class="btn">Search</button>
+      </form>
+
+      {
+        /* THE TWO EMPTY STATES ARE DIFFERENT SENTENCES and always have been — an empty closet
+          is a fact about the account and points at the other tab, while "nothing matched" is
+          a fact about the search box. Both are rendered here and toggled, rather than one
+          being chosen at render time, so the script can switch between them after a search
+          without owning a copy of either string. */
+      }
+      <p
+        class="hint mt-4"
+        hidden={closetList.hasItems}
+        {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.empty }}
+      >
+        {closetList.emptyMessage}
+      </p>
+
+      {
+        /* THE SAME ITEM MAY BE ADDED MORE THAN ONCE, and nothing here prevents it: rows
+          already in this pack are neither hidden nor disabled, and `parseGearItemIds` does
+          not de-duplicate a repeated tick. Two of the same stuff sack, a spare carried both
+          worn and packed, one fuel canister for two legs — see `addGearItemsToCategory`'s own
+          comment.
+
+          Name, brand and weight are shown together because two closet items called "Stakes"
+          are told apart by the other two, and a picker that shows only a name makes the
+          visitor guess. */
+      }
+      <form
+        method="POST"
+        class="mt-4"
+        hidden={!closetList.hasItems}
+        {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.listForm }}
+      >
+        <input type="hidden" name="intent" value={PACK_INTENT.addGear} />
+        <input
+          type="hidden"
+          name={PACK_EDITOR_FIELD.categoryId}
+          value={activeCategoryId}
+          {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.categoryInput }}
+        />
+        <fieldset>
+          <legend class="sr-only">Closet items to add</legend>
+          <ul
+            class="divide-hairline divide-y"
+            {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.list }}
+          >
+            {
+              closetItems.map((gearItem) => (
+                <li>
+                  <label class={CLOSET_ROW_CLASS.label}>
+                    <input
+                      type="checkbox"
+                      name={PACK_EDITOR_FIELD.gearItemId}
+                      value={gearItem.id}
+                      class={CLOSET_ROW_CLASS.checkbox}
+                    />
+                    <span class={CLOSET_ROW_CLASS.name}>{gearItem.name}</span>
+                    <span class={CLOSET_ROW_CLASS.brand}>
+                      {gearItem.brand ?? CLOSET_ROW_NO_BRAND}
+                    </span>
+                    <span class={CLOSET_ROW_CLASS.weight}>
+                      {formatWeight(gearItem.weightGrams, weightSystem)}
+                    </span>
+                  </label>
+                </li>
+              ))
+            }
+          </ul>
+        </fieldset>
+
+        <div class="mt-4 flex justify-end">
+          <button type="submit" class="btn btn-primary">Add selected</button>
+        </div>
+      </form>
+
+      <nav
+        aria-label="Closet pages"
+        class="mt-4 flex items-center gap-3"
+        hidden={!pager.visible}
+        {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.pager }}
+      >
+        <a
+          href={closetPageHref(packUrlPath, activeCategoryId, closetSearch, pager.previous ?? 1)}
+          class="btn"
+          hidden={pager.previous === null}
+          {...{
+            [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.pagePrevious,
+            [ADD_TO_PACK_PAGE_ATTRIBUTE]: String(pager.previous ?? 1),
+          }}>Previous</a
+        >
+        <p class="hint" {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.pagerLabel }}>
+          {pager.label}
+        </p>
+        <a
+          href={closetPageHref(
+            packUrlPath,
+            activeCategoryId,
+            closetSearch,
+            pager.next ?? closetTotalPages,
+          )}
+          class="btn"
+          hidden={pager.next === null}
+          {...{
+            [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.pageNext,
+            [ADD_TO_PACK_PAGE_ATTRIBUTE]: String(pager.next ?? closetTotalPages),
+          }}>Next</a
+        >
+      </nav>
+
+      <p class="hint mt-4" {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.count }}>
+        {closetCountLabel(closetTotalCount, closetSearch)}
+      </p>
+    </div>
+
+    {
+      /* ---------------------------------------------------------------------
+        NEW ITEM
+        ---------------------------------------------------------------------
+
+        A `pack_items` row with a snapshot and no gear reference, unless "Also add to closet"
+        is ticked — which is the one thing this dialog adds to the section it replaces. Left
+        unticked, nothing here writes to `gear_items`, which is what keeps a borrowed tent or
+        a bag of trail mix out of a closet the visitor did not ask to grow. */
+    }
+    <div
+      id={panelId('new')}
+      role="tabpanel"
+      aria-labelledby={tabId('new')}
+      hidden={tab !== 'new'}
+      {...{
+        [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.panel,
+        [ADD_TO_PACK_TAB_ATTRIBUTE]: 'new',
+      }}
+    >
+      <p class="hint mt-4">Something you are taking on this trip that is not in your closet yet.</p>
+
+      <form method="POST" class="mt-4 space-y-4">
+        <input type="hidden" name="intent" value={PACK_INTENT.addCustomItem} />
+        <input
+          type="hidden"
+          name={PACK_EDITOR_FIELD.categoryId}
+          value={activeCategoryId}
+          {...{ [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.categoryInput }}
+        />
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label for={fieldId('name')} class={LABEL_CLASS}>
+              Name <span aria-hidden="true" class="field-required">*</span>
+            </label>
+            <input
+              id={fieldId('name')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.name}
+              type="text"
+              value={customValues.name}
+              aria-required="true"
+              aria-describedby={customErrors.name ? errorId('name') : undefined}
+              aria-invalid={customErrors.name ? 'true' : undefined}
+              class={INPUT_CLASS}
+            />
+            {
+              customErrors.name && (
+                <p id={errorId('name')} class={ERROR_CLASS}>
+                  {customErrors.name}
+                </p>
+              )
+            }
+          </div>
+          <div>
+            <label for={fieldId('brand')} class={LABEL_CLASS}>Brand</label>
+            <input
+              id={fieldId('brand')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.brand}
+              type="text"
+              value={customValues.brand}
+              class={INPUT_CLASS}
+            />
+          </div>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-3">
+          <div>
+            <label for={fieldId('category')} class={LABEL_CLASS}>Kind of gear</label>
+            <input
+              id={fieldId('category')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.category}
+              type="text"
+              value={customValues.category}
+              placeholder="Shelter"
+              class={INPUT_CLASS}
+            />
+          </div>
+          {
+            /* The unit is part of what this field IS, so it goes in the label rather than
+              beside the box — the accessible name and the visible one are then the same
+              string. Entry is always in the account's base unit and never scales; /account is
+              where that changes. */
+          }
+          <div>
+            <label for={fieldId('weight')} class={LABEL_CLASS}>Weight ({entryUnit})</label>
+            <input
+              id={fieldId('weight')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.weight}
+              type="text"
+              inputmode="decimal"
+              value={customValues.weight}
+              aria-describedby={customErrors.weight ? errorId('weight') : undefined}
+              aria-invalid={customErrors.weight ? 'true' : undefined}
+              class={INPUT_CLASS}
+            />
+            {
+              customErrors.weight && (
+                <p id={errorId('weight')} class={ERROR_CLASS}>
+                  {customErrors.weight}
+                </p>
+              )
+            }
+          </div>
+          <div>
+            <label for={fieldId('quantity')} class={LABEL_CLASS}>Quantity</label>
+            <input
+              id={fieldId('quantity')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.quantity}
+              type="text"
+              inputmode="numeric"
+              value={customValues.quantity}
+              aria-describedby={customErrors.quantity ? errorId('quantity') : undefined}
+              aria-invalid={customErrors.quantity ? 'true' : undefined}
+              class={INPUT_CLASS}
+            />
+            {
+              customErrors.quantity && (
+                <p id={errorId('quantity')} class={ERROR_CLASS}>
+                  {customErrors.quantity}
+                </p>
+              )
+            }
+          </div>
+        </div>
+
+        <div>
+          <label for={fieldId('description')} class={LABEL_CLASS}>Description</label>
+          <textarea
+            id={fieldId('description')}
+            name={CUSTOM_PACK_ITEM_FORM_FIELD.description}
+            rows="2"
+            class={TEXTAREA_CLASS}>{customValues.description}</textarea
+          >
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label for={fieldId('price')} class={LABEL_CLASS}>Price</label>
+            <input
+              id={fieldId('price')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.price}
+              type="text"
+              inputmode="decimal"
+              value={customValues.price}
+              aria-describedby={customErrors.price ? errorId('price') : undefined}
+              aria-invalid={customErrors.price ? 'true' : undefined}
+              class={INPUT_CLASS}
+            />
+            {
+              customErrors.price && (
+                <p id={errorId('price')} class={ERROR_CLASS}>
+                  {customErrors.price}
+                </p>
+              )
+            }
+          </div>
+          <div>
+            <label for={fieldId('currency')} class={LABEL_CLASS}>Currency</label>
+            <input
+              id={fieldId('currency')}
+              name={CUSTOM_PACK_ITEM_FORM_FIELD.currency}
+              type="text"
+              placeholder="GBP"
+              value={customValues.currency}
+              aria-describedby={customErrors.currency ? errorId('currency') : undefined}
+              aria-invalid={customErrors.currency ? 'true' : undefined}
+              class={INPUT_CLASS}
+            />
+            {
+              customErrors.currency && (
+                <p id={errorId('currency')} class={ERROR_CLASS}>
+                  {customErrors.currency}
+                </p>
+              )
+            }
+          </div>
+        </div>
+
+        {
+          /* DESIGN.md §6: a choice of three or fewer is one segmented control, not a stack of
+            radio cards — `PACK_ITEM_CARRIAGES` has exactly three members. */
+        }
+        <fieldset>
+          <legend class={LABEL_CLASS}>How it is carried</legend>
+          <div class="segmented mt-1">
+            {
+              PACK_ITEM_CARRIAGES.map((carriage) => (
+                <label class="segment" title={PACK_ITEM_CARRIAGE_MEANINGS[carriage]}>
+                  <input
+                    type="radio"
+                    name={CUSTOM_PACK_ITEM_FORM_FIELD.carriage}
+                    value={carriage}
+                    checked={carriage === customValues.carriage}
+                    aria-describedby={customErrors.carriage ? errorId('carriage') : undefined}
+                    aria-invalid={customErrors.carriage ? 'true' : undefined}
+                  />
+                  {PACK_ITEM_CARRIAGE_LABELS[carriage]}
+                </label>
+              ))
+            }
+          </div>
+          {
+            customErrors.carriage && (
+              <p id={errorId('carriage')} class={ERROR_CLASS}>
+                {customErrors.carriage}
+              </p>
+            )
+          }
+        </fieldset>
+
+        <label class="text-ink-2 flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name={CUSTOM_PACK_ITEM_FORM_FIELD.packed}
+            value="on"
+            checked={customValues.packed !== ''}
+            class="checkbox"
+          />
+          Already packed
+        </label>
+
+        {
+          /* THE TOGGLE SITS BESIDE SAVE, which is what the ticket asks for and is also where
+            it belongs: it changes what Save DOES — one-off snapshot, or snapshot plus a
+            permanent closet row — rather than describing the item. `submissionAlsoAddsToCloset`
+            reads it server-side; `parseCustomPackItemForm` never sees it.
+
+            THE HINT SAYS "THIS BROWSER" ON PURPOSE. It is a per-browser convenience stored in
+            `localStorage`, deliberately not an account setting (see
+            `src/lib/packs/add-to-pack.ts`'s header), and a visitor who found it already
+            ticked on their laptop should not be surprised to find it clear on their phone. */
+        }
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <label class="text-ink-2 flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                name={ADD_TO_PACK_FIELD.alsoAddToCloset}
+                value={ALSO_ADD_TO_CLOSET_VALUE}
+                checked={alsoAddToCloset}
+                class="checkbox"
+                {...{
+                  [ADD_TO_PACK_PART_ATTRIBUTE]: ADD_TO_PACK_PART.toggle,
+                  ...(serverOwnsToggle ? {} : { [ADD_TO_PACK_REMEMBER_ATTRIBUTE]: '' }),
+                }}
+              />
+              Also add to closet
+            </label>
+            <p class="hint mt-1">Remembered on this browser only.</p>
+          </div>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</Modal>
+
+{
+  /* A bundled module, for the reason `Modal.astro`'s own script block gives: this only ever
+    ADDS behaviour, so nothing is lost by waiting for the bundle, and being a module is what
+    lets every decision live in `src/lib/packs/add-to-pack-dialog.ts` under test rather than
+    being retyped here where nothing can reach it. The return value is discarded: nothing on
+    the pack page ever needs to tear this down. */
+}
+<script>
+  import { initAddToPackDialog } from '../lib/packs/add-to-pack-dialog';
+
+  initAddToPackDialog(document);
+</script>

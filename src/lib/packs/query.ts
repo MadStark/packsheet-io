@@ -217,10 +217,52 @@ export type PackTreeRow = NonNullable<Awaited<ReturnType<typeof _packTreeQuery>>
  * comes back sorted from the index
  * rather than through a sort node.
  */
+/**
+ * The editor's select: the shared tree, plus the owner's private note (PK-72).
+ *
+ * ---------------------------------------------------------------------------
+ * WHY `pack_notes` IS NOT IN `PACK_TREE_SELECT` ITSELF
+ * ---------------------------------------------------------------------------
+ *
+ * Because adding it there would break every anonymous read, loudly and completely, rather
+ * than leaking anything. `public.pack_notes` grants `anon` NOTHING — that is the whole
+ * design of `20260819000000_pack_notes.sql` — and PostgREST requires table-level SELECT on
+ * every table participating in an embed. So an `anon` request carrying this embed does not
+ * come back with the note omitted; it comes back
+ *
+ *     42501 permission denied for table pack_notes
+ *
+ * with no pack at all. `PACK_TREE_SELECT` is the ONE select the share page, the owner's
+ * list and the owner's editor share, so a private table cannot join it. That is the exact
+ * inverse of the widening argument on `PACK_TREE_SELECT` above: widening it is safe for
+ * columns every reader may already read, and `notes` is the first column in this schema
+ * that no anonymous reader may read at all.
+ *
+ * COMPOSED FROM THE CONSTANT RATHER THAN RETYPED, so the base string still exists exactly
+ * once. The only caller is `loadPackForEdit`, which is owner-scoped by `.eq('user_id',
+ * userId)` and is never reached with an anonymous client.
+ *
+ * STILL ONE ROUND TRIP. The alternative — leave the select alone and fetch the note in a
+ * second request — would make the editor's load two round trips to avoid a boundary that
+ * an embed on an owner-only query does not cross.
+ */
+export const PACK_EDIT_SELECT = `${PACK_TREE_SELECT}, pack_notes(notes)`;
+
+/**
+ * `PACK_EDIT_SELECT`'s row shape, derived the same way `PackTreeRow` is derived from
+ * `PACK_TREE_SELECT` above — from the query itself, via `ReturnType<typeof …>`, so it can
+ * never drift from the select it names. `_packEditQuery` is never called.
+ */
+function _packEditQuery(client: PacksheetClient) {
+  return client.from('packs').select(PACK_EDIT_SELECT);
+}
+
+export type PackEditRow = NonNullable<Awaited<ReturnType<typeof _packEditQuery>>['data']>[number];
+
 export async function loadPackForEdit(client: PacksheetClient, userId: string, packId: string) {
   return client
     .from('packs')
-    .select(PACK_TREE_SELECT)
+    .select(PACK_EDIT_SELECT)
     .eq('id', packId)
     .eq('user_id', userId)
     .order('position', { referencedTable: 'pack_categories', ascending: true })
@@ -228,6 +270,29 @@ export async function loadPackForEdit(client: PacksheetClient, userId: string, p
     .order('position', { referencedTable: 'pack_categories.pack_items', ascending: true })
     .order('id', { referencedTable: 'pack_categories.pack_items', ascending: true })
     .maybeSingle();
+}
+
+/**
+ * The unwrap `loadPackForEdit`'s caller needs, moved here rather than left in page
+ * frontmatter (PK-72's independent review). `vitest.config.ts` excludes `src/pages/**`
+ * from the test run — see this module's own "WHY THIS LIVES IN src/lib/" above — so a
+ * page-level `pack.pack_notes[0]?.notes` had no test able to catch a schema change that
+ * turned this embed into a different shape.
+ *
+ * The `[0]` is not defensive, it is what PostgREST returns: `pack_notes.pack_id` is the
+ * table's primary key, so the relationship really is one-to-one, but PostgREST infers
+ * cardinality from the foreign key rather than from the primary key, and the FK here is
+ * the composite `(user_id, pack_id) references packs (user_id, id)` every child table in
+ * this schema uses — which PostgREST does not recognise as to-one, so the embed always
+ * arrives as a one-element array rather than an object. Verified against the running
+ * stack rather than assumed.
+ *
+ * `?? null` covers exactly one case — a pack with no note has no row — which is the state
+ * `update_pack_details` leaves behind when someone clears the field, and the state every
+ * pack created before this migration is in.
+ */
+export function packNoteFromEditRow(row: Pick<PackEditRow, 'pack_notes'>): string | null {
+  return row.pack_notes[0]?.notes ?? null;
 }
 
 // ---------------------------------------------------------------------------

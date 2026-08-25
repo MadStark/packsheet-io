@@ -80,6 +80,7 @@ describe('parsePackForm', () => {
       name: 'Cairngorms winter',
       description: null,
       trip_type: null,
+      notes: null,
     });
   });
 
@@ -108,13 +109,39 @@ describe('parsePackForm', () => {
     expect(result.values.name).toBe('Ultralight');
   });
 
-  it('turns blank description and trip type into null rather than empty strings', () => {
-    const result = parsePackForm(formData({ name: 'A', description: '  ', trip_type: '' }));
+  it('turns blank description, trip type and notes into null rather than empty strings', () => {
+    const result = parsePackForm(
+      formData({ name: 'A', description: '  ', trip_type: '', notes: ' \t ' }),
+    );
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.values.description).toBeNull();
     expect(result.values.trip_type).toBeNull();
+    expect(result.values.notes).toBeNull();
+  });
+
+  /**
+   * `notes` GETS THE IDENTICAL TREATMENT `description` GETS, for the identical reason:
+   * `pack_notes.notes` (`20260819000000_pack_notes.sql`) is unbounded text with no CHECK
+   * constraint of any kind, so there is nothing here for this parser to enforce beyond
+   * blank-means-null. Unlike `description`, this field lands on a different table
+   * entirely — see `PackInput`'s own comment — but the parser cannot see that, and must
+   * not need to: a note is trimmed, optional text like any other.
+   */
+  it('trims a note the same way description is trimmed', () => {
+    const result = parsePackForm(formData({ name: 'A', notes: '  Bring extra socks  ' }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.values.notes).toBe('Bring extra socks');
+  });
+
+  it('never produces a validation error over notes, however it is spelled', () => {
+    for (const notes of ['', '   ', 'a'.repeat(10000), 'line one\nline two', '<script>']) {
+      const result = parsePackForm(formData({ name: 'A', notes }));
+      expect(result.ok).toBe(true);
+    }
   });
 
   /**
@@ -143,7 +170,12 @@ describe('parsePackForm', () => {
   });
 
   it('hands back exactly what the visitor typed when it refuses the submission', () => {
-    const entries = { name: '   ', description: '  keep me  ', trip_type: ' Winter ' };
+    const entries = {
+      name: '   ',
+      description: '  keep me  ',
+      trip_type: ' Winter ',
+      notes: '  keep this too  ',
+    };
     const result = parsePackForm(formData(entries));
 
     expect(result.ok).toBe(false);
@@ -631,7 +663,12 @@ describe('parseCustomPackItemForm', () => {
 
 describe('the stored-row to form-values direction', () => {
   it('round-trips a pack through the form and back', () => {
-    const row = { name: 'Cairngorms', description: 'March', trip_type: 'winter' };
+    const row = {
+      name: 'Cairngorms',
+      description: 'March',
+      trip_type: 'winter',
+      notes: 'Bring poles',
+    };
     const values = packToFormValues(row);
     const reparsed = parsePackForm(formData({ ...values }));
 
@@ -641,10 +678,13 @@ describe('the stored-row to form-values direction', () => {
   });
 
   it('renders a pack’s null columns as empty fields, not as the string "null"', () => {
-    expect(packToFormValues({ name: 'A', description: null, trip_type: null })).toEqual({
+    expect(
+      packToFormValues({ name: 'A', description: null, trip_type: null, notes: null }),
+    ).toEqual({
       name: 'A',
       description: '',
       trip_type: '',
+      notes: '',
     });
   });
 
@@ -685,6 +725,7 @@ describe('the blank form states', () => {
     expect(EMPTY_PACK_FORM_VALUES.trip_type).toBe('');
     expect(EMPTY_PACK_FORM_VALUES.description).toBe('');
     expect(EMPTY_PACK_FORM_VALUES.name).toBe('');
+    expect(EMPTY_PACK_FORM_VALUES.notes).toBe('');
   });
 
   it('seeds a carriage so the radio group starts with an option selected', () => {

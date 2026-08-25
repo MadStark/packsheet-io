@@ -495,6 +495,11 @@ onMounted(() => {
   initModals(document);
 });
 
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', closeMenusOutside);
+  document.removeEventListener('keydown', closeMenuOnEscape);
+});
+
 /** The trigger contract `src/lib/packs/add-to-pack-dialog.ts` matches on, built from its own
  *  constants rather than typed out: `data-modal-open="add-to-pack"` names the dialog, and the
  *  two category attributes are what tell the ONE shared dialog which category it was opened
@@ -510,11 +515,6 @@ function addToPackTriggerAttributes(category: {
     [ADD_TO_PACK_CATEGORY_NAME_ATTRIBUTE]: category.name,
   };
 }
-
-onBeforeUnmount(() => {
-  document.removeEventListener('pointerdown', closeMenusOutside);
-  document.removeEventListener('keydown', closeMenuOnEscape);
-});
 
 // ---------------------------------------------------------------------------
 // Derived: the rows as they are rendered
