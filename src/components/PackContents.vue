@@ -170,6 +170,20 @@ import {
   type ReorderNotice,
 } from '../lib/packs/reorder-response';
 import { PACK_EDITOR_FIELD, PACK_INTENT } from '../lib/packs/editor';
+// PK-74's "Add item" trigger, one per category. This component does NOT own adding to a
+// pack — the dialog itself is `<AddToPackDialog>` in `src/pages/packs/[id].astro`, and every
+// decision it makes is in the two modules below. What is here is the one thing that has to
+// sit on a category row, because that is the row it names: a real `<a href>` to
+// `?add=<categoryId>`, which server-renders the same dialog already open when nothing ever
+// upgrades it. The attribute names are imported rather than spelled, so the trigger and the
+// selector that finds it cannot drift apart — see `ADD_TO_PACK_TRIGGER_SELECTOR`.
+import { ADD_TO_PACK_MODAL_ID, addToPackHref } from '../lib/packs/add-to-pack';
+import {
+  ADD_TO_PACK_CATEGORY_ATTRIBUTE,
+  ADD_TO_PACK_CATEGORY_NAME_ATTRIBUTE,
+} from '../lib/packs/add-to-pack-dialog';
+import { TRIGGER_ATTRIBUTE, initModals } from '../lib/modal';
+import { packPath } from '../lib/packs/routes';
 import {
   PACK_CATEGORY_FORM_FIELD,
   PACK_ITEM_FORM_FIELD,
@@ -471,7 +485,31 @@ onMounted(() => {
   enabled.value = true;
   document.addEventListener('pointerdown', closeMenusOutside);
   document.addEventListener('keydown', closeMenuOnEscape);
+  /* A SECOND `initModals` PASS, AND IT HAS TO BE HERE. `Modal.astro` ships its own call, but
+     that runs once, before this island exists — so the per-category "Add item" triggers below
+     are rendered after the only pass that could have upgraded them, and without this they
+     stay ordinary links that navigate. A second pass is the sanctioned way to pick them up:
+     it is additive and idempotent (see `initModals`' own comment), handing an already-wired
+     dialog back the SAME controller and upgrading only triggers not yet bound. The return
+     value is discarded — nothing in here ever opens or closes the dialog itself. */
+  initModals(document);
 });
+
+/** The trigger contract `src/lib/packs/add-to-pack-dialog.ts` matches on, built from its own
+ *  constants rather than typed out: `data-modal-open="add-to-pack"` names the dialog, and the
+ *  two category attributes are what tell the ONE shared dialog which category it was opened
+ *  for. `v-bind` of an object rather than three dynamic arguments, so the attribute names stay
+ *  the imported strings at runtime instead of whatever a template would make of them. */
+function addToPackTriggerAttributes(category: {
+  readonly id: string;
+  readonly name: string;
+}): Record<string, string> {
+  return {
+    [TRIGGER_ATTRIBUTE]: ADD_TO_PACK_MODAL_ID,
+    [ADD_TO_PACK_CATEGORY_ATTRIBUTE]: category.id,
+    [ADD_TO_PACK_CATEGORY_NAME_ATTRIBUTE]: category.name,
+  };
+}
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', closeMenusOutside);
@@ -1188,6 +1226,33 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                 <Ellipsis :size="16" aria-hidden="true" />
               </summary>
               <div class="row-menu-panel">
+                <!--
+                PK-74. A REAL LINK, NEVER A BUTTON: `upgradeTrigger` refuses anything that is
+                not an `<a href>`, because the whole degradation contract is that the
+                navigation is cancelled only once the dialog is genuinely up. Followed without
+                a script it lands on this pack with `?add=<categoryId>`, which the page reads
+                back through `parseAddToPackRequest` and server-renders the dialog already open
+                on this category. `.row-menu-item` styles an anchor exactly as well as a
+                button — the class sets no element-specific behaviour, only a box, a font and a
+                cursor — so it sits in this menu without inventing a second visual language for
+                "the app-speaking control that happens to navigate".
+
+                FIRST IN THE MENU, deliberately: it is the one item here that adds rather than
+                edits or removes, and it is also the action a visitor reaches for most often on
+                a category that already exists.
+              -->
+                <a
+                  :href="addToPackHref(packPath(props.packId), category.id)"
+                  v-bind="addToPackTriggerAttributes(category)"
+                  class="row-menu-item"
+                >
+                  <Plus :size="15" aria-hidden="true" />
+                  <span aria-hidden="true">Add item</span>
+                  <span class="sr-only">Add item to {{ category.name }}</span>
+                </a>
+
+                <hr class="row-menu-rule" />
+
                 <!--
                 THE NAME SAYS WHICH ROW, in the same way every named control in this component
                 does. A screen reader listing this page's controls reads them out of context,
