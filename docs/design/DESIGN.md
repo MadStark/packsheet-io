@@ -113,13 +113,19 @@ The height is capped so a very tall sheet does not grow a huge shadow. The shado
 
 **The element that owns the curl must not create a stacking context.** No `transform`, no `isolation`, no `z-index`, no `filter` on it. If it does, its own `z-index:-1` pseudo-elements paint _above_ its background and you see two grey slabs on the card. This is also the mechanical reason nothing is tilted: a rotation is a transform.
 
-### 2.5 Notes, overlap, and the one surface that may
+### 2.5 Notes, overlap, and the two surfaces that may
 
-**Nothing in the page's own layout overlaps.** No sheet lies on top of another, and nothing hangs off a sheet's edge. Emphasis is never a second surface stacked on a first.
+**Nothing in the page's own layout overlaps, with the two exceptions this section records below.** No sheet lies on top of another, and nothing hangs off a sheet's edge outside those two cases. Emphasis is never a second surface stacked on a first.
 
-**A modal is the one exception, and it is an exception because it is not part of the page.** It covers the page rather than sitting in it: it lives in the browser's top layer, the page behind it is dimmed and inert, and it leaves nothing behind when it closes. That is a different act from stacking a card on a sheet for emphasis, which is still refused. Design feedback asked for one in five places — add item, edit item, create pack, edit pack details, add-to-pack — and a language with no way to say "answer this without losing your place" was refusing the wrong thing. The shell is `src/components/Modal.astro`; it is for forms, not for confirming a destructive step, which stays a two-step server flow.
+**A modal is the first exception, and it is an exception because it is not part of the page.** It covers the page rather than sitting in it: it lives in the browser's top layer, the page behind it is dimmed and inert, and it leaves nothing behind when it closes. That is a different act from stacking a card on a sheet for emphasis, which is still refused. Design feedback asked for one in five places — add item, edit item, create pack, edit pack details, add-to-pack — and a language with no way to say "answer this without losing your place" was refusing the wrong thing. The shell is `src/components/Modal.astro`; it is for forms, not for confirming a destructive step, which stays a two-step server flow.
 
-This is written as an amendment rather than made as a quiet deletion, because the rule was absolute for months and people remember it that way. What it was protecting still holds everywhere else: the note guidance below is unchanged, index tabs are still gone, and nothing in a sheet may be emphasised by putting another sheet on it.
+**A row's overflow menu is the second, and its argument is related but not the same one — be exact about the difference.** A `…` menu does _not_ live in the top layer, does not dim anything, and covers part of one sheet rather than the page. What it shares with the modal is the only property that ever mattered: it is a **transient disclosure**, opened by the control it hangs from, dismissed by the next action, writing nothing by opening and leaving nothing when it closes. It is not a second surface put there to make something look important, which is what the rule exists to refuse.
+
+The alternative was tried on paper and is worse. A menu that pushed the rows below it down would move the list under the visitor's own pointer, on a surface whose rows they are reading and dragging — so refusing the overlap costs more than the overlap does. Design feedback asked for the carriage selector and Remove to move into one, on rows that also have to be exactly one line high (§3), and those two requirements have no non-overlapping answer.
+
+The scope is narrow and deliberate: a menu attached to a row's own control, holding that row's commands. `src/components/PackContents.vue` is the only one today. **A third surface wanting this exception is the moment to re-read this section rather than to add a paragraph to it** — two entries is a pattern, three is a language that has quietly stopped refusing overlap.
+
+Both are written as amendments rather than made as quiet deletions, because the rule was absolute for months and people remember it that way. What it was protecting still holds everywhere else: the note guidance below is unchanged, index tabs are still gone, and nothing in a sheet may be emphasised by putting another sheet on it.
 
 This retires the note-on-a-sheet, which used to be the language's emphasis device. A **note** is still a white card with a stronger curl — but it may only lie **directly on the paper**, as a sibling of the sheets, never on one. In practice that means notes are page-level interruptions: an error banner, a delete confirmation.
 
@@ -210,6 +216,8 @@ The border is the second distinction, and it is newer. A field drawn in `--ink` 
 
 **A choice of three or fewer is one segmented control, not a stack of radios.** It is the button's box split by 1px ink dividers; the selected segment fills with ink and its label and icon go paper-coloured. This says _exactly one of these is true_, which a radio stack only implies. Reserve real radios for longer lists.
 
+**PK-73 is the one recorded exception**, and only because the choice itself moved. `PackContents.vue`'s three-way carriage choice was this segmented control until the design feedback asked for it to become an icon inside a per-row `…` menu — at which point it is no longer a single choice presented at once, it is three separate commands in a disclosure, and a segmented control has nowhere to sit inside one. The rule still governs every choice of three or fewer presented as itself; it does not extend to a choice folded into a command menu for an unrelated reason.
+
 **Focus is always visible**: a 2px blue outline offset by 2px, on `:focus-visible` only.
 
 ---
@@ -284,7 +292,7 @@ Contrast is measured, not hoped for: every ink and every accent used as text cle
 
 ## 13. What this language refuses
 
-It refuses **text written directly on the paper** — the ground is a ground, and text on it looks like clutter within seconds. It refuses **a second surface stacked for emphasis** — nothing lies on a sheet and nothing hangs off one, with the single exception of a modal, which covers the page rather than sitting in it (§2.5). It refuses tilt of any kind, tape, pins, paperclips, torn edges, coffee rings and other scrapbook props; the paper feel comes from the grid and the corner-curl shadows, and anything more turns it into a theme. It refuses cool greys, pure black, gradients on surfaces, uniform drop shadows, boxed cards inside cards, borders as separators, and colour as decoration. It refuses **dark mode** as a theme — the language is light-only, because paper is. And it refuses density for its own sake: if a screen wants twelve widgets, it wants a different language.
+It refuses **text written directly on the paper** — the ground is a ground, and text on it looks like clutter within seconds. It refuses **a second surface stacked for emphasis** — nothing lies on a sheet and nothing hangs off one, with the two exceptions §2.5 records: a modal, which covers the page rather than sitting in it, and a row's overflow menu, which is a transient disclosure hanging from its own control rather than anything put there to look important. It refuses tilt of any kind, tape, pins, paperclips, torn edges, coffee rings and other scrapbook props; the paper feel comes from the grid and the corner-curl shadows, and anything more turns it into a theme. It refuses cool greys, pure black, gradients on surfaces, uniform drop shadows, boxed cards inside cards, borders as separators, and colour as decoration. It refuses **dark mode** as a theme — the language is light-only, because paper is. And it refuses density for its own sake: if a screen wants twelve widgets, it wants a different language.
 
 ---
 
@@ -429,3 +437,31 @@ The checkbox's tick is a data-URI SVG, and a data URI cannot reference a custom 
 its paper colour is written out as a literal. It is the only value in `paper.css` that will not
 follow `--paper` if that token changes. The alternatives — a pseudo-element on a replaced
 element, or an inline SVG per checkbox — are both worse.
+
+### PK-73: the second overlap exception, and what a 40px row costs
+
+**A `…` menu overlaps a sheet, and §2.5 now says so.** Recorded here as well as there because
+this is the second time the overlap rule has been amended rather than followed, and the two
+amendments are close enough together to look like a trend. They are not the same argument —
+the modal is in the top layer and covers the page; a row menu is not and does not — and §2.5
+spells the difference out rather than folding the second case into the first. The scope is one
+sentence long on purpose.
+
+**One line means the controls become commands.** §3's 40px row is stated as a rhythm, and on a
+list of editable rows it turns out to be a decision about interaction as well as about height.
+A row carrying a field, a three-way selector, a checkbox and a Save button cannot be one line
+at 375px at any type size, so PK-73's item row has no Save button: the quantity stepper, each
+carriage option, the packed toggle and Remove are each one submission of their own. That is
+the trade the rhythm actually asks for, and it is worth knowing before the next surface adopts
+it — a form that batches several edits into one save wants a sheet, not a row.
+
+**A hidden label should be a literal string, because the alternative is fragile in a way nothing
+visual catches.** `Rename<span class="sr-only"> {name}</span>` puts the separating space as the
+first character inside the `sr-only` element; whether Vue's `whitespace: 'condense'` keeps that
+leading space depends on how the surrounding markup happens to be broken across lines, and losing
+it produces an accessible name of "RenameShelter" with no change to what renders on screen. Where
+a control's accessible name is a visible word plus hidden context, write the visible word
+`aria-hidden` and the whole sentence in the `sr-only` element instead, so the announced string is
+one literal in the template with no whitespace rule between it and what is read out. WCAG 2.5.3 is
+satisfied the same way either spelling — the visible label is still the first words of the
+accessible one.

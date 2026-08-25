@@ -34,9 +34,13 @@
  * capability it had before any of this existed: rename, save, remove, delete, both two-step
  * confirmations.
  *
- * What hydration adds is dragging, and nothing else. `tests/packs-drag.test.ts` renders this
- * component with Vue's own `renderToString` and asserts both halves of that claim: the forms
- * are in the server output, and no grip, no `draggable` and no drop target is.
+ * What hydration adds is dragging, plus — since PK-73 — two conveniences on the row's `…`
+ * menu that it would work without: closing when you press away from it, and closing on
+ * Escape. See `openMenus`. It adds no CAPABILITY: the menu itself is a `<details>` and opens
+ * with no script at all, which is why the carriage choice, the packed toggle and Remove could
+ * move into one. `tests/packs-drag.test.ts` renders this component with Vue's own
+ * `renderToString` and asserts both halves of that claim: the forms are in the server output,
+ * and no grip, no `draggable` and no drop target is.
  *
  * ---------------------------------------------------------------------------
  * POINTER ONLY. THERE ARE NO KEYBOARD REORDER CONTROLS, AND THAT IS A DECISION
@@ -53,8 +57,22 @@
  * The consequence to keep straight when reading the markup: no ROW here is focusable, and
  * nothing carries a `tabindex`, because a focus ring on a row a keyboard cannot then move
  * would be a promise this component cannot keep. Every EDITING control on those rows — every
- * rename, save, remove and delete — is a real form, in the tab order, operable by keyboard
- * alone, and unchanged by whether this component ever hydrates.
+ * rename, quantity step, carriage change, packed toggle, remove and delete — is a real form,
+ * in the tab order, operable by keyboard alone, and unchanged by whether this component ever
+ * hydrates. PK-73 moved several of them behind a `…` menu and that sentence still holds in the
+ * narrow sense: a `<summary>` is focusable and toggles on Enter and on Space by itself, so
+ * REACHING any control is one extra press, never blocked.
+ *
+ * IT IS NOT THE WHOLE COST, and the rest is worth being honest about rather than folding into
+ * "one extra press". Every write on this page still 303s back to this same URL — see
+ * `[id].astro`'s `Astro.redirect(selfPath, 303)`, which this component does not own and this
+ * ticket does not touch — so PK-73 turned what used to be one submission per row-edit into as
+ * many as four for a single quantity change, and every one of those is a full-page navigation
+ * that lands a keyboard or screen-reader visitor back at the top of the document, not on the
+ * row they were just working. That was already true of Remove and of a category rename before
+ * this ticket; PK-73 makes it happen more often, by turning one save into up to four separate
+ * ones. Landing the redirect on the row's own id (`#item-${id}`) would fix it and is a change
+ * to `[id].astro`'s redirect target, which is out of this component's reach.
  *
  * ---------------------------------------------------------------------------
  * WHAT THIS COMPONENT IS ALLOWED TO DECIDE, WHICH IS ALMOST NOTHING
@@ -116,8 +134,21 @@
  * its icon and was this file's reference for it; PK-64 removed dark mode, so this component
  * is now both the only `client:*` island in the app and the only place the idiom lives.
  */
-import { computed, onMounted, shallowRef } from 'vue';
-import { GripVertical } from 'lucide-vue-next';
+import { computed, onBeforeUnmount, onMounted, shallowRef } from 'vue';
+import {
+  Check,
+  Ellipsis,
+  Flame,
+  GripVertical,
+  Minus,
+  Package,
+  Pencil,
+  Plus,
+  Shirt,
+  Trash2,
+  type LucideProps,
+} from 'lucide-vue-next';
+import type { FunctionalComponent } from 'vue';
 import {
   REORDER_FIELD,
   REORDER_TARGET,
@@ -157,12 +188,12 @@ import {
   PACK_CATEGORY_FORM_FIELD,
   PACK_ITEM_FORM_FIELD,
   packItemToFormValues,
-  type PackItemFormValues,
 } from '../lib/packs/form';
 import {
   PACK_ITEM_CARRIAGES,
   PACK_ITEM_CARRIAGE_LABELS,
   PACK_ITEM_CARRIAGE_MEANINGS,
+  type PackItemCarriage,
 } from '../lib/packs/fields';
 // The delete gate itself, imported rather than re-spelled — the value this form writes and
 // the value `confirmsGearDeletion` compares it against must not be able to drift apart. The
@@ -206,13 +237,22 @@ interface RenameError {
   readonly message: string;
 }
 
-/** One item's per-list settings that failed validation: which row, what to say, and exactly
- *  what the visitor typed — `rawPackItemFormValues` explains why the raw strings are what a
- *  re-render shows rather than the stored row. */
+/**
+ * One item's per-list settings that failed validation: which row, and what to say about it.
+ *
+ * NO LONGER CARRIES `values`. Before PK-73 this also held the visitor's own rejected input
+ * (`rawPackItemFormValues`), for redisplay in the field it came from — right when the row had
+ * a free quantity field and a radio group to redisplay it in. There is no field left to
+ * redisplay: quantity is two buttons carrying computed numbers, carriage is three buttons
+ * carrying three constants, and packed is one button carrying the opposite of what is stored.
+ * A rejected submission now leaves nothing to correct in place, only a message — which is
+ * `errors` below, and is still shown, still per failed field, still pointed at by the control
+ * it explains. `props.itemError` (the page's prop) still carries its own `values`; this
+ * component simply has no use for it any more, so it is not declared here.
+ */
 interface ItemError {
   readonly itemId: string;
   readonly errors: Readonly<Record<string, string>>;
-  readonly values: PackItemFormValues;
 }
 
 /**
@@ -273,18 +313,41 @@ const BUCKET_TEXT_CLASS: Record<WeightBucket, string> = {
   consumable: 'text-w-cons',
 };
 
+/**
+ * PK-73. An icon per carriage option, because the design feedback asks for the choice to be
+ * "an icon in a `…` option submenu" rather than the inline segmented control it was.
+ *
+ * THE ICON IS NEVER THE WHOLE CONTROL. Each menu entry renders this icon AND
+ * `PACK_ITEM_CARRIAGE_LABELS`' word beside it, for the reason `PACK_ITEM_CARRIAGE_MEANINGS`
+ * gives about hints: a visitor who cannot interpret a pictogram — and there is no pictogram
+ * for "used up during the trip" that anybody reads correctly cold — must still be able to
+ * choose from what is on screen. The icon is recognition, the label is the meaning.
+ *
+ * `Package` for carried, `Shirt` for worn and `Flame` for consumable, and the third is the
+ * one to justify: the migration's own wording is "used up during the trip, like food or
+ * fuel", and a flame is the half of that pair that does not collide with `Package`. Typed as
+ * a `Record<PackItemCarriage, …>` so a fourth carriage fails to build here rather than
+ * rendering an entry with no icon.
+ */
+const CARRIAGE_ICONS: Record<PackItemCarriage, FunctionalComponent<LucideProps>> = {
+  carried: Package,
+  worn: Shirt,
+  consumable: Flame,
+};
+
 // PK-64 (Notebook Paper). Class strings, declared per file exactly as
 // `src/pages/packs/[id].astro`, `src/pages/packs/index.astro` and
 // `src/components/GearItemForm.astro` each declare their own — but now naming paper.css's
 // vocabulary rather than a Tailwind box-and-border recipe. They are presentation, not a
-// decision: nothing branches on them. QUIET_BUTTON_CLASS and CANCEL_LINK_CLASS are the same
-// class (`.btn`, undecorated); kept as two names because that is what the call sites mean
-// even though the box is identical, the way `[id].astro` also keeps them apart.
-const LABEL_CLASS = 'field-label';
-const INPUT_CLASS = 'field mt-1 w-full';
+// decision: nothing branches on them.
+//
+// PK-73 LEFT TWO OF THE SIX. `LABEL_CLASS`, `INPUT_CLASS`, `QUIET_BUTTON_CLASS` and
+// `DANGER_BUTTON_CLASS` went with the controls that used them: a one-line row has no room
+// for a label above a field, and Rename, Save and Delete category are `.row-menu-item`s in a
+// `…` menu now rather than `.btn` boxes on the row. The two that remain are the two the
+// two-step delete confirmation still uses — that block is a full-width reveal, not a row, and
+// keeps the page's ordinary buttons.
 const ERROR_CLASS = 'field-error';
-const QUIET_BUTTON_CLASS = 'btn';
-const DANGER_BUTTON_CLASS = 'btn btn-danger';
 const CANCEL_LINK_CLASS = 'btn';
 
 // ---------------------------------------------------------------------------
@@ -352,8 +415,76 @@ const marker = shallowRef<Marker | null>(null);
  */
 const grabbed = shallowRef<string | null>(null);
 
+/**
+ * THE ROW'S `…` MENU IS A `<details>`, AND EVERYTHING BELOW IS AN ENHANCEMENT ON TOP OF ONE.
+ *
+ * PK-73 moved the carriage choice, the packed toggle and Remove off the row and into a
+ * per-row overflow menu. The obvious way to build one is a button and a `click` handler, and
+ * that way is not available here: this component's whole contract (see "EVERY CONTROL IN
+ * HERE IS A PLAIN FORM" above) is that the markup the server sends IS the editor. A menu that
+ * only opens once a bundle has arrived would put three of the four controls on every item row
+ * behind JavaScript, which is a larger capability loss than anything hydration has ever added
+ * here.
+ *
+ * `<details>`/`<summary>` opens with no script at all, is in the tab order by itself, toggles
+ * on Enter AND Space, and is announced as an expandable group. So the menu WORKS before this
+ * ref exists and works forever if the bundle never lands.
+ *
+ * What a bare `<details>` does not do is the two things a visitor expects of a menu once the
+ * page is live: close when you click away from it, and close on Escape. Both are added here
+ * and BOTH ARE OPTIONAL — a visitor without them closes the menu the same way they opened it,
+ * by pressing its own summary, which is a mild inconvenience and not a broken control. That
+ * is the line this component draws everywhere: hydration may make a working thing nicer, and
+ * may not be the reason a thing works.
+ *
+ * SCOPED TO THIS COMPONENT'S OWN SUBTREE rather than to `document`, through `listRoot`. There
+ * is exactly one island on this page today, so a document-wide query would find the same
+ * elements — but "there is only one island" is a fact about the page in August 2026 and not a
+ * property this component can rely on, and a handler that reaches outside its own root is the
+ * kind of thing that only misbehaves once a second island exists.
+ */
+const listRoot = shallowRef<HTMLElement | null>(null);
+
+function openMenus(): HTMLDetailsElement[] {
+  const root = listRoot.value;
+  if (root === null) return [];
+  return [...root.querySelectorAll<HTMLDetailsElement>('details.row-menu[open]')];
+}
+
+/** A press anywhere outside an open menu closes it. `pointerdown` and not `click`, so the
+ *  menu is gone before whatever was pressed reacts — a `click` listener fires after the
+ *  press has already landed on the control underneath, which reads as a menu that lingers. */
+function closeMenusOutside(event: PointerEvent): void {
+  const target = event.target;
+  for (const menu of openMenus()) {
+    if (target instanceof Node && menu.contains(target)) continue;
+    menu.open = false;
+  }
+}
+
+/** Escape closes the menu the focus is in and PUTS THE FOCUS BACK ON ITS SUMMARY. Closing a
+ *  `<details>` whose panel holds the focused element leaves the focus on a node that is now
+ *  `display: none`, which browsers resolve by moving it to `<body>` — so a keyboard visitor
+ *  who dismisses a menu would lose their place in a list of forty rows. Returning it to the
+ *  summary is where they were before they opened it. */
+function closeMenuOnEscape(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return;
+  const active = document.activeElement;
+  for (const menu of openMenus()) {
+    if (!(active instanceof Node) || !menu.contains(active)) continue;
+    menu.open = false;
+    menu.querySelector('summary')?.focus();
+    // Stops the key reaching anything else that treats Escape as "dismiss" — a modal this
+    // island is rendered inside one day, for instance.
+    event.stopPropagation();
+    return;
+  }
+}
+
 onMounted(() => {
   enabled.value = true;
+  document.addEventListener('pointerdown', closeMenusOutside);
+  document.addEventListener('keydown', closeMenuOnEscape);
   /* A SECOND `initModals` PASS, AND IT HAS TO BE HERE. `Modal.astro` ships its own call, but
      that runs once, before this island exists — so the per-category "Add item" triggers below
      are rendered after the only pass that could have upgraded them, and without this they
@@ -362,6 +493,11 @@ onMounted(() => {
      dialog back the SAME controller and upgrading only triggers not yet bound. The return
      value is discarded — nothing in here ever opens or closes the dialog itself. */
   initModals(document);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', closeMenusOutside);
+  document.removeEventListener('keydown', closeMenuOnEscape);
 });
 
 /** The trigger contract `src/lib/packs/add-to-pack-dialog.ts` matches on, built from its own
@@ -447,7 +583,40 @@ interface ItemRow {
   readonly lineWeightGrams: number;
   readonly unitWeightGrams: number;
   readonly linePrice: Money | null;
-  readonly values: PackItemFormValues;
+  /**
+   * THE STORED TRIPLE — the row's own quantity (above), carriage and packed, as the database
+   * holds them.
+   *
+   * PK-73 turned every per-item control into its own small form (see the template's own
+   * note), and each of those forms has to carry the two settings it is NOT changing as hidden
+   * fields — `parsePackItemForm` writes all three columns on every save, so a form that
+   * omitted `carriage` would be refused and one that omitted `packed` would quietly unpack
+   * the row.
+   *
+   * THIS ROW USED TO CARRY A `values` FIELD AS WELL, AND ITS REMOVAL IS A DECISION RATHER
+   * THAN A TIDY-UP. `values` was `packItemToFormValues(item)` for every row except the one a
+   * submission had just failed for, where it was what the VISITOR TYPED and was refused —
+   * because the point of it was to redisplay a rejected value in the field it came from,
+   * rather than silently reverting to the stored one and inviting them to save the revert
+   * back. That was right when the row carried a free quantity field and a radio group.
+   *
+   * There is no field left to redisplay. Quantity is two buttons carrying computed numbers,
+   * carriage is three buttons carrying three constants, and packed is one button carrying the
+   * opposite of what is stored — so a rejected submission has nothing a visitor needs to
+   * correct in place. What it has is a message, which still renders, still carries an `id` per
+   * failed field, and is still pointed at by the control it belongs to.
+   *
+   * Reusing `values` for the HIDDEN fields would also have been wrong in a way that is worth
+   * recording, because it is the obvious thing to reach for: on a row whose carriage failed to
+   * parse it holds `''`, so every other form on that row would carry the `''` forward and fail
+   * for the same reason, leaving the row unusable until a reload. The stored triple cannot do
+   * that — `parsePackItemForm` has already accepted it once.
+   *
+   * `props.itemError.values` is untouched and still arrives: it is the page's prop, the page
+   * still derives it, and this component simply no longer has a field to spend it on.
+   */
+  readonly storedCarriage: string;
+  readonly storedPacked: boolean;
   /**
    * The failed fields, as `(field, message)` pairs rather than as bare sentences.
    *
@@ -492,6 +661,11 @@ const rows = computed<CategoryRow[]>(() =>
       items: category.pack_items.map((item, itemIndex) => {
         const rollup = categoryTotals.items[itemIndex];
         const failed = props.itemError?.itemId === item.id ? props.itemError : null;
+        // The stored triple, in the wire spelling the forms post. `packItemToFormValues` is
+        // what turns the row's two boolean columns back into the one `carriage` word, and
+        // going through it rather than reading `worn`/`consumable` here is what keeps this
+        // component from owning a second copy of that mapping. See `storedCarriage`.
+        const stored = packItemToFormValues(item);
         return {
           id: item.id,
           displayName: rollup.name ?? 'Unnamed item',
@@ -502,9 +676,8 @@ const rows = computed<CategoryRow[]>(() =>
           lineWeightGrams: rollup.lineWeightGrams,
           unitWeightGrams: rollup.unitWeightGrams,
           linePrice: rollup.linePrice,
-          // The visitor's own rejected input for the one row that failed, the stored row for
-          // every other.
-          values: failed === null ? packItemToFormValues(item) : failed.values,
+          storedCarriage: stored.carriage,
+          storedPacked: stored.packed !== '',
           errors:
             failed === null
               ? []
@@ -795,47 +968,42 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 
 <template>
   <!--
-    One drop handler for the whole list — see `onDrop`. `dragend` fires on the source element
-    whether the drag ended in a drop or was abandoned over a non-target, which is what clears
-    the indicator when somebody thinks better of it mid-drag. `dragleave` covers the case in
-    between the two: the pointer is still down and has wandered off the list, where nothing
-    would otherwise take the indicator down — see `onDragLeave` for why it cannot simply
-    assign null.
+    ============================================================================
+    THE FIGURES, NOW A SHEET OF THEIR OWN AND STILL THE ONLY COPY OF THEM (PK-73)
+    ============================================================================
+
+    Design feedback: "Pack weights should be in the top 'Pack' section, not in the gear area.
+    As it's a summary of all the gear." They were inside the Categories sheet, under its
+    heading, which said they were part of the list rather than a statement about the pack.
+
+    THEY DID NOT MOVE OUT OF THIS COMPONENT, AND THAT IS THE WHOLE CARE OF IT. The obvious
+    reading of "move them to the top section" is to render them from `src/pages/packs/[id].astro`,
+    where that section's markup lives. That would fork one set of figures into two sources:
+    the page computes its tree once per request, this island recomputes its own on every drag,
+    and a cross-category drop would leave the page's copy describing a pack that is no longer
+    on screen. The pack-level figures happen not to change under a reorder — but "the two
+    copies agree today because of a property of one gesture" is not a design, it is a
+    coincidence waiting for the next write. So the figures stay derived from `tree`, in here,
+    and what moved is only which sheet they are drawn on.
+
+    The component therefore has TWO ROOT ELEMENTS now. `astro-island` is `display: contents`,
+    so both land as direct children of the page's `flex flex-col gap-[30px]` column and pick
+    up the 30px sheet gap (DESIGN.md §3) exactly as the page's own sheets do. Nothing on this
+    sheet drags, so the drag handlers stay on the Categories sheet below where they belong.
+
+    Hidden entirely when the pack has no categories, per §9 ("an empty page has no figures to
+    report") — the same rule that used to hide the `<dl>`, now hiding the sheet around it so
+    an empty pack does not show an empty white rectangle above its invitation.
+
+    The heading is `sr-only`: every figure below is labelled by its own `<dt>`, so a visible
+    "Pack weight" title would be a fourth word for something already named six times — but a
+    sheet with no accessible name at all is a landmark a screen-reader user cannot identify in
+    a list of them.
   -->
-  <section
-    aria-labelledby="pack-contents-heading"
-    class="sheet"
-    @drop.prevent="onDrop"
-    @dragend="endDrag"
-    @dragleave="onDragLeave"
-  >
+  <section v-if="rows.length > 0" aria-labelledby="pack-weights-heading" class="sheet pack-weights">
     <div class="sheet-body">
-      <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-        <h2 id="pack-contents-heading" class="section-title">Categories</h2>
-        <p class="hint">
-          {{
-            enabled
-              ? 'Drag a category, or an item by its grip, to reorder it. Items can be dragged into another category. Reordering needs a pointer.'
-              : 'Everything in this pack, in the order it is stored in.'
-          }}
-        </p>
-      </div>
-
-      <!--
-        THE FIGURES, RENDERED ONCE ON THIS PAGE. Base, worn and consumable are the partition
-        `computeTotals` guarantees — the three add up to the total by definition, not by
-        coincidence — so they are rendered together rather than as one figure with the others
-        hidden behind a link. They are derived from the tree in front of the visitor, so a drag
-        that moves an item between categories redraws them; reordering moves no weight, so not
-        one of them may change when it does.
-
-        `.ledger-figures` (paper.css, DESIGN.md §7): flat inside this sheet, a hairline above
-        and hairlines between figures — not a second surface. Hidden when the pack has no
-        categories, per §9 ("an empty page has no figures to report"): every one of these
-        would read zero, and a row of zeros above an empty-state invitation is worse than no
-        row at all.
-      -->
-      <dl v-if="rows.length > 0" class="ledger-figures mt-8">
+      <h2 id="pack-weights-heading" class="sr-only">Pack weight</h2>
+      <dl class="ledger-figures">
         <div v-for="bucket in WEIGHT_BUCKETS" :key="bucket">
           <dt>{{ BUCKET_LABELS[bucket] }}</dt>
           <dd :class="`numeric ${BUCKET_TEXT_CLASS[bucket]}`">
@@ -855,6 +1023,36 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           <dd class="numeric">{{ prices.map((money) => formatMoney(money)).join(' · ') }}</dd>
         </div>
       </dl>
+    </div>
+  </section>
+
+  <!--
+    One drop handler for the whole list — see `onDrop`. `dragend` fires on the source element
+    whether the drag ended in a drop or was abandoned over a non-target, which is what clears
+    the indicator when somebody thinks better of it mid-drag. `dragleave` covers the case in
+    between the two: the pointer is still down and has wandered off the list, where nothing
+    would otherwise take the indicator down — see `onDragLeave` for why it cannot simply
+    assign null.
+  -->
+  <section
+    ref="listRoot"
+    aria-labelledby="pack-contents-heading"
+    class="sheet"
+    @drop.prevent="onDrop"
+    @dragend="endDrag"
+    @dragleave="onDragLeave"
+  >
+    <div class="sheet-body">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+        <h2 id="pack-contents-heading" class="section-title">Categories</h2>
+        <p class="hint">
+          {{
+            enabled
+              ? 'Drag a category, or an item by its grip, to reorder it. Items can be dragged into another category. Reordering needs a pointer.'
+              : 'Everything in this pack, in the order it is stored in.'
+          }}
+        </p>
+      </div>
 
       <!--
         TWO PERMANENT LIVE REGIONS, AND THE PERMANENCE IS THE POINT. A live region has to be in
@@ -938,7 +1136,18 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           side and gets its own eight lines there, because it has to make the decision at
           runtime rather than in the template.
         -->
-          <div class="border-hairline flex flex-wrap items-end justify-between gap-4 border-b p-5">
+          <!--
+          ONE LINE, 40px, AT 375px AND AT 1000px (PK-73, DESIGN.md §3). What used to be here
+          was a wrapping flex row carrying a labelled text field, a Rename button, the
+          figures and a Delete button — four controls that could not co-exist on one line at
+          any width, so the row was three lines on a phone and two on a desktop and the 40px
+          rhythm did not survive one category.
+
+          The name stays on the row because it is the row: renaming is the common edit, and
+          burying a text field in a menu would make the ordinary case the hidden one. The two
+          BUTTONS move into the `…` menu, which is what buys the line back.
+        -->
+          <div class="border-hairline row-line border-b">
             <!--
             The grip, and the only thing on this row that arms a drag. `aria-hidden` and not
             focusable on purpose: reordering is pointer-only (see the header), and a focusable
@@ -947,7 +1156,7 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
           -->
             <span
               v-if="enabled"
-              class="grip text-ink-3 shrink-0 self-center"
+              class="grip text-ink-3 shrink-0"
               :class="{ busy: !draggable }"
               aria-hidden="true"
               @pointerdown="grab(category.id)"
@@ -956,84 +1165,151 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
               <GripVertical :size="16" />
             </span>
 
-            <form method="post" class="flex flex-1 flex-wrap items-end gap-3">
+            <!--
+            THE FORM CARRIES AN `id` AND ITS SUBMIT BUTTON IS IN THE MENU, associated back to
+            it with the `form` attribute. A `<form>` cannot contain a `<details>` that
+            contains another `<form>` — nested forms are not parseable HTML — and the menu
+            has to hold both the rename submit and the delete form, so the submit is the half
+            that leaves. `form="…"` is the platform's own answer to exactly this and needs no
+            script.
+
+            Enter in the field still renames, which matters more than it looks: that button
+            is the form's DEFAULT BUTTON (the first submit control in tree order among the
+            form's controls), so implicit submission fires it. `display: none` on the closed
+            menu does not change that — the default button is chosen from the form's control
+            list, not from what is painted.
+
+            The visible label is gone from the field, so the name is carried by `aria-label`
+            rather than by a `<label>`: a 40px row has no space for a label above a field,
+            and "Category name" printed beside every category name would be the app talking
+            over the visitor's own words (DESIGN.md §4).
+          -->
+            <form :id="`category-rename-${category.id}`" method="post" class="category-name-form">
               <input type="hidden" name="intent" :value="PACK_INTENT.renameCategory" />
               <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
-              <div class="min-w-48 flex-1">
-                <label :for="`category-name-${category.id}`" :class="LABEL_CLASS">
-                  Category name
-                </label>
-                <input
-                  :id="`category-name-${category.id}`"
-                  :name="PACK_CATEGORY_FORM_FIELD.name"
-                  type="text"
-                  :value="category.name"
-                  :aria-describedby="
-                    category.renameError === null ? undefined : `category-name-error-${category.id}`
-                  "
-                  :aria-invalid="category.renameError === null ? undefined : 'true'"
-                  :class="INPUT_CLASS"
-                />
-                <p
-                  v-if="category.renameError !== null"
-                  :id="`category-name-error-${category.id}`"
-                  :class="ERROR_CLASS"
-                >
-                  {{ category.renameError }}
-                </p>
-              </div>
-              <!--
-              THE NAME SAYS WHICH ROW, in the same way the remove-item control at the bottom
-              of an item row always has. A screen reader listing this page's controls reads
-              them out of context, and a pack with nine categories otherwise produces nine
-              buttons called "Rename" and nine called "Delete category" with nothing to tell
-              them apart. The distinguishing half is `sr-only` so the visible label stays the
-              single word the layout is built around — and because WCAG 2.5.3 (Label in Name)
-              requires the accessible name to CONTAIN the visible one, which it does: the
-              visible text is the first thing in the button and the context follows it.
-            -->
-              <button type="submit" :class="QUIET_BUTTON_CLASS">
-                Rename <span class="sr-only">{{ category.name }}</span>
-              </button>
+              <input
+                :id="`category-name-${category.id}`"
+                :name="PACK_CATEGORY_FORM_FIELD.name"
+                type="text"
+                :value="category.name"
+                aria-label="Category name"
+                autocomplete="off"
+                :aria-describedby="
+                  category.renameError === null ? undefined : `category-name-error-${category.id}`
+                "
+                :aria-invalid="category.renameError === null ? undefined : 'true'"
+                class="field category-name-field"
+              />
             </form>
 
-            <p class="text-ink-2 numeric text-sm">
+            <!-- The tail is `.row-figure-detail` for the same §3 reason the item row's is: at
+                 375px a category name is competing with it for the line, and a name the
+                 visitor typed and cannot read is a worse outcome than a total they can find
+                 one sheet up. The base figure — the one the palette spends a colour on —
+                 stays at every width. -->
+            <p class="text-ink-2 numeric row-figures text-sm">
               <span :class="`font-medium ${BUCKET_TEXT_CLASS.base}`">
                 {{ formatWeight(category.baseGrams, props.weightSystem) }}
               </span>
-              <span class="text-ink-3"> base of </span>
-              <span class="text-ink font-medium">
+              <span class="text-ink-3 row-figure-detail"> base of </span>
+              <span class="text-ink row-figure-detail font-medium">
                 {{ formatWeight(category.totalGrams, props.weightSystem) }}
               </span>
             </p>
 
-            <!--
-            PK-74. A REAL LINK, NEVER A BUTTON: `upgradeTrigger` refuses anything that is not
-            an `<a href>`, because the whole degradation contract is that the navigation is
-            cancelled only once the dialog is genuinely up. Followed without a script it lands
-            on this pack with `?add=<categoryId>`, which the page reads back through
-            `parseAddToPackRequest` and server-renders the dialog already open on this
-            category. Named for a screen reader for the reason the Rename and Delete buttons
-            above give: out of context, a nine-category pack would otherwise offer nine
-            controls called "Add item" with nothing to tell them apart.
-          -->
-            <a
-              :href="addToPackHref(packPath(props.packId), category.id)"
-              v-bind="addToPackTriggerAttributes(category)"
-              :class="QUIET_BUTTON_CLASS"
-            >
-              Add item <span class="sr-only">to {{ category.name }}</span>
-            </a>
+            <details class="row-menu">
+              <!-- No `title`: it would repeat `aria-label` verbatim as the accessible
+                   DESCRIPTION, so a screen reader would announce "Actions for Shelter, Actions
+                   for Shelter". The carriage commands' `:title` is different text (the
+                   meaning, not the label) and is kept for that reason. -->
+              <summary class="row-menu-trigger" :aria-label="`Actions for ${category.name}`">
+                <Ellipsis :size="16" aria-hidden="true" />
+              </summary>
+              <div class="row-menu-panel">
+                <!--
+                PK-74. A REAL LINK, NEVER A BUTTON: `upgradeTrigger` refuses anything that is
+                not an `<a href>`, because the whole degradation contract is that the
+                navigation is cancelled only once the dialog is genuinely up. Followed without
+                a script it lands on this pack with `?add=<categoryId>`, which the page reads
+                back through `parseAddToPackRequest` and server-renders the dialog already open
+                on this category. `.row-menu-item` styles an anchor exactly as well as a
+                button — the class sets no element-specific behaviour, only a box, a font and a
+                cursor — so it sits in this menu without inventing a second visual language for
+                "the app-speaking control that happens to navigate".
 
-            <form v-if="!category.confirmingDelete" method="post">
-              <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
-              <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
-              <!-- Named, for the reason the Rename button above gives. -->
-              <button type="submit" :class="DANGER_BUTTON_CLASS">
-                Delete category <span class="sr-only">{{ category.name }}</span>
-              </button>
-            </form>
+                FIRST IN THE MENU, deliberately: it is the one item here that adds rather than
+                edits or removes, and it is also the action a visitor reaches for most often on
+                a category that already exists.
+              -->
+                <a
+                  :href="addToPackHref(packPath(props.packId), category.id)"
+                  v-bind="addToPackTriggerAttributes(category)"
+                  class="row-menu-item"
+                >
+                  <Plus :size="15" aria-hidden="true" />
+                  <span aria-hidden="true">Add item</span>
+                  <span class="sr-only">Add item to {{ category.name }}</span>
+                </a>
+
+                <hr class="row-menu-rule" />
+
+                <!--
+                THE NAME SAYS WHICH ROW, in the same way every named control in this component
+                does. A screen reader listing this page's controls reads them out of context,
+                and a pack with nine categories otherwise produces nine buttons called
+                "Rename" and nine called "Delete category" with nothing to tell them apart.
+                The distinguishing half is `sr-only` so the visible label stays the word the
+                menu is built around — and because WCAG 2.5.3 (Label in Name) requires the
+                accessible name to CONTAIN the visible one, which it does: the visible half is
+                the first word of the hidden one.
+
+                TWO SPANS, NOT ONE WITH AN `sr-only` TAIL — `Rename<span class="sr-only">
+                {name}</span>` — WHICH IS A PRECAUTION, NOT A CORRECTION. That spelling puts
+                the separating space as the FIRST character inside the `sr-only` element
+                rather than in the plain text before it; whether Vue's `whitespace: 'condense'`
+                keeps that leading space depends on exactly how the surrounding markup is
+                broken across lines, and it is easy to lose without the compiled output
+                changing in any way a visual review would catch — the two words would still
+                read correctly on screen and run together only for a screen reader. This
+                component's own header comment already argues that a control's accessible name
+                is not optional here, so the two-span form is used everywhere a control's
+                visible label is a prefix of a longer accessible name: the full sentence is
+                written once, hidden, and the visible word once, `aria-hidden`, so the
+                announced string is a literal in the template with no whitespace rule between
+                it and what a screen reader reads.
+              -->
+                <button
+                  type="submit"
+                  :form="`category-rename-${category.id}`"
+                  class="row-menu-item"
+                >
+                  <Pencil :size="15" aria-hidden="true" />
+                  <span aria-hidden="true">Rename</span>
+                  <span class="sr-only">Rename {{ category.name }}</span>
+                </button>
+
+                <form v-if="!category.confirmingDelete" method="post">
+                  <input type="hidden" name="intent" :value="PACK_INTENT.deleteCategory" />
+                  <input type="hidden" :name="PACK_EDITOR_FIELD.categoryId" :value="category.id" />
+                  <button type="submit" class="row-menu-item row-menu-item-danger">
+                    <Trash2 :size="15" aria-hidden="true" />
+                    <span aria-hidden="true">Delete category</span>
+                    <span class="sr-only">Delete category {{ category.name }}</span>
+                  </button>
+                </form>
+              </div>
+            </details>
           </div>
+
+          <!-- Outside the line, because a message that has to wrap cannot share a 40px row —
+               and it only exists for the one category whose rename was refused. -->
+          <p
+            v-if="category.renameError !== null"
+            :id="`category-name-error-${category.id}`"
+            :class="`${ERROR_CLASS} border-hairline row-note border-b`"
+          >
+            {{ category.renameError }}
+          </p>
 
           <!--
           The reveal half of the two-step, rendered in place of the row's own delete button and
@@ -1107,7 +1383,7 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
             <li
               v-for="(item, itemIndex) in category.items"
               :key="item.id"
-              class="row px-5 py-4"
+              class="row"
               :class="{
                 dragging: drag?.kind === 'item' && drag.id === item.id,
                 'drop-before': markerIsItem(category.id, itemIndex),
@@ -1136,132 +1412,362 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
               The category `<li>` deliberately does NOT carry `.stop`; see the note beside its
               own `dragstart` for why the two differ.
             -->
-              <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-                <p class="text-ink written written flex min-w-0 items-center gap-2 font-medium">
-                  <span
-                    v-if="enabled"
-                    class="grip text-ink-3 shrink-0"
-                    :class="{ busy: !draggable }"
-                    aria-hidden="true"
-                    @pointerdown="grab(item.id)"
-                    @pointerup="release"
-                  >
-                    <GripVertical :size="14" />
-                  </span>
-                  {{ item.displayName }}
-                  <span v-if="item.isCustom" class="system system text-ink-3 text-xs font-normal">
+              <!--
+              ONE LINE PER ITEM (PK-73), AND EVERY CONTROL ON IT IS A SEPARATE FORM.
+
+              What was here: a name-and-figures line, then a second line carrying one form
+              with a quantity field, a three-way segmented control, a Packed checkbox and a
+              Save button, then a third line with Remove. Three lines at 1000px and five or
+              six at 375px, against DESIGN.md §3's 40px row. The design feedback asks for the
+              carriage selector and Remove to move into a `…` menu and for quantity to become
+              a −/+ stepper, and doing both is what makes one line fit.
+
+              WHY EACH CONTROL IS ITS OWN `<form>` RATHER THAN ONE FORM WITH SEVERAL SUBMIT
+              BUTTONS. `parsePackItemForm` (src/lib/packs/form.ts) writes all three columns on
+              every save: a submission missing `carriage` is REFUSED, one missing `quantity`
+              writes the column default of 1 over whatever was stored, and one missing `packed`
+              writes false. So every control here has to post a complete triple, and the two
+              settings it is not changing have to travel as hidden fields.
+
+              One form with `name`/`value` submit buttons cannot do that. The hidden field and
+              the button would both be called `quantity`, both would be submitted, and which
+              one `FormData.get` returned would come down to their order in the markup — a
+              silent dependency on DOM order for the value of a stored column. Separate forms
+              make each submission say exactly one thing, and the parser is untouched (it
+              belongs to PK-72).
+
+              THE COST, RECORDED RATHER THAN GLOSSED: a change is a round trip, so stepping a
+              quantity from 1 to 5 is four of them where typing "5" and pressing Save was one.
+              That is what a −/+ stepper IS — it trades typing for tapping — and it is what was
+              asked for. What it buys back is that carriage and packed are now ONE action each
+              instead of "change the control, then find Save".
+
+              NOTHING HERE NEEDS JAVASCRIPT, which is the rule this component is built on: the
+              stepper is two submit buttons, the menu is a `<details>`, and every one of them
+              works in a browser that never runs the island. See `openMenus` for what
+              hydration adds, and why all of it is optional.
+            -->
+              <div class="row-line item-line">
+                <span
+                  v-if="enabled"
+                  class="grip text-ink-3 shrink-0"
+                  :class="{ busy: !draggable }"
+                  aria-hidden="true"
+                  @pointerdown="grab(item.id)"
+                  @pointerup="release"
+                >
+                  <GripVertical :size="14" />
+                </span>
+
+                <!--
+                PACKED IS A MARK ON THE ROW AND A COMMAND IN THE MENU. The checkbox that used
+                to sit on the second line cannot stay — a checkbox needs a Save button to mean
+                anything, and there is no longer one — but the STATE has to remain visible or
+                the packed count in the figures above would be reporting something the list
+                does not show. A tick before the name reads at a glance down a long pack; the
+                sr-only sentence is what a screen reader gets, because the icon is decorative
+                once the state is also announceable.
+              -->
+                <span
+                  v-if="item.storedPacked"
+                  class="text-moss packed-tick shrink-0"
+                  :title="`${item.spokenName} is packed`"
+                >
+                  <Check :size="14" aria-hidden="true" />
+                  <span class="sr-only">Packed.</span>
+                </span>
+
+                <p class="item-name">
+                  <span class="text-ink written font-medium">{{ item.displayName }}</span>
+                  <span v-if="item.isCustom" class="system text-ink-3 item-badge">
                     one-off item
                   </span>
                 </p>
-                <p class="numeric text-sm">
+
+                <!-- §3 forbids a wrapping data cell, so the two SECONDARY figures — the unit
+                     weight and the line price — are dropped on a narrow viewport rather than
+                     allowed to push the row to two lines. The line weight, which is the figure
+                     the row exists to report, is never dropped. -->
+                <p class="numeric row-figures text-sm">
                   <span :class="`font-medium ${item.bucketClass}`">
                     {{ formatWeight(item.lineWeightGrams, props.weightSystem) }}
                   </span>
-                  <span v-if="item.quantity > 1" class="text-ink-3">
+                  <span v-if="item.quantity > 1" class="text-ink-3 row-figure-detail">
                     ({{ formatWeight(item.unitWeightGrams, props.weightSystem) }} each)
                   </span>
-                  <span v-if="item.linePrice !== null" class="text-ink-3">
+                  <span v-if="item.linePrice !== null" class="text-ink-3 row-figure-detail">
                     · {{ formatMoney(item.linePrice) }}
                   </span>
                 </p>
+
+                <!--
+                THE STEPPER. Two submit buttons carrying the NEXT quantity in their `value`,
+                either side of the current one.
+
+                IT STEPS FROM THE STORED QUANTITY, NOT FROM `values.quantity`. The two differ
+                on exactly one row — the one whose submission failed — where `values` holds
+                what the visitor typed and was refused. A stepper reading that would offer to
+                move from a number the database never accepted. `item.quantity` is the rollup's
+                figure, which came out of the stored row.
+
+                THE `−` IS DISABLED AT 1, and this is NOT the "a control drawn before it can
+                work" case the header argues against. That rule is about controls disabled
+                because a bundle has not arrived; this one is disabled because
+                `pack_items_quantity_check` is `quantity > 0` and there is no lower value to
+                step to. It is the same answer before and after hydration and with JavaScript
+                off forever, which is what makes it honest. A quantity that IS invalid can
+                still only arrive from outside this markup, and it is still reported: the
+                group points at the row's own message with `aria-describedby`.
+
+                `aria-invalid` is deliberately not carried over from the old text field. It
+                marks a control whose VALUE is invalid, and neither of these buttons has a
+                value a visitor chose — they each carry one number this component computed.
+                The association with the message is what a screen reader needs, and it is kept.
+
+                NAMED SO THAT SPEECH INPUT CAN REACH THEM. Both labels contain "Qty", which is
+                what the visible control was called before it became a pair of icons, so
+                "click Qty" still has something to match (WCAG 2.5.3). The group carries the
+                item's name so forty steppers on one page are forty distinguishable groups.
+
+                THE CURRENT NUMBER IS DESCRIBED, NOT JUST SHOWN. `<input type="number">`
+                announces its own value on focus; two buttons around a plain span do not, and
+                the group's `aria-label` names the ROW, not the count. Without more, a visitor
+                tabbing to either button would hear "Decrease Qty for Socks" and nothing about
+                what it is currently 3 of — a regression from the field this replaced. Each
+                button's `aria-describedby` therefore includes the value span's own `id`, so
+                the count is read as part of the button's description.
+              -->
+                <div
+                  class="stepper"
+                  role="group"
+                  :aria-label="`Qty for ${item.spokenName}`"
+                  :aria-describedby="
+                    item.quantityInvalid ? `item-${item.id}-error-quantity` : undefined
+                  "
+                >
+                  <form method="post" class="stepper-form">
+                    <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
+                    <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+                    <input
+                      type="hidden"
+                      :name="PACK_ITEM_FORM_FIELD.carriage"
+                      :value="item.storedCarriage"
+                    />
+                    <input
+                      v-if="item.storedPacked"
+                      type="hidden"
+                      :name="PACK_ITEM_FORM_FIELD.packed"
+                      value="on"
+                    />
+                    <button
+                      type="submit"
+                      class="stepper-button"
+                      :name="PACK_ITEM_FORM_FIELD.quantity"
+                      :value="item.quantity - 1"
+                      :disabled="item.quantity <= 1"
+                      :aria-label="`Decrease Qty for ${item.spokenName}`"
+                      :aria-describedby="
+                        item.quantityInvalid
+                          ? `item-${item.id}-qty-value item-${item.id}-error-quantity`
+                          : `item-${item.id}-qty-value`
+                      "
+                    >
+                      <Minus :size="14" aria-hidden="true" />
+                    </button>
+                  </form>
+
+                  <span :id="`item-${item.id}-qty-value`" class="written numeric stepper-value">
+                    {{ item.quantity }}
+                  </span>
+
+                  <form method="post" class="stepper-form">
+                    <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
+                    <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+                    <input
+                      type="hidden"
+                      :name="PACK_ITEM_FORM_FIELD.carriage"
+                      :value="item.storedCarriage"
+                    />
+                    <input
+                      v-if="item.storedPacked"
+                      type="hidden"
+                      :name="PACK_ITEM_FORM_FIELD.packed"
+                      value="on"
+                    />
+                    <button
+                      type="submit"
+                      class="stepper-button"
+                      :name="PACK_ITEM_FORM_FIELD.quantity"
+                      :value="item.quantity + 1"
+                      :aria-label="`Increase Qty for ${item.spokenName}`"
+                      :aria-describedby="
+                        item.quantityInvalid
+                          ? `item-${item.id}-qty-value item-${item.id}-error-quantity`
+                          : `item-${item.id}-qty-value`
+                      "
+                    >
+                      <Plus :size="14" aria-hidden="true" />
+                    </button>
+                  </form>
+                </div>
+
+                <!-- No `title`: see the category menu's identical note above — it would
+                     repeat `aria-label` as the accessible description. -->
+                <details class="row-menu">
+                  <summary
+                    class="row-menu-trigger"
+                    :aria-label="`Actions for ${item.spokenName}`"
+                    :aria-describedby="
+                      item.carriageInvalid ? `item-${item.id}-error-carriage` : undefined
+                    "
+                  >
+                    <Ellipsis :size="16" aria-hidden="true" />
+                  </summary>
+                  <div class="row-menu-panel">
+                    <!--
+                    ONE COMMAND PER OPTION, WHICH KEEPS THE IMPOSSIBLE COMBINATION IMPOSSIBLE.
+                    The control this replaces was a radio group, and the argument for it was
+                    that `pack_items_worn_consumable_exclusive` refuses an item that is both
+                    worn and consumable, and a radio group cannot express both at once. Three
+                    submit buttons cannot either, and for a stronger reason: a submission
+                    carries the `carriage` of the ONE button that was pressed, so there is no
+                    request shape — not even a hand-written one built from this markup — in
+                    which two of them travel together. `carriageFlags` still turns that single
+                    word into the two columns, so the constraint has nothing to reject.
+
+                    `aria-current` and the tick say which one is in force, in the two channels
+                    a menu of commands has: a radio group announced its own selected state,
+                    and buttons do not. `aria-current="true"` is included for the screen
+                    readers that announce it, but is not relied on alone — VoiceOver in
+                    particular does not reliably announce `aria-current` on a `<button>`, so
+                    the sr-only text below states the selection in words as well.
+
+                    The label is the word, not the icon (see `CARRIAGE_ICONS`), and it names
+                    the ROW as well as the option: three buttons per item, worded only
+                    "Worn"/"Consumable"/"In the pack", is the repeated-name problem this
+                    component's other named controls exist to avoid — a pack of forty items
+                    would offer forty identically-worded "Worn" buttons with nothing in a
+                    rotor or elements list to tell them apart.
+                  -->
+                    <p :id="`item-${item.id}-carriage-label`" class="system row-menu-heading">
+                      How {{ item.spokenName }} is carried
+                    </p>
+                    <div role="group" :aria-labelledby="`item-${item.id}-carriage-label`">
+                      <form v-for="carriage in PACK_ITEM_CARRIAGES" :key="carriage" method="post">
+                        <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
+                        <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+                        <input
+                          type="hidden"
+                          :name="PACK_ITEM_FORM_FIELD.quantity"
+                          :value="item.quantity"
+                        />
+                        <input
+                          v-if="item.storedPacked"
+                          type="hidden"
+                          :name="PACK_ITEM_FORM_FIELD.packed"
+                          value="on"
+                        />
+                        <button
+                          type="submit"
+                          class="row-menu-item"
+                          :name="PACK_ITEM_FORM_FIELD.carriage"
+                          :value="carriage"
+                          :aria-current="carriage === item.storedCarriage ? 'true' : undefined"
+                          :title="PACK_ITEM_CARRIAGE_MEANINGS[carriage]"
+                        >
+                          <component :is="CARRIAGE_ICONS[carriage]" :size="15" aria-hidden="true" />
+                          <span aria-hidden="true">{{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}</span>
+                          <span class="sr-only">
+                            {{ PACK_ITEM_CARRIAGE_LABELS[carriage] }} — {{ item.spokenName
+                            }}{{ carriage === item.storedCarriage ? ', current' : '' }}
+                          </span>
+                          <Check
+                            v-if="carriage === item.storedCarriage"
+                            :size="14"
+                            class="row-menu-tick"
+                            aria-hidden="true"
+                          />
+                        </button>
+                      </form>
+                    </div>
+
+                    <hr class="row-menu-rule" />
+
+                    <!-- The hidden `packed` field is present exactly when the row is NOT
+                         packed, so this one button both packs and unpacks: an absent checkbox
+                         field is how `parseCheckbox` reads false, which is the same shape the
+                         old checkbox posted. -->
+                    <form method="post">
+                      <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
+                      <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+                      <input
+                        type="hidden"
+                        :name="PACK_ITEM_FORM_FIELD.quantity"
+                        :value="item.quantity"
+                      />
+                      <input
+                        type="hidden"
+                        :name="PACK_ITEM_FORM_FIELD.carriage"
+                        :value="item.storedCarriage"
+                      />
+                      <input
+                        v-if="!item.storedPacked"
+                        type="hidden"
+                        :name="PACK_ITEM_FORM_FIELD.packed"
+                        value="on"
+                      />
+                      <button type="submit" class="row-menu-item">
+                        <Check :size="15" aria-hidden="true" />
+                        <span aria-hidden="true">
+                          {{ item.storedPacked ? 'Mark as not packed' : 'Mark as packed' }}
+                        </span>
+                        <span class="sr-only">
+                          {{ item.storedPacked ? 'Mark as not packed' : 'Mark as packed' }}
+                          {{ item.spokenName }}
+                        </span>
+                      </button>
+                    </form>
+
+                    <hr class="row-menu-rule" />
+
+                    <!--
+                    ONE CLICK, NOT TWO, and this is the one destructive control on the page
+                    that is not behind the reveal-then-confirm step. It removes an APPEARANCE,
+                    not a piece of gear: a referenced item's closet row is untouched (rule 1 of
+                    the core schema), and putting it back is one tick in the picker below. The
+                    two controls that DO carry the step — deleting a category, deleting the
+                    pack — each destroy rows nothing else holds a copy of, which is the
+                    distinction the gesture is spent on.
+
+                    Being inside a menu changes none of that. A `<details>` is a disclosure,
+                    not a confirmation: opening it writes nothing and asks nothing, so this is
+                    still one deliberate press against a page the server rendered — which is
+                    the property the rule in `src/lib/account-deletion.ts` is protecting, and
+                    is why this did not quietly become a two-step by moving.
+                  -->
+                    <form method="post">
+                      <input type="hidden" name="intent" :value="PACK_INTENT.removeItem" />
+                      <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+                      <button type="submit" class="row-menu-item row-menu-item-danger">
+                        <Trash2 :size="15" aria-hidden="true" />
+                        <span aria-hidden="true">Remove</span>
+                        <span class="sr-only">Remove {{ item.spokenName }} from this pack</span>
+                      </button>
+                    </form>
+                  </div>
+                </details>
               </div>
 
-              <form method="post" class="mt-3 flex flex-wrap items-center gap-3">
-                <input type="hidden" name="intent" :value="PACK_INTENT.saveItem" />
-                <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
+              <!-- One `id` per FAILED FIELD, not one for the list: the stepper group and the
+                   menu's carriage group each point at their own message, so a screen reader
+                   reads the sentence belonging to the control it is on rather than every
+                   sentence on the row. See `ItemRow.errors` for why the field name is carried
+                   this far.
 
-                <!--
-                THE ACCESSIBLE NAME STARTS WITH THE VISIBLE ONE, which is WCAG 2.5.3 (Label
-                in Name) and not a stylistic preference. The visible label is "Qty"; the
-                accessible name has to CONTAIN that string, or somebody driving the page by
-                voice who says "click Qty" targets a control whose name the speech engine
-                cannot match. It used to read "Quantity of {item}", which shares not one word
-                with what is on screen. The item name is still in there, because a page can
-                hold forty of these and "Qty" alone names none of them.
-
-                `aria-describedby` points at this row's own error message when there is one —
-                the pattern the category rename above has always used. Without it a screen
-                reader says "invalid entry" and stops, which is the announcement that tells a
-                visitor something is wrong and withholds the only thing that would let them
-                fix it.
-              -->
-                <label class="text-ink-2 flex items-center gap-2 text-sm">
-                  <span class="system system">Qty</span>
-                  <input
-                    :name="PACK_ITEM_FORM_FIELD.quantity"
-                    type="text"
-                    inputmode="numeric"
-                    :value="item.values.quantity"
-                    :aria-label="`Qty for ${item.spokenName}`"
-                    :aria-describedby="
-                      item.quantityInvalid ? `item-${item.id}-error-quantity` : undefined
-                    "
-                    :aria-invalid="item.quantityInvalid ? 'true' : undefined"
-                    class="field w-16"
-                  />
-                </label>
-
-                <!--
-                ONE CONTROL, THREE OPTIONS — never two checkboxes. The fourth combination two
-                checkboxes make easiest to produce (worn AND consumable) is refused by
-                pack_items_worn_consumable_exclusive and would make the pack's own totals throw
-                on read. A radio group cannot express it at all: the browser itself refuses to
-                let two radios of one name be checked. See PACK_ITEM_CARRIAGES. Presented as one
-                segmented control (DESIGN.md §6: a choice of three or fewer), the same box
-                the one-off item form's carriage field uses.
-              -->
-                <fieldset class="flex flex-wrap items-center gap-2">
-                  <legend class="sr-only">How {{ item.spokenName }} is carried</legend>
-                  <div class="segmented">
-                    <label
-                      v-for="carriage in PACK_ITEM_CARRIAGES"
-                      :key="carriage"
-                      class="segment"
-                      :title="PACK_ITEM_CARRIAGE_MEANINGS[carriage]"
-                    >
-                      <!-- `aria-describedby` on each radio rather than on the fieldset: support
-                       for a description on a grouping element is inconsistent, and the
-                       invalid state is set here, so the explanation belongs on the same
-                       node as the thing it explains. -->
-                      <input
-                        type="radio"
-                        :name="PACK_ITEM_FORM_FIELD.carriage"
-                        :value="carriage"
-                        :checked="carriage === item.values.carriage"
-                        :aria-describedby="
-                          item.carriageInvalid ? `item-${item.id}-error-carriage` : undefined
-                        "
-                        :aria-invalid="item.carriageInvalid ? 'true' : undefined"
-                      />
-                      {{ PACK_ITEM_CARRIAGE_LABELS[carriage] }}
-                    </label>
-                  </div>
-                </fieldset>
-
-                <label class="text-ink-2 flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    :name="PACK_ITEM_FORM_FIELD.packed"
-                    value="on"
-                    :checked="item.values.packed !== ''"
-                    class="checkbox"
-                  />
-                  Packed
-                </label>
-
-                <!-- Named, for the reason the category Rename button gives: an item row per
-                   piece of gear means a pack of forty items otherwise offers forty buttons
-                   called "Save". -->
-                <button type="submit" :class="QUIET_BUTTON_CLASS">
-                  Save <span class="sr-only">{{ item.spokenName }}</span>
-                </button>
-              </form>
-
-              <!-- One `id` per FAILED FIELD, not one for the list: the quantity input and the
-                 carriage radios each point at their own message, so a screen reader reads
-                 the sentence belonging to the control it is on rather than every sentence on
-                 the row. See `ItemRow.errors` for why the field name is carried this far. -->
-              <ul v-if="item.errors.length > 0" class="mt-2 space-y-1">
+                   BELOW THE LINE, NOT ON IT. A message wraps, and §3 is explicit that a
+                   wrapping cell breaks the 40px rhythm for every row under it. Only the one
+                   row a submission failed for grows, and it grows downwards. -->
+              <ul v-if="item.errors.length > 0" class="item-note row-note space-y-1">
                 <li
                   v-for="entry in item.errors"
                   :id="`item-${item.id}-error-${entry.field}`"
@@ -1271,25 +1777,6 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
                   {{ entry.message }}
                 </li>
               </ul>
-
-              <!--
-              ONE CLICK, NOT TWO, and this is the one destructive control on the page that is
-              not behind the reveal-then-confirm step. It removes an APPEARANCE, not a piece of
-              gear: a referenced item's closet row is untouched (rule 1 of the core schema),
-              and putting it back is one tick in the picker below. The two controls that DO
-              carry the step — deleting a category, deleting the pack — each destroy rows
-              nothing else holds a copy of, which is the distinction the gesture is spent on.
-            -->
-              <form method="post" class="mt-2">
-                <input type="hidden" name="intent" :value="PACK_INTENT.removeItem" />
-                <input type="hidden" :name="PACK_EDITOR_FIELD.itemId" :value="item.id" />
-                <button
-                  type="submit"
-                  class="text-ink-3 hover:text-rust text-xs underline transition-colors"
-                >
-                  Remove {{ item.spokenName }} from this pack
-                </button>
-              </form>
             </li>
           </ul>
         </li>
@@ -1299,6 +1786,379 @@ async function send(before: readonly ListCategory[], body: ReorderIntent): Promi
 </template>
 
 <style scoped>
+/* ==========================================================================
+ * PK-73 — THE ONE-LINE ROW, THE STEPPER AND THE `…` MENU
+ *
+ * All of it is in this scoped block and none of it is in `src/styles/paper.css`,
+ * which PK-68 owns and which four other surfaces share. Nothing below invents a
+ * colour: every value is a token from `src/styles/tokens.css` (CONTRIBUTING.md —
+ * "if you need a colour that is not there, it belongs in DESIGN.md first"), and
+ * every shadow is mixed from `--shadow-ink` rather than from black, because a
+ * black shadow on warm paper reads as a hole.
+ * ========================================================================== */
+
+/*
+ * The figures are the only thing on their own sheet now, so `.ledger-figures`'
+ * top hairline has nothing above it to separate them FROM — it was drawn to
+ * divide the figures from the list they used to sit above, and that list is a
+ * sheet away. Neutralised here rather than in paper.css, where it is right for
+ * every other caller.
+ */
+.pack-weights .ledger-figures {
+  padding-top: 0;
+  border-top: 0;
+  /* Six figures do not fit on one 920px line once a four-figure cost is among them, so the
+     row wraps — which it did inside the Categories sheet too. What it did not have there was
+     a rhythm: the wrapped row landed directly under the first with no gap at all. 20px is the
+     cell (§3). */
+  row-gap: 20px;
+}
+
+/*
+ * DESIGN.md §3: the 40px row, for both row kinds and at both widths.
+ *
+ * `min-height` AND NOT `height`, which is the difference between a rhythm and a
+ * crop. Everything that normally sits on one of these rows is sized to fit 40px
+ * — the 32px field, the 28px controls — so the rhythm holds down a long pack.
+ * A row whose content genuinely cannot fit (a very long category name at 375px)
+ * grows instead of clipping the visitor's own words, which §3 prefers: it names
+ * the wrapped cell as the thing to design out, not the thing to hide.
+ */
+.row-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+
+/* Items are indented under their category. Once every row is the same height and
+   nothing is boxed, this inset is the only thing left saying the list is a tree. */
+.item-line {
+  padding-left: 20px;
+}
+
+/* Capped rather than filling the line. A category name is two or three words, and a 600px
+   outlined box holding "Shelter" reads as the row's subject being the box — four of them down
+   a pack is a column of empty rectangles. The cap is above any name that is not itself a
+   sentence; below it the field still grows with the viewport, which is what a 375px row needs
+   so the value stays readable. */
+.category-name-form {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.category-name-field {
+  width: 100%;
+  min-width: 0;
+}
+
+.item-name {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* THE NAME IS THE ONE COLUMN §3 ALLOWS TO BE LONG, and the way it is allowed to
+   be long is by truncating, never by wrapping: "a wrapped table cell breaks the
+   rhythm for every row below it". Every other cell on the row has a bounded
+   width, so this is the only one that can take the pressure. */
+.item-name > :first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-badge {
+  flex: none;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.packed-tick {
+  display: inline-flex;
+}
+
+/* `margin-left: auto` so the figures and the `…` after them sit against the right edge on
+   BOTH row kinds. An item row gets there anyway — its name is `flex: 1` and eats the slack —
+   but a category row's name field is capped, so without this its menu stopped wherever the
+   name ended and the two menu columns did not line up. A ledger's right-hand column is a
+   column (§7); a `…` that moves in and out by 180px between one row and the next is not. */
+.row-figures {
+  flex: none;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+ * The stepper
+ * ----------------------------------------------------------------------- */
+
+/* One box around three children, drawn like the `.field` it replaces so the row
+   does not gain a new kind of control — same border token, same radius, same 1px
+   stamp DESIGN.md §6 gives a field. */
+.stepper {
+  display: flex;
+  flex: none;
+  align-items: center;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius);
+  background: var(--note);
+  box-shadow: 1px 1px 0 rgba(var(--shadow-ink), 0.18);
+}
+
+/*
+ * `display: contents` so the two forms contribute no box and the three children —
+ * button, figure, button — sit in ONE flex line. The forms exist for the
+ * submission, not for the layout; see the template's note on why there have to be
+ * two of them. Safe on a `<form>` specifically: an unnamed form has no implicit
+ * ARIA role, so this is not one of the elements `display: contents` is known to
+ * drop out of the accessibility tree, and both buttons keep their own roles and
+ * names either way.
+ */
+.stepper-form {
+  display: contents;
+}
+
+.stepper-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* At quantity 1 there is no lower value to step to — see the template. Dimmed
+   and re-cursored so the refusal is visible rather than only felt on click. */
+.stepper-button:disabled {
+  color: var(--ink-3);
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* The figure between them is WRITTEN, because it is the visitor's own quantity
+   (DESIGN.md §4), while the two buttons around it are the app speaking and stay
+   in the system face — "the hand never sets anything operable". 14.5px is the
+   numeral size §4 specifies, one notch below body. */
+.stepper-value {
+  min-width: 24px;
+  font-size: 14.5px;
+  line-height: 20px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+ * The `…` menu
+ * ----------------------------------------------------------------------- */
+
+.row-menu {
+  position: relative;
+  flex: none;
+}
+
+/*
+ * AN OPEN MENU HAS TO PAINT OVER THE ROWS BELOW IT. Every `.row` is
+ * `position: relative` with `z-index: auto`, so positioned siblings paint in tree
+ * order and the panel of row three would otherwise be covered by row four's drop
+ * indicator. A positive z-index puts the open menu in the layer above all of
+ * them. Only `[open]`, so a closed menu adds no stacking context to fifty rows.
+ */
+.row-menu[open] {
+  z-index: 40;
+}
+
+/* The disclosure triangle removed in both spellings a browser might use for it:
+   the trigger is the `…` glyph, and a marker beside it would read as a second
+   affordance. `list-style: none` also restores `<summary>` to a plain box in
+   Safari, where it is a list-item by default. */
+.row-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.row-menu-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.row-menu-trigger:hover {
+  background: var(--paper-deep);
+  color: var(--ink);
+}
+
+/*
+ * The panel. `--note` on a warm shadow, square-ish at the control radius, no
+ * animation — paper does not move (§11), and `global.css` collapses transitions
+ * globally anyway.
+ *
+ * ON §2.5, WHICH THIS SURFACE NEEDED AN AMENDMENT FOR. "No two papers ever
+ * overlap" forbade this exactly as it forbade PK-69's modal, and PK-69 amended
+ * §2.5 rather than shipping a component that quietly contradicted the authority.
+ * This is the second entry under that amendment and the appendix records it: a
+ * row menu is a dismissible interruption — it covers the row, writes nothing by
+ * opening, and leaves nothing when it closes — and not the overlap-for-emphasis
+ * (a note lying on a sheet, something hanging off an edge) that §13 still
+ * refuses. If a third surface wants the same exception, that is the moment to
+ * re-read §2.5 rather than to add another paragraph to it.
+ */
+.row-menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 232px;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--note);
+  box-shadow: 2px 3px 0 rgba(var(--shadow-ink), 0.18);
+}
+
+/* The group label, in the 12px uppercase third ink §4 gives a section label. */
+.row-menu-heading {
+  padding: 6px 10px 2px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  line-height: 20px;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.row-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-system);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row-menu-item:hover {
+  background: var(--paper-deep);
+}
+
+.row-menu-item-danger {
+  color: var(--rust);
+}
+
+/* The current carriage. `--ink-2` and not an accent: the tick reports which
+   option is in force, and the palette spends a colour on a meaning rather than
+   on a state that the tick's presence already carries. Never `--blue` — nothing
+   here is interactive or a base weight. */
+.row-menu-tick {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-2);
+}
+
+.row-menu-rule {
+  height: 0;
+  margin: 5px 2px;
+  border: 0;
+  border-top: 1px solid var(--hairline);
+}
+
+/* A message belonging to the row above it, which is where a message goes when
+   the row itself is 40px and a sentence wraps. */
+.row-note {
+  padding-bottom: 10px;
+}
+
+.item-note {
+  padding-left: 20px;
+}
+
+/*
+ * §3 AGAIN, AT 375px: "if the columns do not fit, remove a column rather than let
+ * one wrap". The two SECONDARY figures go — the per-unit weight, which is the
+ * line weight divided by a quantity the stepper is showing, and the line price —
+ * and the line weight, which is what the row is for, never goes.
+ */
+@media (max-width: 640px) {
+  .row-line {
+    gap: 8px;
+  }
+
+  .item-line {
+    padding-left: 12px;
+  }
+
+  .item-note {
+    padding-left: 12px;
+  }
+
+  .row-figure-detail {
+    display: none;
+  }
+
+  /* The badge is context, not the row's subject, and it was costing "Borrowed spork" every
+     letter after the first. */
+  .item-badge {
+    display: none;
+  }
+
+  /* Four pixels off each control and two off the figure, which is 20px back for the name —
+     the difference between "Zpacks D…" and "Zpacks Duplex…". Still a 24px tap target on the
+     stepper, which is what the row can afford at this width. */
+  .stepper-button,
+  .row-menu-trigger {
+    width: 24px;
+    height: 24px;
+  }
+
+  .stepper-value {
+    min-width: 20px;
+  }
+
+  /*
+   * A COLUMN OF SIX FIGURES EACH TRAILING A VERTICAL HAIRLINE, which is what `.ledger-figures`
+   * degrades to at this width: every figure wraps to its own line and keeps the `border-right`
+   * that was separating it from a neighbour it no longer has. §2.6 allows exactly one set of
+   * verticals on the site — the ones BETWEEN these figures — and six lines each ending in a
+   * stray rule is not that set.
+   *
+   * A two-column grid on the 20px cell instead, with no verticals at all. Scoped to this
+   * component rather than fixed in paper.css, which PK-68 owns and which other surfaces share.
+   */
+  .pack-weights .ledger-figures {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  .pack-weights .ledger-figures > * {
+    margin-right: 0;
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .row-menu-panel {
+    min-width: 208px;
+  }
+}
+
 /*
  * THE ONLY LIFT SHADOW IN THE PRODUCT, AND IT IS A TOKEN. It used to be the only shadow of
  * any kind, and used to need an exemption: "nothing casts a shadow at rest" was a standing
