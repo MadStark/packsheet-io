@@ -2,7 +2,7 @@
   "name": "packsheet-io",
   "type": "module",
   "version": "0.0.1",
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "author": "Queensway Studios Limited",
   "repository": {
     "type": "git",
