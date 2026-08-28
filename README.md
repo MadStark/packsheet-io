@@ -506,12 +506,10 @@ contributor licence agreement — you keep the copyright in what you write.
 
 ## Licence
 
-[GNU AGPL-3.0-only](LICENSE). If you run a modified copy of Packsheet as a network service,
-you must offer your users its source. That is deliberate: this category has already seen a
-popular tool reskinned into an affiliate funnel, and the AGPL is the licence that prevents
-it happening here.
+[MIT](LICENSE).
 
-The bundled typefaces are **not** covered by the AGPL — they remain under the SIL Open Font
-License 1.1. See [NOTICE](NOTICE).
+The "Packsheet" name and logo are **not** covered by the MIT licence — they remain
+trademarks of Queensway Studios Limited. The bundled typefaces are also **not** covered
+by the MIT licence — they remain under the SIL Open Font License 1.1. See [NOTICE](NOTICE).
 
 Copyright © 2026 Queensway Studios Limited.

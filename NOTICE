@@ -6,30 +6,36 @@ in France. "Limited" is part of the registered company name — it does not indi
 an England and Wales company, and the name should not be shortened or "corrected"
 to a different legal form.
 
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU Affero General Public License as published by the Free
-Software Foundation, either version 3 of the License, or (at your option) any
-later version. The full text is in LICENSE.
+This program is free software, licensed under the MIT License. The full text is
+in LICENSE.
 
 Contributions from people outside Queensway Studios Limited remain the copyright
-of their authors, licensed to the project under the same AGPL-3.0 terms. There is
-no copyright assignment and no CLA.
-
-AGPL was chosen deliberately over a permissive licence. Packsheet is a hosted
-web application, and section 13 means anyone who runs a modified copy as a
-network service must offer its source to their users. In a category where a
-competitor was reskinned into an affiliate funnel, that is the point.
+of their authors, licensed to the project under the same MIT terms. There is no
+copyright assignment and no CLA.
 
 
 ================================================================================
-FONTS ARE NOT COVERED BY THE AGPL
+"PACKSHEET" IS NOT COVERED BY THE MIT LICENSE
+================================================================================
+
+The MIT License grants rights to the source code. It does not grant any rights
+to the "Packsheet" name or logo. These are trademarks of Queensway Studios
+Limited and are not licensed under MIT.
+
+If you fork or redistribute this project, please use a different name and
+branding for your version, and do not describe it in a way that implies
+endorsement by or affiliation with Queensway Studios Limited.
+
+
+================================================================================
+FONTS ARE NOT COVERED BY THE MIT LICENSE
 ================================================================================
 
 The three .woff2 files in src/assets/fonts/ are licensed under the SIL Open Font
-License 1.1, NOT the AGPL. This is not a courtesy — OFL 1.1 condition 5 requires
-that the Font Software "must be distributed entirely under this license, and
-must not be distributed under any other license", so relicensing them under the
-AGPL is not permitted.
+License 1.1, NOT the MIT License. This is not a courtesy — OFL 1.1 condition 5
+requires that the Font Software "must be distributed entirely under this
+license, and must not be distributed under any other license", so relicensing
+them under MIT is not permitted.
 
   Klee One              Copyright 2020 The Klee Project Authors
                         https://fonts.google.com/specimen/Klee+One

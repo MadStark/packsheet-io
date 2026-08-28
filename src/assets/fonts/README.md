@@ -36,9 +36,9 @@ Both families are licensed under the **SIL Open Font License 1.1**. Full texts a
 - Klee One — © 2020 The Klee Project Authors
 - Inter — © 2020 The Inter Project Authors
 
-**These files are not under the AGPL.** OFL 1.1 condition 5 requires the Font Software to
-be "distributed entirely under this license, and must not be distributed under any other
-license", so the repository's AGPL does not — and cannot — extend to them. See `NOTICE`.
+**These files are not under the MIT licence.** OFL 1.1 condition 5 requires the Font Software
+to be "distributed entirely under this license, and must not be distributed under any other
+license", so the repository's MIT licence does not — and cannot — extend to them. See `NOTICE`.
 
 ### Why shipping the files here is fine
 

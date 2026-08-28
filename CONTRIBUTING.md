@@ -7,11 +7,7 @@ issue or a pull request.
 
 There is no contributor licence agreement and no copyright assignment. You keep the
 copyright in what you write; you licence it to the project under
-[AGPL-3.0-only](LICENSE), the same terms as everything else here.
-
-The consequence, stated plainly so nobody is surprised later: because copyright is spread
-across contributors, the project cannot be relicensed without everyone's agreement. That is
-a deliberate constraint, not an oversight.
+[MIT](LICENSE), the same terms as everything else here.
 
 ## Getting set up
 
